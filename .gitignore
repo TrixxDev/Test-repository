@@ -3,6 +3,10 @@
 *.elf
 *.bin
 *.iso
+*.img
+
+# Generated sources
+kernel/embedded_user.c
 
 # Local previews / screenshots
 .preview_*.png

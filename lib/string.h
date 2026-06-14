@@ -7,3 +7,4 @@ void  *memcpy(void *dest, const void *src, size_t count);
 void  *memmove(void *dest, const void *src, size_t count);
 size_t strlen(const char *s);
 int    strcmp(const char *a, const char *b);
+int    memcmp(const void *a, const void *b, size_t count);

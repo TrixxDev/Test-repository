@@ -45,6 +45,13 @@ void kheap_init(void)
     heap_end = HEAP_START;
     bytes_used = 0;
 
+    /* Pre-create the page tables backing the scratch page and the whole heap
+     * range so they exist (and get shared by reference) when per-process
+     * address spaces clone the kernel's high-memory mappings. */
+    vmm_ensure_table(0xCF000000u);                  /* scratch (vmm_temp_map) */
+    for (uint32_t a = HEAP_START; a < HEAP_START + HEAP_MAX; a += 0x400000)
+        vmm_ensure_table(a);
+
     grow_mapping(HEAP_INITIAL);
 
     head = (block_header_t *)HEAP_START;

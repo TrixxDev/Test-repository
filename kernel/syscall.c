@@ -1,5 +1,6 @@
 #include "syscall.h"
 #include "kio.h"
+#include "scheduler.h"
 
 /* Convention: eax = syscall number, ebx = first argument. */
 void syscall_handler(registers_t *regs)
@@ -12,10 +13,8 @@ void syscall_handler(registers_t *regs)
         /* Nothing to do here: the timer drives preemption. */
         break;
     case SYS_EXIT:
-        /* A real OS would tear down the process; for now just stop the CPU
-         * (interrupts stay on, so the rest of the system keeps running). */
-        for (;;)
-            __asm__ volatile("hlt");
+        /* Terminate the calling thread and hand the CPU to another. */
+        thread_exit();
         break;
     default:
         kprintf("\n[syscall] unknown call %u\n", regs->eax);

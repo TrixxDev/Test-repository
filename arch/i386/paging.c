@@ -10,6 +10,9 @@
 #define PD_VADDR  0xFFFFF000u
 #define PT_VADDR(pdi) (0xFFC00000u + ((pdi) << 12))
 
+/* Scratch page used to edit a page directory that isn't currently loaded. */
+#define TEMP_VADDR 0xCF000000u
+
 static uint32_t kernel_pd_phys;
 
 static inline void invlpg(uint32_t addr)
@@ -102,4 +105,71 @@ uint32_t vmm_get_physical(uint32_t virt)
     if (!(pt[pti] & PAGE_PRESENT))
         return 0;
     return (pt[pti] & 0xFFFFF000) | (virt & 0xFFF);
+}
+
+uint32_t vmm_kernel_directory(void) { return kernel_pd_phys; }
+
+uint32_t vmm_current_directory(void)
+{
+    uint32_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    return cr3 & 0xFFFFF000;
+}
+
+void vmm_switch_address_space(uint32_t pd_phys)
+{
+    __asm__ volatile("mov %0, %%cr3" : : "r"(pd_phys) : "memory");
+}
+
+void vmm_ensure_table(uint32_t virt)
+{
+    uint32_t pdi = virt >> 22;
+    uint32_t *pd = (uint32_t *)PD_VADDR;
+    uint32_t *pt = (uint32_t *)PT_VADDR(pdi);
+
+    if (!(pd[pdi] & PAGE_PRESENT)) {
+        uint32_t frame = pmm_alloc_frame();
+        pd[pdi] = frame | PAGE_PRESENT | PAGE_WRITE;
+        invlpg((uint32_t)pt);
+        for (int i = 0; i < 1024; i++)
+            pt[i] = 0;
+    }
+}
+
+void *vmm_temp_map(uint32_t phys)
+{
+    uint32_t *pt = (uint32_t *)PT_VADDR(TEMP_VADDR >> 22);
+    pt[(TEMP_VADDR >> 12) & 0x3FF] = (phys & 0xFFFFF000) | PAGE_PRESENT | PAGE_WRITE;
+    invlpg(TEMP_VADDR);
+    return (void *)TEMP_VADDR;
+}
+
+void vmm_temp_unmap(void)
+{
+    uint32_t *pt = (uint32_t *)PT_VADDR(TEMP_VADDR >> 22);
+    pt[(TEMP_VADDR >> 12) & 0x3FF] = 0;
+    invlpg(TEMP_VADDR);
+}
+
+uint32_t vmm_create_address_space(void)
+{
+    uint32_t pd = pmm_alloc_frame();
+    uint32_t *p = (uint32_t *)vmm_temp_map(pd);
+    uint32_t *cur = (uint32_t *)PD_VADDR;
+
+    for (int i = 0; i < 1024; i++)
+        p[i] = 0;
+
+    /* Share the kernel: low identity-mapped memory (indices 0-3) and all of
+     * high memory at/above 0xC0000000 (heap, scratch table, etc.). */
+    for (int i = 0; i < 4; i++)
+        p[i] = cur[i];
+    for (int i = 768; i < 1023; i++)
+        p[i] = cur[i];
+
+    /* Recursive entry points at this directory itself. */
+    p[1023] = pd | PAGE_PRESENT | PAGE_WRITE;
+
+    vmm_temp_unmap();
+    return pd;
 }

@@ -15,3 +15,26 @@ void vmm_unmap_page(uint32_t virt);
 
 /* Translate a virtual address to physical (0 if unmapped). */
 uint32_t vmm_get_physical(uint32_t virt);
+
+/* --- multiple address spaces (per-process page directories) --- */
+
+/* Physical address of the shared kernel page directory. */
+uint32_t vmm_kernel_directory(void);
+
+/* Physical address of the currently active page directory (CR3). */
+uint32_t vmm_current_directory(void);
+
+/* Create a new address space that shares the kernel mappings. Returns the
+ * physical address of its page directory. */
+uint32_t vmm_create_address_space(void);
+
+/* Load `pd_phys` into CR3. */
+void vmm_switch_address_space(uint32_t pd_phys);
+
+/* Pre-create the page table backing `virt` (so it can be shared by reference). */
+void vmm_ensure_table(uint32_t virt);
+
+/* Temporarily map a physical frame to a scratch virtual page (for editing an
+ * inactive page directory). */
+void *vmm_temp_map(uint32_t phys);
+void  vmm_temp_unmap(void);

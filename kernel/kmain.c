@@ -1,8 +1,8 @@
 /* AuroraOS kernel entry point.
  *
- * Stage 1 bring-up: parse the memory map, initialise physical/virtual memory
- * and the kernel heap, then demonstrate the scheduler (kernel threads) and a
- * ring 3 user program talking to the kernel via system calls. */
+ * Stage 2 bring-up: a VFS with tmpfs, an ELF loader, and a process model where
+ * each process owns an address space. The demo loads a real ELF program from
+ * the filesystem and runs it in ring 3 alongside a kernel thread. */
 #include <stdint.h>
 
 #include "kio.h"
@@ -17,12 +17,17 @@
 #include "paging.h"
 #include "kheap.h"
 #include "scheduler.h"
+#include "process.h"
+#include "vfs.h"
+#include "tmpfs.h"
+#include "fat32.h"
+#include "ata.h"
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
 
-extern void enter_user_mode(uint32_t entry_eip, uint32_t user_stack_top);
-extern uint8_t user_program[];
-extern uint8_t user_program_end[];
+/* The user program, embedded by the build (tools/bin2c.py). */
+extern const unsigned char user_elf[];
+extern const unsigned int  user_elf_len;
 
 static void banner(void)
 {
@@ -33,16 +38,13 @@ static void banner(void)
         "  / _ \\| || | '_/ _ \\ '_/ _` | \n"
         " /_/ \\_\\\\_,_|_| \\___/_| \\__,_| \n");
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
-    terminal_writestring("        AuroraOS  v0.2.0  (memory + multitasking)\n\n");
+    terminal_writestring("        AuroraOS  v0.3.0  (VFS + ELF + processes)\n\n");
 }
 
 static void print_memory_map(const multiboot_info_t *mb)
 {
-    if (!(mb->flags & MULTIBOOT_FLAG_MMAP)) {
-        kprintf("[mem] no memory map provided by bootloader\n");
+    if (!(mb->flags & MULTIBOOT_FLAG_MMAP))
         return;
-    }
-
     kprintf("[mem] BIOS memory map:\n");
     uint32_t ptr = mb->mmap_addr;
     uint32_t end = mb->mmap_addr + mb->mmap_length;
@@ -55,54 +57,16 @@ static void print_memory_map(const multiboot_info_t *mb)
     }
 }
 
-/* ---- scheduler demo: two preemptively-scheduled kernel threads ---- */
-
-static volatile int workers_active;
-
-static void busy_delay(void)
-{
-    for (volatile uint32_t i = 0; i < 6000000; i++)
-        ;
-}
-
-static void thread_a(void)
+/* A kernel thread that prints a few heartbeats and exits. */
+static void heartbeat_thread(void)
 {
     for (int i = 0; i < 4; i++) {
-        kprintf("    [thread A] step %d (ticks=%u)\n", i, pit_ticks());
-        busy_delay();
+        kprintf("    [kthread] heartbeat %d (ticks=%u)\n", i, pit_ticks());
+        for (volatile uint32_t d = 0; d < 5000000; d++)
+            ;
     }
-    kprintf("    [thread A] finished\n");
-    workers_active--;
-    task_exit();
-}
-
-static void thread_b(void)
-{
-    for (int i = 0; i < 4; i++) {
-        kprintf("    [thread B] step %d (ticks=%u)\n", i, pit_ticks());
-        busy_delay();
-    }
-    kprintf("    [thread B] finished\n");
-    workers_active--;
-    task_exit();
-}
-
-/* ---- ring 3 demo ---- */
-
-static void usermode_demo(void)
-{
-    const uint32_t code_v  = 0x40000000;
-    const uint32_t stack_v = 0x40100000;
-
-    vmm_map_page(code_v,  pmm_alloc_frame(), PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
-    vmm_map_page(stack_v, pmm_alloc_frame(), PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
-
-    uint32_t len = (uint32_t)(user_program_end - user_program);
-    for (uint32_t i = 0; i < len; i++)
-        ((uint8_t *)code_v)[i] = user_program[i];
-
-    kprintf("[user] entering ring 3...\n");
-    enter_user_mode(code_v, stack_v + PAGE_SIZE);
+    kprintf("    [kthread] done\n");
+    thread_exit();
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info)
@@ -136,43 +100,68 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
 
     kprintf("[boot] paging...\n");
     paging_init();
-
     kprintf("[boot] kernel heap...\n");
     kheap_init();
 
-    /* Quick heap sanity check. */
-    void *a = kmalloc(128);
-    void *b = kmalloc(4096);
-    kprintf("      kmalloc(128)=%p kmalloc(4096)=%p used=%u bytes\n",
-            a, b, (uint32_t)kheap_used());
-    kfree(a);
-    kfree(b);
-    kprintf("      after free: used=%u bytes\n", (uint32_t)kheap_used());
+    kprintf("[boot] VFS + tmpfs...\n");
+    vfs_init();
+    vfs_mount("/tmp", tmpfs_create());
+
+    /* Store the embedded program in tmpfs, proving the writable VFS pipeline. */
+    vfs_node_t *tmp = vfs_resolve("/tmp");
+    vfs_node_t *prog = vfs_create(tmp, "hello.elf", VFS_FILE);
+    vfs_write(prog, 0, user_elf_len, user_elf);
+    kprintf("      wrote /tmp/hello.elf (%u bytes)\n", user_elf_len);
+
+    /* Mount the FAT32 disk (ATA) if present. */
+    const char *exec_path = "/tmp/hello.elf";
+    kprintf("[boot] probing ATA disk...\n");
+    if (ata_init()) {
+        vfs_node_t *fat_root = fat32_mount();
+        if (fat_root) {
+            vfs_mount("/disk", fat_root);
+            kprintf("      FAT32 mounted at /disk; contents:\n");
+            char name[64];
+            for (uint32_t i = 0; vfs_readdir(fat_root, i, name, sizeof(name)) == 0; i++)
+                kprintf("        /disk/%s\n", name);
+            if (vfs_resolve("/disk/HELLO.ELF"))
+                exec_path = "/disk/HELLO.ELF";
+        } else {
+            kprintf("      no FAT32 filesystem found\n");
+        }
+    } else {
+        kprintf("      no ATA disk attached\n");
+    }
 
     __asm__ volatile("sti");
 
-    /* --- multitasking demo --- */
+    kprintf("[boot] scheduler...\n");
+    scheduler_init();
+
+    /* Load the program from the VFS and launch it as a process. */
+    vfs_node_t *f = vfs_resolve(exec_path);
+    uint8_t *buf = (uint8_t *)kmalloc(f->size);
+    vfs_read(f, 0, f->size, buf);
+
     terminal_setcolor(VGA_LIGHT_GREEN, VGA_BLACK);
-    kprintf("\n[sched] launching two kernel threads:\n");
+    kprintf("\n[exec] spawning ring-3 process from %s, plus a kernel thread:\n", exec_path);
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
 
-    workers_active = 2;
-    scheduler_init();
-    task_create(thread_a);
-    task_create(thread_b);
+    int pid = process_spawn(buf, f->size);
+    kprintf("[exec] process started (tid=%d)\n", pid);
+    thread_create_kernel(heartbeat_thread);
+
     scheduler_enable();
 
-    while (workers_active > 0)
+    /* Wait until only this (main) thread remains. */
+    while (thread_count() > 1)
         __asm__ volatile("hlt");
 
     scheduler_disable();
-    kprintf("[sched] all threads done.\n\n");
+    terminal_setcolor(VGA_LIGHT_CYAN, VGA_BLACK);
+    kprintf("\n[ok] process + thread finished. AuroraOS idle.\n");
+    terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
 
-    /* --- ring 3 demo --- */
-    terminal_setcolor(VGA_LIGHT_MAGENTA, VGA_BLACK);
-    usermode_demo();
-
-    /* usermode_demo never returns; stay responsive just in case. */
     for (;;)
         __asm__ volatile("hlt");
 }
