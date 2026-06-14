@@ -25,6 +25,23 @@ enter_user_mode:
     pushl %ecx                  /* entry EIP */
     iret
 
+/* void return_to_user(registers_t *r)
+ * Restore a full saved register frame and iret to ring 3. Used by fork (child
+ * resumes with eax=0) and exec (jump to a fresh image). The layout matches the
+ * tail of isr_common_stub. */
+.global return_to_user
+.type return_to_user, @function
+return_to_user:
+    movl 4(%esp), %esp          /* esp -> registers_t */
+    popl %eax                   /* saved ds */
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %fs
+    movw %ax, %gs
+    popa                        /* edi..eax */
+    addl $8, %esp               /* skip int_no, err_code */
+    iret
+
 /* A minimal ring 3 program: prints "RING3 alive" via syscalls, then loops
  * forever issuing yields. Uses only immediates + int, so it is position
  * independent and safe to copy into a user page. */

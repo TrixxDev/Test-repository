@@ -1,12 +1,14 @@
-/* PS/2 keyboard driver: translates scancode set 1 to ASCII and echoes input. */
+/* PS/2 keyboard driver: scancode set 1 -> ASCII, echo, and an input buffer that
+ * blocking readers (stdin) can wait on. */
 #include "keyboard.h"
 #include "isr.h"
 #include "io.h"
 #include "kio.h"
+#include "scheduler.h"
 
 #define KBD_DATA_PORT 0x60
+#define KBUF_SIZE 256
 
-/* US QWERTY layout, scancode set 1, unshifted. */
 static const char keymap[128] = {
     0,   27, '1','2','3','4','5','6','7','8','9','0','-','=','\b',
     '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',
@@ -25,30 +27,63 @@ static const char keymap_shift[128] = {
 
 static int shift_down;
 
+static char     kbuf[KBUF_SIZE];
+static volatile int khead, ktail;
+static thread_t *waiter;
+
+static void kbuf_push(char c)
+{
+    int next = (ktail + 1) % KBUF_SIZE;
+    if (next != khead) {
+        kbuf[ktail] = c;
+        ktail = next;
+    }
+    if (waiter) {
+        thread_wake(waiter);
+        waiter = NULL;
+    }
+}
+
 static void on_key(registers_t *regs)
 {
     (void)regs;
     uint8_t scancode = inb(KBD_DATA_PORT);
 
-    /* High bit set => key release. */
     if (scancode & 0x80) {
         uint8_t released = scancode & 0x7F;
-        if (released == 0x2A || released == 0x36)   /* left/right shift */
+        if (released == 0x2A || released == 0x36)
             shift_down = 0;
         return;
     }
-
     if (scancode == 0x2A || scancode == 0x36) {
         shift_down = 1;
         return;
     }
 
     char c = shift_down ? keymap_shift[scancode] : keymap[scancode];
-    if (c)
-        kputchar(c);
+    if (c) {
+        kputchar(c);        /* local echo */
+        kbuf_push(c);
+    }
+}
+
+/* Blocking read of one character from the keyboard buffer. */
+int keyboard_getchar(void)
+{
+    for (;;) {
+        __asm__ volatile("cli");
+        if (khead != ktail) {
+            char c = kbuf[khead];
+            khead = (khead + 1) % KBUF_SIZE;
+            __asm__ volatile("sti");
+            return (unsigned char)c;
+        }
+        waiter = thread_current();
+        thread_block();     /* yields with interrupts off; resumes on input */
+    }
 }
 
 void keyboard_install(void)
 {
-    register_interrupt_handler(33, on_key);         /* IRQ1 -> vector 33 */
+    register_interrupt_handler(33, on_key);     /* IRQ1 -> vector 33 */
 }

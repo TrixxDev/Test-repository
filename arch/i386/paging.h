@@ -38,3 +38,7 @@ void vmm_ensure_table(uint32_t virt);
  * inactive page directory). */
 void *vmm_temp_map(uint32_t phys);
 void  vmm_temp_unmap(void);
+
+/* Free all user frames, user page tables, and the page directory itself of an
+ * address space. The directory must NOT be the currently loaded one. */
+void vmm_destroy_address_space(uint32_t pd_phys);

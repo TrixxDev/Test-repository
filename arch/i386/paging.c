@@ -173,3 +173,28 @@ uint32_t vmm_create_address_space(void)
     vmm_temp_unmap();
     return pd;
 }
+
+void vmm_destroy_address_space(uint32_t pd_phys)
+{
+    /* Snapshot the user PD entries (indices 256..767), since walking each page
+     * table reuses the single scratch slot. */
+    uint32_t pd_user[512];
+    uint32_t *p = (uint32_t *)vmm_temp_map(pd_phys);
+    for (int i = 0; i < 512; i++)
+        pd_user[i] = p[256 + i];
+    vmm_temp_unmap();
+
+    for (int i = 0; i < 512; i++) {
+        if (!(pd_user[i] & PAGE_PRESENT))
+            continue;
+        uint32_t pt_frame = pd_user[i] & 0xFFFFF000;
+        uint32_t *pt = (uint32_t *)vmm_temp_map(pt_frame);
+        for (int j = 0; j < 1024; j++)
+            if (pt[j] & PAGE_PRESENT)
+                pmm_free_frame(pt[j] & 0xFFFFF000);
+        vmm_temp_unmap();
+        pmm_free_frame(pt_frame);
+    }
+
+    pmm_free_frame(pd_phys);
+}

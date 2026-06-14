@@ -21,10 +21,10 @@ LDFLAGS := -m elf_i386 -no-pie -T linker.ld
 KERNEL  := aurora.elf
 DISK    := disk.img
 
-# The user program is built separately and embedded into the kernel image so it
-# can be loaded by the ELF loader at runtime (also written to the FAT32 disk).
-USER_ELF   := user/hello.elf
+# User programs are built separately. init is embedded into the kernel image as
+# a fallback; both init and child are written to the FAT32 disk.
 EMBEDDED   := kernel/embedded_user.c
+USER_PROGS := user/init.elf user/child.elf
 
 C_SRC := $(shell find kernel arch drivers lib fs -name '*.c')
 C_SRC := $(sort $(C_SRC) $(EMBEDDED))
@@ -39,18 +39,18 @@ $(KERNEL): $(OBJ) linker.ld
 	$(LD) $(LDFLAGS) $(OBJ) -o $@
 	@echo "Built $(KERNEL)"
 
-# --- user program -> embedded blob ---
-$(USER_ELF): user/hello.c user/user.ld
+# --- user programs ---
+user/%.elf: user/%.c user/ulib.h user/user.ld
 	$(CC) --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
-	      -O2 -c user/hello.c -o user/hello.o
-	$(LD) -m elf_i386 -no-pie -T user/user.ld user/hello.o -o $@
+	      -O2 -Iuser -c user/$*.c -o user/$*.o
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/$*.o -o $@
 
-$(EMBEDDED): $(USER_ELF) tools/bin2c.py
-	python3 tools/bin2c.py $(USER_ELF) user_elf > $(EMBEDDED)
+$(EMBEDDED): user/init.elf tools/bin2c.py
+	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
 
-# --- FAT32 disk image containing the user program ---
-$(DISK): $(USER_ELF) tools/mkfat32.py
-	python3 tools/mkfat32.py $(DISK) HELLO.ELF $(USER_ELF)
+# --- FAT32 disk image containing the user programs ---
+$(DISK): $(USER_PROGS) tools/mkfat32.py
+	python3 tools/mkfat32.py $(DISK) INIT.ELF user/init.elf CHILD.ELF user/child.elf
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -69,4 +69,4 @@ debug: $(KERNEL) $(DISK)
 	    -drive file=$(DISK),format=raw,if=ide -s -S
 
 clean:
-	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/hello.o $(USER_ELF)
+	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o $(USER_PROGS)
