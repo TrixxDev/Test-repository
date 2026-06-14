@@ -1,0 +1,9 @@
+# Build artifacts
+*.o
+*.elf
+*.bin
+*.iso
+
+# Local previews / screenshots
+.preview_*.png
+*.ppm
