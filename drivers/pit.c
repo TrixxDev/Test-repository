@@ -5,11 +5,19 @@
 #define PIT_FREQUENCY 1193180
 
 static volatile uint32_t ticks;
+static void (*tick_hook)(void);
 
 static void on_tick(registers_t *regs)
 {
     (void)regs;
     ticks++;
+    if (tick_hook)
+        tick_hook();
+}
+
+void pit_set_tick_hook(void (*hook)(void))
+{
+    tick_hook = hook;
 }
 
 void pit_install(uint32_t frequency)

@@ -2,6 +2,7 @@
 #include "idt.h"
 #include "io.h"
 #include "kio.h"
+#include "syscall.h"
 
 /* Exception stubs (isr0..isr31) and IRQ stubs (irq0..irq15) from interrupt.S. */
 extern void isr0(void);  extern void isr1(void);  extern void isr2(void);
@@ -22,6 +23,8 @@ extern void irq6(void);  extern void irq7(void);  extern void irq8(void);
 extern void irq9(void);  extern void irq10(void); extern void irq11(void);
 extern void irq12(void); extern void irq13(void); extern void irq14(void);
 extern void irq15(void);
+
+extern void isr128(void);   /* int 0x80 system call gate */
 
 static isr_t handlers[256];
 
@@ -94,6 +97,9 @@ void isr_install(void)
     idt_set_gate(45, (uint32_t)irq13, 0x08, 0x8E);
     idt_set_gate(46, (uint32_t)irq14, 0x08, 0x8E);
     idt_set_gate(47, (uint32_t)irq15, 0x08, 0x8E);
+
+    /* System call gate: DPL 3 so ring 3 code may invoke `int 0x80`. */
+    idt_set_gate(0x80, (uint32_t)isr128, 0x08, 0xEE);
 }
 
 void register_interrupt_handler(uint8_t n, isr_t handler)
@@ -132,6 +138,11 @@ static const char *exception_messages[32] = {
 /* Called from the assembly stub for CPU exceptions (vectors 0-31). */
 void isr_handler(registers_t *regs)
 {
+    if (regs->int_no == 0x80) {
+        syscall_handler(regs);
+        return;
+    }
+
     const char *msg = regs->int_no < 32 ? exception_messages[regs->int_no]
                                         : "Unknown";
     kprintf("\n*** CPU EXCEPTION: %s (int=%u err=%u eip=0x%x)\n",

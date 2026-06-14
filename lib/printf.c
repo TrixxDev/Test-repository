@@ -1,6 +1,7 @@
 /* Tiny printf implementation for the kernel console. */
 #include "kio.h"
 #include "serial.h"
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdbool.h>
 
@@ -46,6 +47,11 @@ static void print_int(long value)
 
 void kprintf(const char *fmt, ...)
 {
+    /* Keep each call atomic so preemptive context switches don't interleave
+     * output mid-line. The previous interrupt state is restored on exit. */
+    uint32_t flags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags)::"memory");
+
     va_list ap;
     va_start(ap, fmt);
 
@@ -85,8 +91,7 @@ void kprintf(const char *fmt, ...)
             kputchar('%');
             break;
         case '\0':
-            va_end(ap);
-            return;
+            goto done;
         default:
             kputchar('%');
             kputchar(*p);
@@ -94,5 +99,7 @@ void kprintf(const char *fmt, ...)
         }
     }
 
+done:
     va_end(ap);
+    __asm__ volatile("push %0; popf" ::"r"(flags) : "memory", "cc");
 }

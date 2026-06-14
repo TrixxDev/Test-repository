@@ -7,3 +7,6 @@ void pit_install(uint32_t frequency);
 
 /* Number of timer ticks since boot. */
 uint32_t pit_ticks(void);
+
+/* Install a callback invoked on every tick (used by the scheduler). */
+void pit_set_tick_hook(void (*hook)(void));

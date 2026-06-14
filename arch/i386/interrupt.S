@@ -72,6 +72,8 @@ ISR_NOERR 29
 ISR_ERR   30
 ISR_NOERR 31
 
+ISR_NOERR 128                   /* system call vector (int 0x80) */
+
 IRQ 0, 32
 IRQ 1, 33
 IRQ 2, 34
