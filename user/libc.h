@@ -36,6 +36,23 @@ static inline int msgrecv(void *b, int n, int *from)     { return _syscall(SYS_M
 static inline int svc_register(const char *name)         { return _syscall(SYS_REGISTER, (int)name, 0, 0); }
 static inline int svc_lookup(const char *name)           { return _syscall(SYS_LOOKUP, (int)name, 0, 0); }
 
+/* sockets (loopback) + poll + uid */
+static inline int socket(int domain, int type)           { return _syscall(SYS_SOCKET, domain, type, 0); }
+static inline int sock_link(int handle_a, int handle_b)  { return _syscall(SYS_SOCK_LINK, handle_a, handle_b, 0); }
+static inline int poll(struct pollfd *fds, int nfds, int timeout) { return _syscall(SYS_POLL, (int)fds, nfds, timeout); }
+static inline int getuid(void)                           { return _syscall(SYS_GETUID, 0, 0, 0); }
+static inline int setuid(int uid)                        { return _syscall(SYS_SETUID, uid, 0, 0); }
+
+/* send/recv are just write/read on a connected socket fd. */
+static inline int send(int fd, const void *b, int n)     { return write(fd, b, n); }
+static inline int recv(int fd, void *b, int n)           { return read(fd, b, n); }
+
+/* netd-brokered connection setup (user/libc/net.c). */
+int bind(int fd, int port);
+int listen(int fd);
+int connect(int fd, int port);
+int accept(int port);
+
 /* ---- string.c ---- */
 size_t strlen(const char *s);
 int    strcmp(const char *a, const char *b);

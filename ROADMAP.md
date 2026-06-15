@@ -83,9 +83,17 @@
 
 ## Этап 8 — Сеть
 
-- [ ] **8A: loopback** (`127.0.0.1`) без сетевой карты — для тестов сокетов/стека
-- [ ] **8B: netd** — сетевой стек как userspace-сервис (не в ядре)
-- [ ] Ethernet-драйвер, ARP, IPv4, UDP, TCP, DNS (в таком порядке)
+- [x] **8A: loopback** (`AF_LOOPBACK`) без сетевой карты — для тестов сокетов
+  (v0.8.0). Ядро: `struct socket` (только механизм), `socket`/`sock_link`/`poll`.
+  Демон `netd` владеет портами и сводит `bind`/`connect`/`accept` через IPC.
+  Проверено `echosrv`/`echocli` (`client → netd → server → обратно`). См.
+  [`docs/NETWORKING.md`](docs/NETWORKING.md).
+- [x] **netd** как userspace-сервис (стек вне ядра)
+- [x] `poll()` для ожидания готовности сокетов
+- [ ] **8B**: Ethernet-драйвер (virtio-net/rtl8139), затем ARP → IPv4 → UDP →
+  TCP → DNS (в таком порядке), за тем же netd-барьером
+- [ ] Зачаток безопасности расширить: права rwx на VFS-узлах (uid уже есть)
+- Вне области Этапа 8: TLS, HTTPS, IPv6, DHCP, Wi-Fi
 
 ## Этап 9 — Графика (тут начинается «как у macOS»)
 

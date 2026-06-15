@@ -25,8 +25,9 @@ DISK    := disk.img
 # image as a fallback; all programs are written to the FAT32 disk.
 EMBEDDED   := kernel/embedded_user.c
 USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
-              user/cat.elf user/grep.elf user/orphan.elf
-LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o
+              user/cat.elf user/grep.elf user/orphan.elf \
+              user/netd.elf user/echosrv.elf user/echocli.elf
+LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o
 
 C_SRC := $(shell find kernel arch drivers lib fs -name '*.c')
 C_SRC := $(sort $(C_SRC) $(EMBEDDED))
@@ -63,6 +64,7 @@ $(DISK): $(USER_PROGS) user/poem.txt tools/mkfat32.py
 	python3 tools/mkfat32.py $(DISK) INIT.ELF user/init.elf LOGGER.ELF user/logger.elf \
 	    SH.ELF user/sh.elf HELLO.ELF user/hello.elf \
 	    CAT.ELF user/cat.elf GREP.ELF user/grep.elf ORPHAN.ELF user/orphan.elf \
+	    NETD.ELF user/netd.elf ECHOSRV.ELF user/echosrv.elf ECHOCLI.ELF user/echocli.elf \
 	    POEM.TXT user/poem.txt
 
 %.o: %.c

@@ -27,8 +27,35 @@
 #define SYS_REGISTER 17 /* register(name)            -> 0 / -1       */
 #define SYS_LOOKUP  18  /* lookup(name)              -> pid / -1     */
 #define SYS_KILL    19  /* kill(pid)                 -> 0 / -1       */
+#define SYS_SOCKET  20  /* socket(domain, type)      -> fd / -1      */
+#define SYS_SOCK_LINK 21/* sock_link(handle_a, handle_b) -> 0 / -1   */
+#define SYS_POLL    22  /* poll(pollfd*, nfds, tmo)  -> nready / -1  */
+#define SYS_GETUID  23  /* getuid()                  -> uid          */
+#define SYS_SETUID  24  /* setuid(uid)               -> 0 / -1       */
 
 /* wait() flags (passed in arg2) */
 #define WNOHANG    1    /* return 0 immediately if no child has exited */
 
-#define SYS_MAX    20   /* one past the last valid syscall number    */
+#define SYS_MAX    25   /* one past the last valid syscall number    */
+
+/* ---- socket layer (AF_LOOPBACK only for now) ---- */
+#define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */
+#define SOCK_STREAM  1  /* reliable, ordered byte stream             */
+
+/* A kernel socket is named across processes by a packed (pid, fd) handle so the
+ * netd broker can join two endpoints with sock_link(). fds are small, so 16
+ * bits each is ample. */
+#define SOCK_HANDLE(pid, fd) (((pid) << 16) | ((fd) & 0xFFFF))
+#define SOCK_HANDLE_PID(h)   (((h) >> 16) & 0xFFFF)
+#define SOCK_HANDLE_FD(h)    ((h) & 0xFFFF)
+
+/* poll() event/return bits and descriptor record (ABI: shared kernel+user). */
+#define POLLIN   0x01   /* readable without blocking (data or EOF)   */
+#define POLLOUT  0x04   /* writable without blocking                 */
+#define POLLERR  0x08   /* error / peer gone                         */
+
+struct pollfd {
+    int   fd;
+    short events;       /* requested: POLLIN | POLLOUT               */
+    short revents;      /* returned: ready bits                      */
+};

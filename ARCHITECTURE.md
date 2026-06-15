@@ -21,21 +21,27 @@ This is the system-level overview. Detailed contracts live in [`docs/`](docs/):
 
 ```
                       ring 3 (userland)
-  init ── logger ── sh ── cat/grep/hello/orphan        processes
-   │        │       │
-   └──────── IPC (pipes, messages, name registry) ─────┐
+  init ─ logger ─ netd ─ sh ─ cat/grep/hello/orphan/echosrv/echocli   processes
+   │       │       │     │
+   └─ IPC (pipes, messages, name registry) + sockets (socket/poll) ───┐
                                                         │  int 0x80
 ====================== ring 0 (kernel) =================│=========
   syscall dispatch                                      ▼
-  ├─ process model (PCB, fork/exec/wait, fds, mailbox)
+  ├─ process model (PCB, uid, fork/exec/wait, fds, mailbox)
   ├─ scheduler (threads, states, context switch)
   ├─ memory (PMM, paging, per-proc address space, kheap)
+  ├─ socket layer (struct socket endpoints, sock_link, poll) — mechanism only
   ├─ VFS ── tmpfs / FAT32 / console
   ├─ drivers (ata, keyboard, pit, serial, vga)
   └─ arch (GDT/TSS, IDT, ISR/IRQ, PIC)
                           │
                        hardware (QEMU i686)
 ```
+
+The networking "stack" is deliberately **not** in the kernel: the kernel only
+provides socket endpoints + a privileged `sock_link`, and the `netd` daemon owns
+ports and the bind/connect/accept rendezvous. See
+[docs/NETWORKING.md](docs/NETWORKING.md).
 
 ## Boot flow
 
@@ -85,9 +91,10 @@ See [docs/ABI.md](docs/ABI.md).
 
 ## System call interface
 
-`int 0x80`; `eax` = number, `ebx`/`ecx`/`edx` = args, `eax` = return. 19 calls:
-process control, fds, pipes/dup2, sbrk, message-passing IPC, and the name
-registry. Full table in [docs/SYSCALLS.md](docs/SYSCALLS.md).
+`int 0x80`; `eax` = number, `ebx`/`ecx`/`edx` = args, `eax` = return. 24 calls:
+process control, fds, pipes/dup2, sbrk, message-passing IPC, the name registry,
+loopback sockets (`socket`/`sock_link`/`poll`), and uid (`getuid`/`setuid`).
+Full table in [docs/SYSCALLS.md](docs/SYSCALLS.md).
 
 ## Filesystem
 
@@ -110,8 +117,27 @@ Two mechanisms (see [docs/IPC.md](docs/IPC.md)):
   and read/write-end refcounts; the shell uses them for `a | b`.
 - **Message passing** — per-process mailboxes (`msgsend`/`msgrecv`) plus a
   **named service registry** (`register`/`lookup`) so clients find services by
-  name. This is the foundation for future daemons (netd, window server,
-  aurorad).
+  name. This is the foundation for the daemons (logger, netd) and future ones
+  (window server, aurorad).
+
+## Sockets & networking (Phase 8A)
+
+Loopback (`AF_LOOPBACK`) stream sockets, built as a userspace service over IPC.
+The kernel's socket layer is **mechanism only** — `struct socket` endpoints
+backed by fds, joined by the root-only `sock_link`, with `poll` for readiness;
+`send`/`recv` are just `write`/`read`. The `netd` daemon is the **stack**: it
+owns ports and the bind/connect/accept rendezvous, then asks the kernel to link
+the two endpoints, after which data flows endpoint-to-endpoint. Verified end to
+end by `echosrv`/`echocli`. Full design in [docs/NETWORKING.md](docs/NETWORKING.md).
+
+## Security (foundation)
+
+Each process carries a `uid` (`kernel/process.h`), inherited across
+`fork`/`exec`/spawn. The kernel and its services (init, logger, netd) run as
+root (uid 0); the shell — and therefore everything it launches — runs as uid
+1000. `setuid` only drops privilege (root may pick any uid; a non-root process
+cannot lower its uid number), and `sock_link` is gated to root. rwx permissions
+on VFS nodes are the next step (see [NEXT_STEPS.md](NEXT_STEPS.md)).
 
 ## Userland & build pipeline
 

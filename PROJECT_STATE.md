@@ -8,15 +8,17 @@ the forward plan in [NEXT_STEPS.md](NEXT_STEPS.md).
 
 AuroraOS is a from-scratch, 32-bit (i686) operating system: a monolithic kernel
 with a Unix-like userland. It boots in QEMU, runs ELF programs in ring 3, has a
-filesystem stack, an interactive shell, pipes, a small libc, and a userspace
-service model (init + daemons + message-passing IPC).
+filesystem stack, an interactive shell, pipes, a small libc, a userspace
+service model (init + daemons + message-passing IPC), and loopback sockets
+brokered by a userspace network daemon.
 
 It has moved well past a "teaching kernel" — it is an early Unix-like execution
-environment. It is **not** yet a daily-driver OS (no networking, no GUI, no FS
-writes to disk, no multi-user/security model).
+environment that is starting to look like a platform of services. It is **not**
+yet a daily-driver OS (no external networking yet — loopback only; no GUI; no FS
+writes to disk; only a uid foundation, not a full permission model).
 
-- **Current version:** v0.7.1
-- **Size:** ~4,700 lines of C / assembly across kernel + drivers + fs + libc +
+- **Current version:** v0.8.0
+- **Size:** ~5,600 lines of C / assembly across kernel + drivers + fs + libc +
   userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
   `qemu-system-i386 -kernel`.
@@ -38,10 +40,11 @@ writes to disk, no multi-user/security model).
 | Filesystem | ✅ | VFS (mounts, vnodes, ops); tmpfs (rw); FAT32 (read-only) over ATA; console device. |
 | Executables | ✅ | ELF32 loader (PT_LOAD), `argc`/`argv` setup, crt0. |
 | IPC | ✅ | Pipes (`pipe`/`dup2`), message passing (`msgsend`/`msgrecv`), named service registry. |
-| Userland | ✅ | mini libc; `init`, `logger`, `sh`, `cat`, `grep`, `hello`, `orphan`. |
-| Networking | ❌ | Not started (next major phase). |
+| Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
+| Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`. |
+| Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
 | Graphics | ❌ | Text mode only. |
-| Security / multi-user | ❌ | Single-user, no permissions. |
+| Security / multi-user | 🟡 | uid foundation (root vs user, `getuid`/`setuid`, propagated across fork/exec); rwx on VFS nodes not yet enforced. |
 
 ## What you can do today
 
@@ -51,6 +54,9 @@ Boot and get an interactive shell that composes real programs:
 aurora> hello one two            # argv + malloc demo
 aurora> cat /disk/poem.txt | grep aurora   # pipes between two processes
 aurora> log system online        # IPC message to the logger daemon
+aurora> id                       # shows uid=1000 (the shell runs unprivileged)
+aurora> echosrv &                # loopback echo server (binds port 7 via netd)
+aurora> echocli hello-loopback   # client -> netd -> server -> back
 aurora> orphan                   # orphan reparented to init and reaped
 aurora> hello job &              # background job, auto-reaped
 aurora> exit                     # graceful shutdown of services
@@ -75,11 +81,12 @@ arch/i386/   CPU/arch: boot, GDT/TSS, IDT, ISR, PMM, paging, context switch, rin
 drivers/     vga, serial, keyboard, pit, ata, console
 fs/          vfs, tmpfs, fat32
 lib/         freestanding kernel lib: string, printf (kprintf), kheap
-kernel/      kmain, scheduler, process, pipe, elf, syscall
-include/     kio.h, multiboot.h, syscall_abi.h (shared ABI), syscall.h
-user/        crt0, libc (libc.h + libc/), programs (init, logger, sh, cat, grep, hello, orphan)
+kernel/      kmain, scheduler, process, pipe, socket, elf, syscall
+include/     kio.h, multiboot.h, syscall_abi.h (shared ABI), syscall.h, net.h (netd protocol)
+user/        crt0, libc (libc.h + libc/), programs (init, logger, netd, sh, cat,
+             grep, hello, orphan, echosrv, echocli)
 tools/       bin2c.py (embed ELF), mkfat32.py (build FAT32 image)
-docs/        ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC
+docs/        ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING
 linker.ld    kernel link map (load at 1 MiB)
 Makefile     clang/lld cross-build + user programs + disk image
 ```

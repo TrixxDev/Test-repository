@@ -2,6 +2,7 @@
 #include "kio.h"
 #include "scheduler.h"
 #include "process.h"
+#include "socket.h"
 
 /* Convention: eax = syscall number, ebx/ecx/edx = arguments. The return value
  * is written back into regs->eax (restored to the user's eax by the stub). */
@@ -84,6 +85,30 @@ void syscall_handler(registers_t *regs)
 
     case SYS_KILL:
         regs->eax = (uint32_t)sys_kill((int)regs->ebx);
+        break;
+
+    case SYS_SOCKET:
+        regs->eax = (uint32_t)sys_socket((int)regs->ebx, (int)regs->ecx);
+        break;
+
+    case SYS_SOCK_LINK:
+        /* Privileged broker primitive: only root (netd) may join endpoints. */
+        if (process_current()->uid != 0)
+            regs->eax = (uint32_t)-1;
+        else
+            regs->eax = (uint32_t)sock_link((uint32_t)regs->ebx, (uint32_t)regs->ecx);
+        break;
+
+    case SYS_POLL:
+        regs->eax = (uint32_t)sys_poll((struct pollfd *)regs->ebx, (int)regs->ecx, (int)regs->edx);
+        break;
+
+    case SYS_GETUID:
+        regs->eax = (uint32_t)sys_getuid();
+        break;
+
+    case SYS_SETUID:
+        regs->eax = (uint32_t)sys_setuid((int)regs->ebx);
         break;
 
     default:

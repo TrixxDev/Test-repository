@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include "isr.h"
 #include "vfs.h"
+#include "syscall_abi.h"
 
 #define MAX_FDS   16
 #define MSG_MAX   256
@@ -23,7 +24,7 @@ typedef struct message {
     char data[MSG_MAX];
 } message_t;
 
-enum fd_role { FD_NORMAL = 0, FD_PIPE_R, FD_PIPE_W };
+enum fd_role { FD_NORMAL = 0, FD_PIPE_R, FD_PIPE_W, FD_SOCKET };
 
 typedef struct file {
     vfs_node_t *node;
@@ -35,6 +36,7 @@ typedef struct file {
 typedef struct process {
     int      pid;
     int      ppid;
+    int      uid;                   /* owner: 0 = root (kernel/init/services) */
     uint32_t pd_phys;               /* address space */
     int      state;
     int      exit_code;
@@ -81,3 +83,13 @@ int  sys_msgsend(int pid, const void *buf, int len);
 int  sys_msgrecv(void *buf, int len, int *from);
 int  sys_register(const char *name);
 int  sys_lookup(const char *name);
+
+/* sockets (loopback) + poll */
+int  sys_socket(int domain, int type);
+int  sys_poll(struct pollfd *fds, int nfds, int timeout);
+int  sys_getuid(void);
+int  sys_setuid(int uid);
+
+/* Resolve a (pid, fd) to its socket VFS node, or NULL if it is not a socket
+ * descriptor in that process. Used by the netd broker via sock_link(). */
+vfs_node_t *proc_socket_node(int pid, int fd);

@@ -15,10 +15,11 @@ Currently one thread per process; the structures allow more later.
 ```
 process_t {
     pid, ppid
+    uid                // owner: 0 = root, else a user
     pd_phys            // address space (CR3 value)
     state              // RUNNING / ZOMBIE / UNUSED
     exit_code
-    fds[MAX_FDS]       // file descriptor table
+    fds[MAX_FDS]       // file descriptor table (FD_NORMAL/PIPE/SOCKET)
     user_brk           // top of the user heap (sbrk)
     thread             // the process's thread
     parent
@@ -28,6 +29,17 @@ process_t {
 ```
 
 `pid 0` is the kernel itself (the boot thread). `pid 1` is `init`.
+
+## uid (security foundation)
+
+Each process has a `uid`, inherited across `fork`/`exec`/spawn. The kernel and
+its services (init, logger, netd) run as **root (uid 0)**; `init` starts the
+shell with `setuid(1000)`, so the shell and everything it launches run as an
+unprivileged **user (uid 1000)** — `id` in the shell shows it. `setuid` only
+drops privilege (root may set any uid; a non-root process may not lower its uid
+number), and the privileged `sock_link` syscall is rejected for non-root. This
+is the groundwork for rwx permissions on VFS nodes (see
+[../NEXT_STEPS.md](../NEXT_STEPS.md)); those are not enforced yet.
 
 ## Lifecycle
 

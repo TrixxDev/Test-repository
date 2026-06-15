@@ -58,13 +58,18 @@ So clients can find services without hardcoding pids:
 
 ```
 kernel
-  └─ init (pid 1)
-       ├─ logger   (registers "log";  msgrecv loop -> console)
-       └─ shell    (lookup "log"; msgsend log lines)
+  └─ init (pid 1, root)
+       ├─ logger   (root; registers "log"; msgrecv loop -> console)
+       ├─ netd     (root; registers "net"; brokers loopback sockets)
+       └─ shell    (uid 1000; lookup "log"/"net"; msgsend requests)
 ```
 
 Verified: the shell's `log <text>` builtin resolves `"log"` and sends a
 message; the logger daemon prints `[log] (pid N) <text>`.
+
+The same registry + message passing underpins **sockets**: `bind`/`connect`/
+`accept` are RPCs to `netd` (registered as `"net"`), which then joins the two
+kernel socket endpoints. See [NETWORKING.md](NETWORKING.md).
 
 ## Design notes
 

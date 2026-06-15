@@ -25,6 +25,11 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 17 | `register` | `register(const char *name) -> 0/-1` | Register the current pid under a service name. |
 | 18 | `lookup` | `lookup(const char *name) -> pid/-1` | Resolve a service name to a pid. |
 | 19 | `kill`   | `kill(int pid) -> 0/-1` | Forcibly terminate another process (force-kill fallback for shutdown). |
+| 20 | `socket` | `socket(int domain, int type) -> fd/-1` | Create an unconnected socket endpoint (AF_LOOPBACK / SOCK_STREAM). Backed by an fd, so `read`=recv, `write`=send, `close` tear it down. |
+| 21 | `sock_link` | `sock_link(int handle_a, int handle_b) -> 0/-1` | Join two unconnected endpoints into a connected pair. Each handle is `SOCK_HANDLE(pid, fd)`. **Root only** — the `netd` broker uses it; ordinary processes get `-1`. |
+| 22 | `poll`   | `poll(struct pollfd *fds, int nfds, int timeout) -> nready/-1` | Wait for descriptors to become ready (`POLLIN`/`POLLOUT`, or `POLLERR`). `timeout==0` polls once; otherwise blocks until a socket peer makes progress. |
+| 23 | `getuid` | `getuid() -> uid` | Owner uid of the calling process. |
+| 24 | `setuid` | `setuid(int uid) -> 0/-1` | Drop privilege: root may set any uid; a non-root process may not lower its uid number. |
 
 ## Notes
 
@@ -34,6 +39,10 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
   thread lets device IRQs wake blocked processes.
 - `exec` always passes at least `argv[0]` (the path) if the caller passes no
   argv.
+- Sockets reuse the fd machinery: there is no separate `send`/`recv`/`bind`/
+  `connect`/`accept` syscall. `send`/`recv` are `write`/`read`; `bind`/`connect`/
+  `accept` are libc RPCs to `netd` (see [NETWORKING.md](NETWORKING.md)). The only
+  socket syscalls are `socket`, `sock_link` and `poll`.
 
 Adding a syscall: append a number in `syscall_abi.h`, implement the backend
 (usually in `kernel/process.c`), add a `case` in `kernel/syscall.c`, and a

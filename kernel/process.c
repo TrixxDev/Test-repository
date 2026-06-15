@@ -8,6 +8,7 @@
 #include "kio.h"
 #include "console.h"
 #include "pipe.h"
+#include "socket.h"
 
 #define MAX_PROCS    32
 #define USTACK_TOP   0xC0000000u
@@ -55,6 +56,8 @@ static void file_unref(file_t *f)
             pipe_close_end(f->node, 0);
         else if (f->role == FD_PIPE_W)
             pipe_close_end(f->node, 1);
+        else if (f->role == FD_SOCKET)
+            sock_close(f->node);
         kfree(f);
     }
 }
@@ -382,6 +385,98 @@ int sys_kill(int pid)
     return 0;
 }
 
+/* ---- sockets (loopback) + poll + uid ---- */
+
+int sys_socket(int domain, int type)
+{
+    vfs_node_t *node = sock_create(domain, type);
+    if (!node)
+        return -1;
+    int fd = fd_install_role(process_current(), node, FD_SOCKET);
+    if (fd < 0) {
+        sock_close(node);
+        return -1;
+    }
+    return fd;
+}
+
+vfs_node_t *proc_socket_node(int pid, int fd)
+{
+    process_t *p = find_proc(pid);
+    if (!p || fd < 0 || fd >= MAX_FDS || !p->fds[fd])
+        return NULL;
+    file_t *f = p->fds[fd];
+    return (f->role == FD_SOCKET) ? f->node : NULL;
+}
+
+/* Wait until at least one descriptor is ready (POLLIN/POLLOUT) or, for fds that
+ * are gone, POLLERR. timeout == 0 polls without blocking; otherwise blocks
+ * until a socket peer makes progress. Non-socket fds are treated as ready (a
+ * conservative default until pipes/console grow poll ops). */
+int sys_poll(struct pollfd *fds, int nfds, int timeout)
+{
+    process_t *p = process_current();
+    if (!fds || nfds < 0 || nfds > MAX_FDS)
+        return -1;
+
+    for (;;) {
+        int ready = 0;
+        __asm__ volatile("cli");
+        for (int i = 0; i < nfds; i++) {
+            fds[i].revents = 0;
+            int fd = fds[i].fd;
+            int want = fds[i].events;
+            int re;
+            if (fd < 0 || fd >= MAX_FDS || !p->fds[fd])
+                re = POLLERR;
+            else if (p->fds[fd]->role == FD_SOCKET)
+                re = sock_poll(p->fds[fd]->node, want);
+            else
+                re = want & (POLLIN | POLLOUT);     /* non-sockets: assume ready */
+            re &= (want | POLLERR);
+            if (re) {
+                fds[i].revents = (short)re;
+                ready++;
+            }
+        }
+        if (ready > 0 || timeout == 0) {
+            __asm__ volatile("sti");
+            return ready;
+        }
+        /* Arm a poll waiter on each socket fd, block, then disarm and re-scan. */
+        for (int i = 0; i < nfds; i++) {
+            int fd = fds[i].fd;
+            if (fd >= 0 && fd < MAX_FDS && p->fds[fd] && p->fds[fd]->role == FD_SOCKET)
+                sock_poll_arm(p->fds[fd]->node, thread_current());
+        }
+        thread_block();
+        for (int i = 0; i < nfds; i++) {
+            int fd = fds[i].fd;
+            if (fd >= 0 && fd < MAX_FDS && p->fds[fd] && p->fds[fd]->role == FD_SOCKET)
+                sock_poll_disarm(p->fds[fd]->node, thread_current());
+        }
+        __asm__ volatile("sti");
+    }
+}
+
+int sys_getuid(void)
+{
+    return process_current()->uid;
+}
+
+/* Drop privilege only: root (uid 0) may become any uid; a non-root process may
+ * never lower its uid number (i.e. cannot gain privilege). */
+int sys_setuid(int uid)
+{
+    process_t *p = process_current();
+    if (uid < 0)
+        return -1;
+    if (p->uid != 0 && uid < p->uid)
+        return -1;
+    p->uid = uid;
+    return 0;
+}
+
 /* ---- address-space + argv stack setup ---- */
 
 /* Build argc/argv on the user stack of the *current* address space, returning
@@ -444,6 +539,7 @@ void process_init(void)
 {
     process_t *kp = alloc_proc();       /* pid 0: the kernel */
     kp->ppid = 0;
+    kp->uid = 0;                        /* root */
     kp->pd_phys = vmm_kernel_directory();
     kp->thread = thread_current();
     kp->parent = NULL;
@@ -467,6 +563,7 @@ int process_spawn(const uint8_t *elf, uint32_t size, const char *name)
     p->pd_phys = pd;
     p->parent  = process_current();
     p->ppid    = p->parent ? p->parent->pid : 0;
+    p->uid     = p->parent ? p->parent->uid : 0;
     p->user_brk = USER_HEAP_BASE;
     open_standard_streams(p);
 
@@ -555,6 +652,7 @@ int do_fork(registers_t *regs)
     child->pd_phys = child_pd;
     child->parent  = parent;
     child->ppid    = parent->pid;
+    child->uid     = parent->uid;
     child->user_brk = parent->user_brk;
 
     for (int fd = 0; fd < MAX_FDS; fd++) {

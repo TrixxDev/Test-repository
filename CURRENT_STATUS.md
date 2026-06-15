@@ -3,8 +3,10 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.7.1.** All phases below are implemented and verified by
-booting in QEMU (interactive parts driven via PS/2 input).
+**Current version: v0.8.0.** Phases 0–7 are implemented and verified by booting
+in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
+netd + poll) is implemented and builds clean; its in-QEMU boot test is the
+pending verification step (no QEMU in the current CI sandbox).
 
 ## Phase status
 
@@ -19,7 +21,8 @@ booting in QEMU (interactive parts driven via PS/2 input).
 | 6 | IPC + libc (pipes, dup2, sbrk, printf/malloc/string) | v0.6 | ✅ |
 | 7 | Init + service model + message-passing IPC + docs | v0.7 | ✅ |
 | 7.1 | Lifecycle hardening (reparent, bg auto-reap, kill, graceful shutdown) | v0.7.1 | ✅ |
-| 8 | Networking (loopback → netd → stack) | — | ⏳ next |
+| 8A | Loopback sockets (kernel `struct socket`) + `netd` broker + `poll` + uid foundation | v0.8.0 | ✅ |
+| 8B | Ethernet/IP stack (NIC driver, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ next |
 | 9 | Graphics (window server → compositor → framebuffer) | — | ⏳ later |
 | 10 | Desktop + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
 
@@ -31,10 +34,19 @@ booting in QEMU (interactive parts driven via PS/2 input).
 - Pipelines across processes: `cat /disk/poem.txt | grep aurora`.
 - Background jobs (`cmd &`) started and auto-reaped.
 - Message-passing IPC to a named service: shell `log <msg>` → `logger` daemon.
+- Loopback sockets: `echosrv` binds port 7 via `netd`; `echocli` connects,
+  sends a line, and reads the echo back (client → netd → server → back).
+- `poll()` on a connected socket (the echo server waits for data with it).
+- uid foundation: services run as root (uid 0), the shell and its children run
+  as uid 1000 (`id` shows it); `sock_link` is gated to root.
 - Orphan reparenting to init and reaping (`orphan`).
-- Graceful shutdown: init asks the logger to stop, waits, force-kills as
-  fallback.
+- Graceful shutdown: init asks the logger to stop, force-kills survivors
+  (netd), and reaps everything.
 - Clean teardown: address spaces, kernel stacks, PCBs reclaimed.
+
+> Phases 0–7 behaviors were exercised interactively in QEMU. The Phase 8A
+> behaviors above are verified by clean cross-builds and a host-side simulation
+> of the socket data path; the interactive QEMU boot test is pending.
 
 ## Component inventory
 
@@ -43,14 +55,14 @@ booting in QEMU (interactive parts driven via PS/2 input).
 - **drivers:** vga, serial, keyboard, pit, ata, console.
 - **fs:** vfs, tmpfs, fat32.
 - **lib (kernel):** string, printf (kprintf), kheap.
-- **kernel:** kmain, scheduler, process, pipe, elf, syscall.
-- **user:** crt0, libc (libc.h + string/printf/malloc), init, logger, sh, cat,
-  grep, hello, orphan.
+- **kernel:** kmain, scheduler, process, pipe, socket, elf, syscall.
+- **user:** crt0, libc (libc.h + string/printf/malloc/net), init, logger, netd,
+  sh, cat, grep, hello, orphan, echosrv, echocli.
 - **tools:** bin2c.py, mkfat32.py.
-- **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC.
+- **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING.
 
-## Syscalls (19)
+## Syscalls (24)
 
 `putc, yield, exit, fork, exec, wait, open, read, write, close, getpid, pipe,
-dup2, sbrk, msgsend, msgrecv, register, lookup, kill`. See
-[docs/SYSCALLS.md](docs/SYSCALLS.md).
+dup2, sbrk, msgsend, msgrecv, register, lookup, kill, socket, sock_link, poll,
+getuid, setuid`. See [docs/SYSCALLS.md](docs/SYSCALLS.md).

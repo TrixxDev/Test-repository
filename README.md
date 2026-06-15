@@ -4,12 +4,14 @@
 загружаемое в QEMU. Долгосрочная цель — десктоп-ОС в духе macOS со своей
 «изюминкой» (варианты обсуждаются в [ROADMAP.md](ROADMAP.md)).
 
-Это **версия 0.7.1** — ОС с сервисной моделью и зрелым жизненным циклом
-процессов: ядро запускает **init (PID 1)**, который поднимает **logger** и
-**shell**, перезапускает упавшие демоны, **усыновляет сирот** и делает
-**graceful shutdown**. Есть **message-passing IPC** (`msgsend`/`msgrecv`),
-**реестр сервисов** (`register`/`lookup`), `kill` и неблокирующий `wait`.
-Архитектура зафиксирована в [`docs/`](docs/).
+Это **версия 0.8.0** — ОС с сервисной моделью, зрелым жизненным циклом
+процессов и **сокетами loopback**: ядро запускает **init (PID 1)**, который
+поднимает **logger**, **netd** и **shell**, перезапускает упавшие демоны,
+**усыновляет сирот** и делает **graceful shutdown**. Есть **message-passing
+IPC** (`msgsend`/`msgrecv`), **реестр сервисов** (`register`/`lookup`),
+**сокеты `AF_LOOPBACK`** через демон `netd` (`socket`/`poll`/`sock_link`),
+зачаток безопасности (**uid**: root vs пользователь), `kill` и неблокирующий
+`wait`. Архитектура зафиксирована в [`docs/`](docs/).
 
 > Имя `Aurora` — рабочее, его легко поменять (см. `kernel/kmain.c` и Makefile).
 
@@ -104,6 +106,25 @@
   [`docs/SYSCALLS.md`](docs/SYSCALLS.md),
   [`docs/PROCESS_MODEL.md`](docs/PROCESS_MODEL.md),
   [`docs/VFS.md`](docs/VFS.md), [`docs/IPC.md`](docs/IPC.md).
+
+**Сокеты loopback + netd (v0.8 / Этап 8A)**
+- **Ядро — только механизм** — `struct socket` (`kernel/socket.c`): двунаправленный
+  endpoint поверх VFS-узла (значит `read`=recv, `write`=send, `close`, `poll`).
+  Ядро ничего не знает про порты/адреса/протоколы.
+- **netd — это «стек»** — `user/netd.c`: демон, регистрируется как `net`, владеет
+  пространством портов `AF_LOOPBACK` и сводит `bind`/`connect`/`accept` через
+  message-IPC, затем соединяет два endpoint привилегированным `sock_link`
+  (только root). Данные дальше идут endpoint↔endpoint, не через netd.
+- **API сокетов** — `socket`/`poll` — это syscalls; `bind`/`listen`/`connect`/
+  `accept` — RPC к netd (`user/libc/net.c`). `send`/`recv` = `write`/`read`.
+- **`poll()`** — ожидание готовности дескрипторов (`POLLIN`/`POLLOUT`/`POLLERR`).
+- **Демо** — `echosrv` (эхо-сервер на порту 7) и `echocli` (клиент):
+  `client → netd → server → обратно`.
+- **Безопасность (зачаток)** — у процесса есть `uid` (наследуется через
+  fork/exec); сервисы — root (0), shell и его дети — uid 1000 (`id`); `setuid`
+  только понижает права; `sock_link` доступен только root. Права rwx на
+  VFS-узлах — следующий шаг.
+- **Документация** — [`docs/NETWORKING.md`](docs/NETWORKING.md).
 
 ## Стек сборки
 
