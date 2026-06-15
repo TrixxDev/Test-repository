@@ -19,8 +19,8 @@ and a static desktop with a menu bar and Dock). It is **not** yet a daily-driver
 OS (no external networking yet — loopback only; the GUI is a static desktop, no
 window server yet; a basic permission model — uid + rwx — but no login/groups).
 
-- **Current version:** v0.9.2
-- **Size:** ~6,500 lines of C / assembly (plus a generated 8×16 font header)
+- **Current version:** v0.9.3
+- **Size:** ~6,800 lines of C / assembly (plus a generated 8×16 font header)
   across kernel + drivers + fs + libc + userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
   `qemu-system-i386 -kernel`.
@@ -45,7 +45,7 @@ window server yet; a basic permission model — uid + rwx — but no login/group
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
 | Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`. |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | 🟡 (9.0–9.2) | Linear framebuffer (Multiboot **or** Bochs-VBE fallback via PCI); 2D library (rects, rounded rects, circles, gradient, blit, **8×16 text**); static desktop; **userspace compositor** (surfaces + window chrome + z-order, PNG-verified). Live windowserver/mouse pending a real run. |
+| Graphics | 🟡 (9.0–9.2) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); static desktop; **userspace `windowserver` process** + Terminal app + `fb_map` (surfaces, z-order, window IPC, core PNG-verified). Live multi-process run + mouse pending a real boot. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What it looks like
@@ -55,8 +55,8 @@ The first AuroraOS desktop (rendered by the real `kernel/gfx.c` +
 
 ![AuroraOS desktop](aurora_desktop.png)
 
-The userspace compositor stacking two app windows by z-order (`make
-screenshot-wm`):
+The userspace `windowserver` stacking two app windows by z-order — produced by
+the real window-server core (`make screenshot-wm`):
 
 ![AuroraOS windows](aurora_windows.png)
 
@@ -104,9 +104,9 @@ lib/         freestanding kernel lib: string, printf (kprintf), kheap
 kernel/      kmain, scheduler, process, pipe, socket, elf, syscall, gfx, desktop, font8x16.h
 drivers/     vga, serial, keyboard, pit, ata, console, fb (framebuffer + VBE)
 include/     kio.h, multiboot.h, syscall_abi.h (shared ABI), syscall.h, net.h (netd protocol)
-user/        crt0, libc (libc.h + libc/), wm (compositor: wm.h + wm.c),
+user/        crt0, libc (libc.h + libc/), wm (windowserver core: wm.h + wm.c),
              programs (init, logger, netd, sh, cat, grep, hello, orphan,
-             echosrv, echocli, save)
+             echosrv, echocli, save, wserver (windowserver), term (Terminal))
 boot/        grub.cfg (for the `make iso` GRUB boot path)
 tools/       bin2c.py (embed ELF), mkfat32.py (FAT32 image), render_desktop.c +
              render_wm.c + ppm2png.py (host -> PNG), genfont.py (8×16 font header)

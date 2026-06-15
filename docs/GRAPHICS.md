@@ -94,29 +94,36 @@ into an off-screen buffer and converts it to PNG (`tools/ppm2png.py`). It is bot
 the project's reference screenshot and the way the rendering is verified in this
 environment.
 
-## 9.2 — Window server + compositor (architecture, PNG-verified)
+## 9.2 — Window server (userspace process), PNG-verified core
 
-Built as portable userspace code (`user/wm.c` + `user/wm.h`), **not** in the
-kernel:
+A real daemon, `user/wserver.c` (registered as `wm`, like `logger`/`netd`) —
+**not** in the kernel. The kernel only adds one primitive: `fb_map` maps the
+active framebuffer into the windowserver's address space.
 
-- **Surface model.** Each app renders into its own `gfx_surface_t` (an off-screen
-  pixel buffer). The compositor never lets apps touch the screen directly.
-- **Window chrome.** `wm_draw_window` paints a rounded title bar with the three
-  traffic-light buttons, a centered title, a drop shadow, and blits the app's
-  content surface.
-- **Z-order compositor.** `wm_composite` paints the desktop, then the windows
-  back-to-front by `z`, so overlapping windows stack correctly.
-- **Window IPC protocol.** `WM_CREATE / WM_DESTROY / WM_PRESENT / WM_MOVE`
-  (`wm_req_t`/`wm_rep_t`) — the contract the future `windowserver` daemon speaks.
+- **Surface model.** Each window has its own content surface (`gfx_surface_t`).
+  Apps never touch the screen.
+- **Window-server core** (`user/wm.c`, pure/portable): the window table, z-order,
+  drawing into a window's surface (`wm_create/draw_rect/draw_text/move/destroy`)
+  and `wm_present` (paint the desktop, then all windows back-to-front by z).
+- **Window chrome** (`wm_draw_window`): rounded title bar, three traffic-light
+  buttons, centered title, drop shadow, then the app's content blitted in.
+- **Window IPC protocol** (`WM_CREATE/DESTROY/MOVE/DRAW_RECT/DRAW_TEXT/PRESENT`,
+  `wm_req_t`/`wm_rep_t`): how apps talk to the server.
+- **First app:** `user/term.c` (Terminal) — a separate process that looks up
+  `wm`, creates a window and draws a static shell session into it. `init` starts
+  the windowserver + Terminal.
 
-Preview (a desktop with two overlapping windows, Files behind Terminal):
+The window-server core is exercised by the host renderer, which drives the very
+same `wm_state` API the daemon does:
 
 ```sh
-make screenshot-wm     # -> aurora_windows.png
+make screenshot-wm     # -> aurora_windows.png  (Terminal over Aurora Files)
 ```
 
-**Not done until it runs in real QEMU.** Turning this into a live `windowserver`
-*process* needs two kernel primitives first — mapping the framebuffer into
-userspace, and shared-memory surfaces between app and server — plus an on-screen
-run. Those wait for the first live framebuffer (9.0.5). PS/2 mouse + cursor,
-window dragging and a Dock process follow after that.
+**Not "done" until it runs in real QEMU.** The core logic is PNG-verified, but
+the live multi-process path (windowserver `fb_map`s the framebuffer, Terminal
+opens a window over IPC) needs an on-screen boot to confirm — it builds clean and
+runs once there is a live framebuffer (`make run-vbe`/`gui`). The current surface
+transport is server-side (apps send draw commands); client-side shared-memory
+surfaces are a later upgrade. PS/2 mouse + cursor, window dragging and a Dock
+process follow after the first live run.

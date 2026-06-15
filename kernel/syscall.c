@@ -3,6 +3,7 @@
 #include "scheduler.h"
 #include "process.h"
 #include "socket.h"
+#include "fb.h"
 
 /* Convention: eax = syscall number, ebx/ecx/edx = arguments. The return value
  * is written back into regs->eax (restored to the user's eax by the stub). */
@@ -114,6 +115,15 @@ void syscall_handler(registers_t *regs)
     case SYS_UIDOF:
         regs->eax = (uint32_t)sys_uid_of((int)regs->ebx);
         break;
+
+    case SYS_FBMAP: {
+        uint32_t *info = (uint32_t *)regs->ebx;     /* user [w, h, pitch] */
+        uint32_t w = 0, h = 0, p = 0;
+        uint32_t va = fb_user_map(&w, &h, &p);
+        if (va && info) { info[0] = w; info[1] = h; info[2] = p; }
+        regs->eax = va;
+        break;
+    }
 
     default:
         kprintf("\n[syscall] unknown call %u\n", regs->eax);

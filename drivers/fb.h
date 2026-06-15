@@ -9,3 +9,8 @@ int  fb_init(const multiboot_info_t *mb);
 
 /* Render the first desktop onto the framebuffer (no-op if inactive). */
 void fb_draw_desktop(void);
+
+/* Map the active framebuffer into the current (user) address space for the
+ * windowserver. Returns the user virtual base (and w/h/pitch), or 0 if no
+ * framebuffer is active. */
+uint32_t fb_user_map(uint32_t *w, uint32_t *h, uint32_t *pitch);

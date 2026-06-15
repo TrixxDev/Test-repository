@@ -7,6 +7,7 @@
 
 static gfx_surface_t screen;
 static int active;
+static uint32_t fb_phys;
 
 /* Map a framebuffer region (identity) and record it as the screen surface. */
 static void use_framebuffer(uint32_t addr, uint32_t w, uint32_t h, uint32_t pitch)
@@ -19,6 +20,7 @@ static void use_framebuffer(uint32_t addr, uint32_t w, uint32_t h, uint32_t pitc
     screen.height = (int)h;
     screen.pitch  = (int)pitch;
     screen.bpp    = 32;
+    fb_phys = addr;
     active = 1;
 }
 
@@ -131,4 +133,20 @@ void fb_draw_desktop(void)
 {
     if (active)
         desktop_render(&screen);
+}
+
+#define FB_USER_VADDR 0x90000000u   /* between user heap (0x5000_0000) and stack */
+
+uint32_t fb_user_map(uint32_t *w, uint32_t *h, uint32_t *pitch)
+{
+    if (!active)
+        return 0;
+    uint32_t size = (uint32_t)screen.pitch * screen.height;
+    for (uint32_t off = 0; off < size; off += 0x1000)
+        vmm_map_page(FB_USER_VADDR + off, fb_phys + off,
+                     PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
+    if (w) *w = (uint32_t)screen.width;
+    if (h) *h = (uint32_t)screen.height;
+    if (pitch) *pitch = (uint32_t)screen.pitch;
+    return FB_USER_VADDR;
 }

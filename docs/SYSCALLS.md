@@ -31,6 +31,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 23 | `getuid` | `getuid() -> uid` | Owner uid of the calling process. |
 | 24 | `setuid` | `setuid(int uid) -> 0/-1` | Drop privilege: root may set any uid; a non-root process may not lower its uid number. |
 | 25 | `uid_of` | `uid_of(int pid) -> uid/-1` | Owner uid of another process (e.g. so `netd` can enforce privileged ports without trusting the request). |
+| 26 | `fb_map` | `fb_map(uint info[3]) -> vaddr/0` | Map the active framebuffer into the caller and fill `info` = {width, height, pitch}; `0` if no framebuffer. Used by the `windowserver`. |
 
 ## Notes
 

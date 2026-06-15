@@ -46,6 +46,8 @@ static inline int poll(struct pollfd *fds, int nfds, int timeout) { return _sysc
 static inline int getuid(void)                           { return _syscall(SYS_GETUID, 0, 0, 0); }
 static inline int setuid(int uid)                        { return _syscall(SYS_SETUID, uid, 0, 0); }
 static inline int uid_of(int pid)                        { return _syscall(SYS_UIDOF, pid, 0, 0); }
+/* Map the framebuffer into this process; fills info[0..2] = {w,h,pitch}. */
+static inline void *fb_map(unsigned *info)               { return (void *)_syscall(SYS_FBMAP, (int)info, 0, 0); }
 
 /* send/recv are just write/read on a connected socket fd. */
 static inline int send(int fd, const void *b, int n)     { return write(fd, b, n); }

@@ -26,8 +26,11 @@ DISK    := disk.img
 EMBEDDED   := kernel/embedded_user.c
 USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/cat.elf user/grep.elf user/orphan.elf \
-              user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf
+              user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
+              user/wserver.elf user/term.elf
 LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o
+# Portable graphics/compositor code, built for userspace and linked into wserver.
+WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
 
 C_SRC := $(shell find kernel arch drivers lib fs -name '*.c')
 C_SRC := $(sort $(C_SRC) $(EMBEDDED))
@@ -44,7 +47,7 @@ $(KERNEL): $(OBJ) linker.ld
 
 # --- user programs (crt0 provides _start and calls main) ---
 UCFLAGS := --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
-           -O2 -Iinclude -Iuser
+           -O2 -Iinclude -Iuser -Ikernel
 
 user/crt0.o: user/crt0.S
 	$(CC) --target=$(TARGET) -m32 -ffreestanding -Iinclude -c user/crt0.S -o $@
@@ -56,6 +59,19 @@ user/%.elf: user/%.c user/libc.h user/crt0.o $(LIBC_OBJ) user/user.ld
 	$(CC) $(UCFLAGS) -c user/$*.c -o user/$*.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/$*.o $(LIBC_OBJ) -o $@
 
+# The compositor/graphics code compiled for userspace (used by the windowserver).
+user/gfx_u.o: kernel/gfx.c kernel/gfx.h kernel/font8x16.h
+	$(CC) $(UCFLAGS) -c kernel/gfx.c -o $@
+user/desktop_u.o: kernel/desktop.c kernel/desktop.h kernel/gfx.h
+	$(CC) $(UCFLAGS) -c kernel/desktop.c -o $@
+user/wm_u.o: user/wm.c user/wm.h kernel/gfx.h kernel/desktop.h
+	$(CC) $(UCFLAGS) -c user/wm.c -o $@
+
+# windowserver links the compositor objects in addition to libc.
+user/wserver.elf: user/wserver.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) $(WM_OBJ) user/user.ld
+	$(CC) $(UCFLAGS) -c user/wserver.c -o user/wserver.o
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/wserver.o $(WM_OBJ) $(LIBC_OBJ) -o $@
+
 $(EMBEDDED): user/init.elf tools/bin2c.py
 	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
 
@@ -65,7 +81,8 @@ $(DISK): $(USER_PROGS) user/poem.txt tools/mkfat32.py
 	    SH.ELF user/sh.elf HELLO.ELF user/hello.elf \
 	    CAT.ELF user/cat.elf GREP.ELF user/grep.elf ORPHAN.ELF user/orphan.elf \
 	    NETD.ELF user/netd.elf ECHOSRV.ELF user/echosrv.elf ECHOCLI.ELF user/echocli.elf \
-	    SAVE.ELF user/save.elf POEM.TXT user/poem.txt
+	    SAVE.ELF user/save.elf WSERVER.ELF user/wserver.elf TERM.ELF user/term.elf \
+	    POEM.TXT user/poem.txt
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

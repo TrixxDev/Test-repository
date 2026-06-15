@@ -68,25 +68,26 @@ app → window server → compositor → framebuffer
   Multiboot-framebuffer ISO (`make iso`). **Open item:** actually see the Dock on
   a QEMU screen and confirm framebuffer mapping / pitch / mode-switch — this
   cannot be done in the current sandbox (no QEMU/display).
-- **9.2 — Compositor + Window Server — architecture built, PNG-verified.** The
-  surface model, window chrome (title bar + traffic lights + shadow) and a
-  back-to-front **z-order compositor** are implemented as portable userspace code
-  (`user/wm.c` + `user/wm.h`), with the window **IPC protocol**
-  (`WM_CREATE/DESTROY/PRESENT/MOVE`) defined. `make screenshot-wm` composites a
-  desktop with two overlapping app windows (Files + Terminal) →
-  `aurora_windows.png`. Kept out of the kernel:
+- **9.2 — Window server (userspace process) — built, core PNG-verified.** A real
+  `windowserver` daemon (`user/wserver.c`, registered as `wm`) keeps the window
+  table + z-order and serves the window IPC
+  (`WM_CREATE/DESTROY/MOVE/DRAW_RECT/DRAW_TEXT/PRESENT`); the kernel adds one
+  primitive, `fb_map`, to hand it the framebuffer. The first app `user/term.c`
+  (Terminal) opens a window over IPC; `init` starts both. The window-server core
+  (`user/wm.c`) is driven by `make screenshot-wm` → `aurora_windows.png`. Out of
+  the kernel by design:
   ```
   kernel:        framebuffer · input · IPC
   windowserver:  windows · z-order · focus · compositor   (userspace)
   ```
-  - [ ] **Not "done" until it runs in real QEMU.** The live `windowserver`
-    process needs two kernel primitives first: a way to map the framebuffer into
-    userspace, and **shared-memory surfaces** between app and server. Those touch
-    memory mapping and want an on-screen run to confirm — so they wait for the
-    first live framebuffer (9.0.5).
-  - then: PS/2 mouse + cursor (9.3) → first live window (9.4) → window dragging
-    (9.5) → Dock as its own process (9.6). Mouse/other devices stay deferred
-    until there is a real run.
+  - [ ] **Not "done" until it runs in real QEMU.** The live multi-process path
+    (windowserver `fb_map`s the screen; Terminal opens a window) builds clean but
+    needs an on-screen boot to confirm; it activates once the framebuffer is live
+    (9.0.5).
+  - [ ] upgrade surface transport from server-side draw commands to **client-side
+    shared-memory surfaces** (needs a kernel shm primitive).
+  - then: PS/2 mouse + cursor (9.3) → window dragging (9.4/9.5) → Dock as its own
+    process (9.6). Mouse/other devices stay deferred until there is a real run.
 - **9.3 — Aurora Desktop.** Promote the static desktop to a live one (menu bar,
   Dock, wallpaper, mouse cursor) driven by the window server.
 - **9.4 — Windows.** Move/drag, minimise, close, focus.
