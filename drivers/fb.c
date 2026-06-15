@@ -31,6 +31,7 @@ static void use_framebuffer(uint32_t addr, uint32_t w, uint32_t h, uint32_t pitc
 #define VBE_DISPI_YRES  2
 #define VBE_DISPI_BPP   3
 #define VBE_DISPI_ENABLE 4
+#define VBE_DISPI_VIRT_WIDTH 6
 #define VBE_ENABLED     0x01
 #define VBE_LFB         0x40
 
@@ -81,8 +82,15 @@ static int vbe_setup(uint32_t w, uint32_t h)
     vbe_write(VBE_DISPI_BPP, 32);
     vbe_write(VBE_DISPI_ENABLE, VBE_ENABLED | VBE_LFB);
 
-    use_framebuffer(lfb, w, h, w * 4);      /* LFB is linear: pitch = w*4 */
-    kprintf("[fb] Bochs VBE %ux%u x32 LFB=0x%x\n", w, h, lfb);
+    /* Read back the actual scanline stride rather than assuming w*4: the adapter
+     * may pad each row, and a wrong pitch is the classic cause of skewed output. */
+    uint32_t virt_w = vbe_read(VBE_DISPI_VIRT_WIDTH);
+    if (virt_w < w)
+        virt_w = w;
+    uint32_t pitch = virt_w * 4;
+
+    use_framebuffer(lfb, w, h, pitch);
+    kprintf("[fb] Bochs VBE %ux%u x32 LFB=0x%x pitch=%u\n", w, h, lfb, pitch);
     return 1;
 }
 
