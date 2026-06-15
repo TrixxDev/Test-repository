@@ -11,8 +11,17 @@
 #include "vfs.h"
 
 #define MAX_FDS   16
+#define MSG_MAX   256
 
 enum proc_state { PROC_UNUSED = 0, PROC_RUNNING, PROC_ZOMBIE };
+
+/* A queued IPC message. */
+typedef struct message {
+    struct message *next;
+    int  from;
+    int  len;
+    char data[MSG_MAX];
+} message_t;
 
 enum fd_role { FD_NORMAL = 0, FD_PIPE_R, FD_PIPE_W };
 
@@ -35,6 +44,11 @@ typedef struct process {
     registers_t saved_regs;         /* fork: child resumes from this frame */
     int      waiting;               /* parent is blocked in wait() */
     uint32_t user_brk;              /* top of the user heap (sbrk) */
+
+    /* message-passing mailbox */
+    message_t *mbox_head, *mbox_tail;
+    int        mbox_count;
+    struct thread *mbox_waiter;     /* thread blocked in recv() */
 } process_t;
 
 /* Set up the kernel process (pid 0) bound to the current/main thread. */
@@ -60,3 +74,9 @@ int  sys_close(int fd);
 int  sys_pipe(int fds[2]);
 int  sys_dup2(int oldfd, int newfd);
 uint32_t sys_sbrk(int increment);
+
+/* message-passing IPC + named service registry */
+int  sys_msgsend(int pid, const void *buf, int len);
+int  sys_msgrecv(void *buf, int len, int *from);
+int  sys_register(const char *name);
+int  sys_lookup(const char *name);

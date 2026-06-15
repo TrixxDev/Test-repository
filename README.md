@@ -4,11 +4,11 @@
 загружаемое в QEMU. Долгосрочная цель — десктоп-ОС в духе macOS со своей
 «изюминкой» (варианты обсуждаются в [ROADMAP.md](ROADMAP.md)).
 
-Это **версия 0.6** — Unix-подобная среда с композицией программ: к
-интерактивному shell добавлены **пайпы** (`pipe`/`dup2`/`close`) и
-**мини-libc** (`printf`, `malloc`/`free`, строки, обёртки syscall, `sbrk` для
-кучи). Работает `cat /disk/poem.txt | grep aurora`. Системный контракт
-зафиксирован в `include/syscall_abi.h` (общий для ядра и userland).
+Это **версия 0.7** — ОС с сервисной моделью: ядро запускает **init (PID 1)**,
+который поднимает **logger** (демон) и **shell**, а упавшие демоны
+перезапускает. Добавлено **message-passing IPC** (`msgsend`/`msgrecv`) и
+**именованный реестр сервисов** (`register`/`lookup`) — поверх уже имеющихся
+пайпов и мини-libc. Архитектура зафиксирована в [`docs/`](docs/).
 
 > Имя `Aurora` — рабочее, его легко поменять (см. `kernel/kmain.c` и Makefile).
 
@@ -87,6 +87,20 @@
 - **Утилиты** — `cat` (файл/stdin → stdout), `grep` (фильтр строк stdin),
   `hello` (демо argv/malloc).
 
+**Init и сервисы (v0.7)**
+- **init (PID 1)** — `user/init.c`: запускает logger и shell, в цикле `wait`
+  реапит детей и перезапускает упавшие демоны; при выходе shell — shutdown.
+- **logger** — `user/logger.c`: демон, регистрируется как сервис `log`,
+  принимает сообщения по IPC и печатает их.
+- **Message-passing IPC** — `msgsend(pid)`/`msgrecv()` (почтовые ящики
+  процессов с блокировкой).
+- **Реестр имён** — `register(name)`/`lookup(name)`: сервисы находят друг друга
+  по имени, без хардкода pid. Shell: builtin `log <msg>`.
+- **Документация** — [`docs/ABI.md`](docs/ABI.md),
+  [`docs/SYSCALLS.md`](docs/SYSCALLS.md),
+  [`docs/PROCESS_MODEL.md`](docs/PROCESS_MODEL.md),
+  [`docs/VFS.md`](docs/VFS.md), [`docs/IPC.md`](docs/IPC.md).
+
 ## Стек сборки
 
 Используется **clang как кросс-компилятор** (не нужен отдельный cross-gcc)
@@ -153,10 +167,13 @@ user/           пользовательские программы (собир�
   crt0.S        стартап C (_start -> main(argc, argv))
   libc.h        заголовок мини-libc (обёртки syscall + прототипы)
   libc/         реализация libc (string.c, printf.c, malloc.c)
-  sh.c          интерактивный shell (пайпы, builtins, фон)
+  init.c        init (PID 1): запуск и супервизия сервисов
+  logger.c      демон логирования (сервис "log")
+  sh.c          интерактивный shell (пайпы, builtins, фон, log)
   hello.c       демо argv + malloc
   cat.c grep.c  утилиты (для 'cat | grep')
   poem.txt      тестовый текст на диск
+docs/           архитектурная документация (ABI, syscalls, процессы, VFS, IPC)
 tools/          утилиты сборки
   bin2c.py      встраивание ELF в образ ядра
   mkfat32.py    генератор FAT32-образа диска

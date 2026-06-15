@@ -28,6 +28,12 @@ static inline int   pipe(int fd[2])                     { return _syscall(SYS_PI
 static inline int   dup2(int o, int n)                  { return _syscall(SYS_DUP2, o, n, 0); }
 static inline void *sbrk(int incr)                      { return (void *)_syscall(SYS_SBRK, incr, 0, 0); }
 
+/* message-passing IPC + named services */
+static inline int msgsend(int pid, const void *b, int n) { return _syscall(SYS_MSGSEND, pid, (int)b, n); }
+static inline int msgrecv(void *b, int n, int *from)     { return _syscall(SYS_MSGRECV, (int)b, n, (int)from); }
+static inline int svc_register(const char *name)         { return _syscall(SYS_REGISTER, (int)name, 0, 0); }
+static inline int svc_lookup(const char *name)           { return _syscall(SYS_LOOKUP, (int)name, 0, 0); }
+
 /* ---- string.c ---- */
 size_t strlen(const char *s);
 int    strcmp(const char *a, const char *b);

@@ -22,5 +22,9 @@
 #define SYS_PIPE   12   /* pipe(int fd[2])           -> 0 / -1       */
 #define SYS_DUP2   13   /* dup2(int oldfd, int newfd)-> newfd        */
 #define SYS_SBRK   14   /* sbrk(int incr)            -> old brk      */
+#define SYS_MSGSEND 15  /* msgsend(pid, buf, len)    -> 0 / -1       */
+#define SYS_MSGRECV 16  /* msgrecv(buf, len, &from)  -> n (blocks)   */
+#define SYS_REGISTER 17 /* register(name)            -> 0 / -1       */
+#define SYS_LOOKUP  18  /* lookup(name)              -> pid / -1     */
 
-#define SYS_MAX    15   /* one past the last valid syscall number    */
+#define SYS_MAX    19   /* one past the last valid syscall number    */

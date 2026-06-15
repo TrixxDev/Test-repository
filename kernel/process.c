@@ -200,6 +200,124 @@ uint32_t sys_sbrk(int increment)
     return old;
 }
 
+/* ---- message-passing IPC + named services ---- */
+
+#define MAX_SERVICES 16
+#define MBOX_LIMIT   64
+
+static struct { char name[32]; int pid; int used; } services[MAX_SERVICES];
+
+static process_t *find_proc(int pid)
+{
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (proc_table[i].state == PROC_RUNNING && proc_table[i].pid == pid)
+            return &proc_table[i];
+    return NULL;
+}
+
+int sys_msgsend(int pid, const void *buf, int len)
+{
+    if (len < 0)
+        return -1;
+    if (len > MSG_MAX)
+        len = MSG_MAX;
+
+    process_t *dst = find_proc(pid);
+    if (!dst)
+        return -1;
+
+    message_t *m = (message_t *)kmalloc(sizeof(message_t));
+    if (!m)
+        return -1;
+    m->next = NULL;
+    m->from = process_current()->pid;
+    m->len  = len;
+    memcpy(m->data, buf, (uint32_t)len);
+
+    __asm__ volatile("cli");
+    if (dst->mbox_count >= MBOX_LIMIT) {
+        __asm__ volatile("sti");
+        kfree(m);
+        return -1;
+    }
+    if (dst->mbox_tail)
+        dst->mbox_tail->next = m;
+    else
+        dst->mbox_head = m;
+    dst->mbox_tail = m;
+    dst->mbox_count++;
+    if (dst->mbox_waiter) {
+        thread_wake(dst->mbox_waiter);
+        dst->mbox_waiter = NULL;
+    }
+    __asm__ volatile("sti");
+    return 0;
+}
+
+int sys_msgrecv(void *buf, int len, int *from)
+{
+    process_t *p = process_current();
+
+    __asm__ volatile("cli");
+    while (p->mbox_head == NULL) {
+        p->mbox_waiter = thread_current();
+        thread_block();
+    }
+    message_t *m = p->mbox_head;
+    p->mbox_head = m->next;
+    if (!p->mbox_head)
+        p->mbox_tail = NULL;
+    p->mbox_count--;
+    __asm__ volatile("sti");
+
+    int n = m->len;
+    if (n > len)
+        n = len;
+    memcpy(buf, m->data, (uint32_t)n);
+    if (from)
+        *from = m->from;
+    kfree(m);
+    return n;
+}
+
+static void unregister_pid(int pid)
+{
+    for (int i = 0; i < MAX_SERVICES; i++)
+        if (services[i].used && services[i].pid == pid)
+            services[i].used = 0;
+}
+
+int sys_register(const char *name)
+{
+    int pid = process_current()->pid;
+    /* replace an existing entry with the same name */
+    for (int i = 0; i < MAX_SERVICES; i++) {
+        if (services[i].used && strcmp(services[i].name, name) == 0) {
+            services[i].pid = pid;
+            return 0;
+        }
+    }
+    for (int i = 0; i < MAX_SERVICES; i++) {
+        if (!services[i].used) {
+            int j = 0;
+            while (name[j] && j < 31) { services[i].name[j] = name[j]; j++; }
+            services[i].name[j] = '\0';
+            services[i].pid = pid;
+            services[i].used = 1;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int sys_lookup(const char *name)
+{
+    for (int i = 0; i < MAX_SERVICES; i++)
+        if (services[i].used && strcmp(services[i].name, name) == 0)
+            return services[i].pid;
+    return -1;
+}
+
 /* ---- address-space + argv stack setup ---- */
 
 /* Build argc/argv on the user stack of the *current* address space, returning
@@ -468,6 +586,16 @@ void process_exit(int code)
     process_t *p = process_current();
 
     close_all_fds(p);
+
+    /* Drop any pending messages and named-service registrations. */
+    unregister_pid(p->pid);
+    for (message_t *m = p->mbox_head; m; ) {
+        message_t *next = m->next;
+        kfree(m);
+        m = next;
+    }
+    p->mbox_head = p->mbox_tail = NULL;
+    p->mbox_count = 0;
 
     vmm_switch_address_space(vmm_kernel_directory());
     vmm_destroy_address_space(p->pd_phys);

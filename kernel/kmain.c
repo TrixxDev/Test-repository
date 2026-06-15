@@ -46,7 +46,7 @@ static void banner(void)
         "  / _ \\| || | '_/ _ \\ '_/ _` | \n"
         " /_/ \\_\\\\_,_|_| \\___/_| \\__,_| \n");
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
-    terminal_writestring("        AuroraOS  v0.5.0  (interactive shell)\n\n");
+    terminal_writestring("        AuroraOS  v0.7.0  (init + services + IPC)\n\n");
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info)
@@ -80,12 +80,12 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     vfs_init();
     vfs_mount("/tmp", tmpfs_create());
 
-    /* tmpfs fallback copy of the shell. */
+    /* tmpfs fallback copy of init. */
     vfs_node_t *tmp = vfs_resolve("/tmp");
-    vfs_node_t *fb = vfs_create(tmp, "sh.elf", VFS_FILE);
+    vfs_node_t *fb = vfs_create(tmp, "init.elf", VFS_FILE);
     vfs_write(fb, 0, user_elf_len, user_elf);
 
-    const char *init_path = "/tmp/sh.elf";
+    const char *init_path = "/tmp/init.elf";
     kprintf("[boot] probing ATA disk...\n");
     if (ata_init()) {
         vfs_node_t *root = fat32_mount();
@@ -95,11 +95,11 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
             char name[64];
             for (uint32_t i = 0; vfs_readdir(root, i, name, sizeof(name)) == 0; i++)
                 kprintf("        /disk/%s\n", name);
-            if (vfs_resolve("/disk/SH.ELF"))
-                init_path = "/disk/SH.ELF";
+            if (vfs_resolve("/disk/INIT.ELF"))
+                init_path = "/disk/INIT.ELF";
         }
     } else {
-        kprintf("      no ATA disk; using embedded shell\n");
+        kprintf("      no ATA disk; using embedded init\n");
     }
 
     __asm__ volatile("sti");
@@ -114,23 +114,23 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     vfs_read(f, 0, f->size, buf);
 
     terminal_setcolor(VGA_LIGHT_GREEN, VGA_BLACK);
-    kprintf("\n[exec] starting shell from %s\n", init_path);
+    kprintf("\n[exec] starting init from %s\n", init_path);
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
 
-    int shpid = process_spawn(buf, f->size, "sh");
+    int initpid = process_spawn(buf, f->size, "init");
     kfree(buf);
 
     thread_create_kernel(idle_thread);  /* always-runnable fallback */
 
     scheduler_enable();
 
-    /* The kernel reaps the shell when it exits (demonstrates wait/cleanup). */
+    /* The kernel reaps init when it exits (demonstrates wait/cleanup). */
     int status = -1;
-    int reaped = process_wait(shpid, &status);
+    int reaped = process_wait(initpid, &status);
 
     scheduler_disable();
     terminal_setcolor(VGA_LIGHT_CYAN, VGA_BLACK);
-    kprintf("\n[kernel] shell (pid %d) exited with code %d. System idle.\n",
+    kprintf("\n[kernel] init (pid %d) exited with code %d. System idle.\n",
             reaped, status);
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
 

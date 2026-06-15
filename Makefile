@@ -24,7 +24,8 @@ DISK    := disk.img
 # User programs are built separately. The shell is embedded into the kernel
 # image as a fallback; all programs are written to the FAT32 disk.
 EMBEDDED   := kernel/embedded_user.c
-USER_PROGS := user/sh.elf user/hello.elf user/cat.elf user/grep.elf
+USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
+              user/cat.elf user/grep.elf
 LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o
 
 C_SRC := $(shell find kernel arch drivers lib fs -name '*.c')
@@ -54,12 +55,13 @@ user/%.elf: user/%.c user/libc.h user/crt0.o $(LIBC_OBJ) user/user.ld
 	$(CC) $(UCFLAGS) -c user/$*.c -o user/$*.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/$*.o $(LIBC_OBJ) -o $@
 
-$(EMBEDDED): user/sh.elf tools/bin2c.py
-	python3 tools/bin2c.py user/sh.elf user_elf > $(EMBEDDED)
+$(EMBEDDED): user/init.elf tools/bin2c.py
+	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
 
 # --- FAT32 disk image containing the user programs + a sample text file ---
 $(DISK): $(USER_PROGS) user/poem.txt tools/mkfat32.py
-	python3 tools/mkfat32.py $(DISK) SH.ELF user/sh.elf HELLO.ELF user/hello.elf \
+	python3 tools/mkfat32.py $(DISK) INIT.ELF user/init.elf LOGGER.ELF user/logger.elf \
+	    SH.ELF user/sh.elf HELLO.ELF user/hello.elf \
 	    CAT.ELF user/cat.elf GREP.ELF user/grep.elf POEM.TXT user/poem.txt
 
 %.o: %.c

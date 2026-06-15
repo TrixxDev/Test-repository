@@ -66,6 +66,22 @@ void syscall_handler(registers_t *regs)
         regs->eax = sys_sbrk((int)regs->ebx);
         break;
 
+    case SYS_MSGSEND:
+        regs->eax = (uint32_t)sys_msgsend((int)regs->ebx, (const void *)regs->ecx, (int)regs->edx);
+        break;
+
+    case SYS_MSGRECV:
+        regs->eax = (uint32_t)sys_msgrecv((void *)regs->ebx, (int)regs->ecx, (int *)regs->edx);
+        break;
+
+    case SYS_REGISTER:
+        regs->eax = (uint32_t)sys_register((const char *)regs->ebx);
+        break;
+
+    case SYS_LOOKUP:
+        regs->eax = (uint32_t)sys_lookup((const char *)regs->ebx);
+        break;
+
     default:
         kprintf("\n[syscall] unknown call %u\n", regs->eax);
         regs->eax = (uint32_t)-1;

@@ -107,7 +107,21 @@ int main(int argc, char **argv)
 
         if (strcmp(av[0], "exit") == 0) { printf("bye\n"); return 0; }
         if (strcmp(av[0], "help") == 0) {
-            printf("builtins: help, exit. pipes: a | b. else runs /disk/NAME.ELF\n");
+            printf("builtins: help, exit, log <msg>. pipes: a | b. else runs /disk/NAME.ELF\n");
+            continue;
+        }
+        if (strcmp(av[0], "log") == 0) {
+            int lp = svc_lookup("log");
+            if (lp < 0) { printf("log: service not available\n"); continue; }
+            char msg[200];
+            int m = 0;
+            for (int i = 1; i < ac; i++) {
+                const char *w = av[i];
+                while (*w && m < (int)sizeof(msg) - 1) msg[m++] = *w++;
+                if (i + 1 < ac && m < (int)sizeof(msg) - 1) msg[m++] = ' ';
+            }
+            msg[m] = '\0';
+            msgsend(lp, msg, m);
             continue;
         }
 
