@@ -125,6 +125,10 @@ void syscall_handler(registers_t *regs)
         break;
     }
 
+    case SYS_FBACTIVE:
+        regs->eax = (uint32_t)fb_is_active();
+        break;
+
     default:
         kprintf("\n[syscall] unknown call %u\n", regs->eax);
         regs->eax = (uint32_t)-1;

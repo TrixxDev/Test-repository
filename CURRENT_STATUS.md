@@ -3,15 +3,16 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.3.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.4.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
 netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
-(Phase 9.0 framebuffer + minimal 9.1 2D library with an 8×16 font + a static
-desktop, plus two live-output paths) are implemented and build clean. FS write
-and the desktop rendering are verified on the host (the real `fs/fat32.c` write
-path + image re-parse; the real `kernel/gfx.c`+`kernel/desktop.c` rendered to a
-PNG). The live framebuffer (`make run-vbe` / `make iso`) needs an interactive
-QEMU run to confirm on screen — pending (no QEMU in the current CI sandbox).
+(framebuffer + 2D library with an 8×16 font + desktop; a userspace, event-driven
+**windowserver** with a keyboard input pipeline + interactive Terminal) are
+implemented and build clean. FS write and the rendering/window-server core are
+verified on the host (the real `fs/fat32.c` write path + image re-parse; the real
+`kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs). The live framebuffer and the
+keyboard → windowserver → app loop (`make run-vbe` / `make gui`) need an
+interactive QEMU run to confirm on screen — pending (no QEMU in this sandbox).
 
 ## Phase status
 
@@ -31,8 +32,8 @@ QEMU run to confirm on screen — pending (no QEMU in the current CI sandbox).
 | 8.2 | FS write: ATA sector write + FAT32 read/write (create/grow/truncate), `open(O_CREAT/O_TRUNC)` | v0.8.2 | ✅ |
 | 9.0/9.1 | Framebuffer (Multiboot) + 2D library + static desktop (wallpaper + menu bar + Dock) | v0.9.0 | ✅ |
 | 9.0.5 | Live output: 8×16 text/font; Bochs-VBE fallback (`run-vbe`) + GRUB ISO (`iso`) | v0.9.1 | ✅ (needs on-screen confirm) |
-| 9.2 | Userspace **windowserver** process + Terminal app + `fb_map`; surfaces, z-order, window IPC | v0.9.3 | 🟡 built + core PNG-verified; live run pending |
-| 9.3+ | PS/2 mouse + cursor, live window dragging, Dock as a process | — | ⏳ after a live run |
+| 9.2 | Event-driven **windowserver** + keyboard pipeline + interactive Terminal; `fb_map`/`fb_active`; frame consistency | v0.9.4 | 🟡 built + core PNG-verified; live loop pending |
+| 9.3+ | PS/2 mouse + cursor, click-to-focus, live window dragging, Dock as a process | — | ⏳ after a live run |
 | 9.3+ | Desktop, windows, Finder, design system (fonts/alpha/shadows) | — | ⏳ later |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
@@ -64,12 +65,14 @@ QEMU run to confirm on screen — pending (no QEMU in the current CI sandbox).
   rendering the real `kernel/gfx.c`+`desktop.c` to a PNG (`make screenshot` →
   `aurora_desktop.png`). Live paths (`make run-vbe`, `make iso`) await on-screen
   confirmation in QEMU.
-- Window server (9.2): a real userspace `windowserver` process + `Terminal` app
-  + the `fb_map` syscall. The window-server core (window table, z-order, draw
-  commands, compositor) is verified via `make screenshot-wm` →
-  `aurora_windows.png` (Terminal over Aurora Files). The live multi-process run
-  (windowserver maps the framebuffer; Terminal opens a window over IPC) builds
-  clean but is pending an on-screen QEMU run.
+- Window server (9.2): an event-driven userspace `windowserver` (single mailbox
+  loop; only it writes the framebuffer; each PRESENT is a full recomposite) +
+  interactive `Terminal`. Keyboard flows keyboard → windowserver (a forked
+  reader child) → focused app → redraw. In graphics mode `init` runs the
+  windowserver + Terminal (no text shell); in text mode it runs the shell as
+  before. The window-server core (window table, z-order, focus, draw commands,
+  compositor) is verified via `make screenshot-wm` → `aurora_windows.png`. The
+  live keyboard→screen loop builds clean but is pending an on-screen QEMU run.
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.
@@ -83,19 +86,18 @@ QEMU run to confirm on screen — pending (no QEMU in the current CI sandbox).
 
 - **arch/i386:** boot.S, gdt(+TSS), idt, isr/interrupt, pmm, paging, switch,
   usermode, io.
-- **drivers:** vga, serial, keyboard, pit, ata, console.
+- **drivers:** vga, serial, keyboard, pit, ata, console, fb.
 - **fs:** vfs, tmpfs, fat32.
 - **lib (kernel):** string, printf (kprintf), kheap.
 - **kernel:** kmain, scheduler, process, pipe, socket, elf, syscall, gfx, desktop.
-- **drivers:** vga, serial, keyboard, pit, ata, console, fb.
 - **user:** crt0, libc (libc.h + string/printf/malloc/net), wm (compositor core),
   init, logger, netd, sh, cat, grep, hello, orphan, echosrv, echocli, save,
   wserver (windowserver), term (Terminal app).
 - **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py, genfont.py.
 - **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS.
 
-## Syscalls (26)
+## Syscalls (27)
 
 `putc, yield, exit, fork, exec, wait, open, read, write, close, getpid, pipe,
 dup2, sbrk, msgsend, msgrecv, register, lookup, kill, socket, sock_link, poll,
-getuid, setuid, uid_of, fb_map`. See [docs/SYSCALLS.md](docs/SYSCALLS.md).
+getuid, setuid, uid_of, fb_map, fb_active`. See [docs/SYSCALLS.md](docs/SYSCALLS.md).

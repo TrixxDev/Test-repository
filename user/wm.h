@@ -24,6 +24,7 @@ typedef struct {
     int            x, y;        /* top-left of the window (title bar included) */
     int            z;           /* higher = closer to the front */
     int            visible;
+    int            owner;       /* pid of the app that owns the window (for input) */
     const char    *title;
     gfx_surface_t *content;     /* the app's content surface (w x h, packed) */
 } window_t;
@@ -44,8 +45,12 @@ typedef struct {
 } wm_state_t;
 
 void wm_state_init(wm_state_t *st);
-/* Register a window; `pixels` is a caller-owned w*h*4 content buffer. Returns id. */
-int  wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title, void *pixels);
+/* Register a window owned by `owner` (pid); `pixels` is a caller-owned w*h*4
+ * content buffer. Returns the window id. */
+int  wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
+               void *pixels, int owner);
+/* Owner pid of the focused (top-most visible) window, or -1 if none. */
+int  wm_focus_owner(wm_state_t *st);
 void wm_draw_rect(wm_state_t *st, int id, int x, int y, int w, int h, uint32_t color);
 void wm_draw_text(wm_state_t *st, int id, int x, int y, const char *s, uint32_t color);
 void wm_clear(wm_state_t *st, int id, uint32_t color);
@@ -65,6 +70,8 @@ enum {
     WM_DRAW_RECT,    /* app -> server: fill a rect in the window's surface     */
     WM_DRAW_TEXT,    /* app -> server: draw text in the window's surface       */
     WM_PRESENT,      /* app -> server: recomposite to the screen               */
+    WM_KEY,          /* kbd helper -> server, then server -> focused app: a key
+                        (the character is in req.x)                            */
 };
 
 typedef struct {

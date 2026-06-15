@@ -85,7 +85,8 @@ void wm_state_init(wm_state_t *st)
     st->next_z = 1;
 }
 
-int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title, void *pixels)
+int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
+              void *pixels, int owner)
 {
     for (int i = 0; i < WM_MAX_WINDOWS; i++) {
         if (st->used[i])
@@ -100,11 +101,23 @@ int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title, voi
         st->win[i].x = x; st->win[i].y = y;
         st->win[i].z = st->next_z++;
         st->win[i].visible = 1;
+        st->win[i].owner = owner;
         st->win[i].title = st->titles[i];
         st->win[i].content = &st->surf[i];
         return st->win[i].id;
     }
     return -1;
+}
+
+int wm_focus_owner(wm_state_t *st)
+{
+    int best = -1, best_z = -1;
+    for (int i = 0; i < WM_MAX_WINDOWS; i++)
+        if (st->used[i] && st->win[i].visible && st->win[i].z > best_z) {
+            best_z = st->win[i].z;
+            best = st->win[i].owner;
+        }
+    return best;
 }
 
 void wm_clear(wm_state_t *st, int id, uint32_t color)

@@ -121,15 +121,18 @@
   DISPI + поиск LFB по PCI) и GRUB-ISO (`make iso`). Осталось: подтвердить Dock
   на экране QEMU (в песочнице нет QEMU/дисплея).
 - [ ] 9.1 далее: альфа-смешивание, декодер PNG для ассетов
-- [x] **9.2 (windowserver-процесс, ядро core проверено PNG)** Реальный демон
-  `user/wserver.c` (регистрируется как `wm`, как logger/netd): таблица окон,
-  z-order, протокол IPC (`WM_CREATE/DESTROY/MOVE/DRAW_RECT/DRAW_TEXT/PRESENT`).
-  Ядро добавляет один примитив — `fb_map`. Первое приложение `user/term.c`
-  (Terminal) открывает окно по IPC; `init` запускает оба. `make screenshot-wm` →
-  `aurora_windows.png`. **Не завершено до прогона в реальном QEMU.**
-  - [ ] живой multi-process прогон (windowserver `fb_map` + Terminal) — собирается,
-    нужен экран; апгрейд surface-транспорта на shared-memory; потом мышь PS/2 +
-    курсор → перетаскивание окон → Dock как процесс (железо — после живого запуска)
+- [x] **9.2 (event-driven windowserver, ядро core проверено PNG)** Демон
+  `user/wserver.c`: единый event loop, единственный писатель в framebuffer, полный
+  recomposite на каждый `PRESENT`, протокол окон
+  (`WM_CREATE/DESTROY/MOVE/DRAW_RECT/DRAW_TEXT/PRESENT`). Ядро: `fb_map` +
+  `fb_active`. **Клавиатура замкнута:** forked reader (`read(0)`) → `WM_KEY` →
+  фокусное окно → перерисовка; интерактивный `user/term.c` (Terminal) эхо-печатает
+  ввод. `init` в графике запускает windowserver + Terminal (без невидимого shell),
+  в тексте — shell. `make screenshot-wm` → `aurora_windows.png`. **Не завершено до
+  прогона в реальном QEMU.**
+  - [ ] живой контур (framebuffer + реальная клавиатура + перерисовка на экране) —
+    собирается, нужен экран; апгрейд surface-транспорта на shared-memory; потом
+    мышь PS/2 + курсор → click-to-focus → перетаскивание окон → Dock как процесс
 - [ ] **9.3** Aurora Desktop: верхняя панель, Dock, обои, курсор
 - [ ] **9.4** Окна: перетаскивание, сворачивание, закрытие, фокус
 - [ ] **9.5** Finder-аналог `Aurora Files` (поверх VFS — запись уже есть)

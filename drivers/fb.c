@@ -135,6 +135,11 @@ void fb_draw_desktop(void)
         desktop_render(&screen);
 }
 
+int fb_is_active(void)
+{
+    return active;
+}
+
 #define FB_USER_VADDR 0x90000000u   /* between user heap (0x5000_0000) and stack */
 
 uint32_t fb_user_map(uint32_t *w, uint32_t *h, uint32_t *pitch)

@@ -92,10 +92,11 @@ See [docs/ABI.md](docs/ABI.md).
 
 ## System call interface
 
-`int 0x80`; `eax` = number, `ebx`/`ecx`/`edx` = args, `eax` = return. 26 calls:
+`int 0x80`; `eax` = number, `ebx`/`ecx`/`edx` = args, `eax` = return. 27 calls:
 process control, fds, pipes/dup2, sbrk, message-passing IPC, the name registry,
-loopback sockets (`socket`/`sock_link`/`poll`), and uid
-(`getuid`/`setuid`/`uid_of`). Full table in [docs/SYSCALLS.md](docs/SYSCALLS.md).
+loopback sockets (`socket`/`sock_link`/`poll`), uid (`getuid`/`setuid`/`uid_of`),
+and framebuffer (`fb_map`/`fb_active`). Full table in
+[docs/SYSCALLS.md](docs/SYSCALLS.md).
 
 ## Filesystem
 

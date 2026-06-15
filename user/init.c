@@ -29,11 +29,18 @@ int main(int argc, char **argv)
 
     int logpid = start("/disk/LOGGER.ELF");
     int netpid = start("/disk/NETD.ELF");
-    /* Graphics: the window server (root) maps the framebuffer; if there is none
-     * it exits cleanly. The Terminal app (user) then opens the first window. */
-    start("/disk/WSERVER.ELF");
-    start_uid("/disk/TERM.ELF", UID_USER);
-    int shpid  = start_uid("/disk/SH.ELF", UID_USER);
+
+    /* Pick the session by output device: a graphics framebuffer gets the window
+     * server + Terminal (the shell's text console would be invisible there); a
+     * text console gets the interactive shell, exactly as before. */
+    int shpid = -1;
+    if (fb_active()) {
+        printf("[init] graphics mode: window server + Terminal\n");
+        start("/disk/WSERVER.ELF");                 /* root */
+        start_uid("/disk/TERM.ELF", UID_USER);
+    } else {
+        shpid = start_uid("/disk/SH.ELF", UID_USER);
+    }
     (void)logpid;
 
     for (;;) {

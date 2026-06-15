@@ -120,10 +120,36 @@ same `wm_state` API the daemon does:
 make screenshot-wm     # -> aurora_windows.png  (Terminal over Aurora Files)
 ```
 
-**Not "done" until it runs in real QEMU.** The core logic is PNG-verified, but
-the live multi-process path (windowserver `fb_map`s the framebuffer, Terminal
-opens a window over IPC) needs an on-screen boot to confirm — it builds clean and
-runs once there is a live framebuffer (`make run-vbe`/`gui`). The current surface
-transport is server-side (apps send draw commands); client-side shared-memory
-surfaces are a later upgrade. PS/2 mouse + cursor, window dragging and a Dock
-process follow after the first live run.
+### Event loop, frame consistency, input (9.2 stabilization)
+
+The windowserver is a single-source **event loop** — one mailbox carries both app
+requests and keys:
+
+```
+for (;;) { req = msgrecv(); switch (req.op) { CREATE / DRAW_* / MOVE / PRESENT / KEY } }
+```
+
+Two invariants, deliberately simple at this stage:
+
+- **Frame consistency:** only the windowserver writes the framebuffer. The kernel
+  no longer paints the desktop itself; the windowserver owns the screen.
+- **Single repaint model:** every `PRESENT` is a full recomposite (desktop +
+  all windows by z-order). No incremental/dirty-rect rendering yet.
+
+**Keyboard pipeline** (closing the loop keyboard → windowserver → app → screen):
+the windowserver forks a small helper child that blocks on the console
+(`read(0)`) and forwards each key as a `WM_KEY` message; the windowserver routes
+it to the focused (top-most) window's owner app; the app updates its surface and
+calls `PRESENT`. `init` picks the session by output device — `fb_active()` true →
+windowserver + Terminal (no text shell, which would be invisible); false → the
+text shell exactly as before. The Terminal app is event-driven: it echoes typed
+keys into a small transcript and repaints on each keystroke.
+
+**Not "done" until it runs in real QEMU.** The core (windows, z-order, focus,
+draw, composite) is PNG-verified, but the live loop — windowserver `fb_map`s the
+framebuffer, the keyboard child reads real input, the Terminal redraws on screen —
+needs an on-screen boot to confirm. It builds clean and runs once there is a live
+framebuffer (`make run-vbe`/`gui`). Surface transport is server-side draw commands
+for now; client-side shared-memory surfaces are a later upgrade. PS/2 mouse +
+cursor, click-to-focus, window dragging and a Dock process follow the first live
+run.

@@ -47,7 +47,7 @@ static void banner(void)
         "  / _ \\| || | '_/ _ \\ '_/ _` | \n"
         " /_/ \\_\\\\_,_|_| \\___/_| \\__,_| \n");
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
-    terminal_writestring("        AuroraOS  v0.9.3  (windowserver + first window)\n\n");
+    terminal_writestring("        AuroraOS  v0.9.4  (event-driven GUI + keyboard)\n\n");
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info)
@@ -127,7 +127,8 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     int initpid = process_spawn(buf, f->size, "init");
     kfree(buf);
 
-    fb_draw_desktop();                  /* first AuroraOS desktop (if graphics) */
+    /* Frame consistency: only the userspace windowserver writes the framebuffer.
+     * (It is started by init in graphics mode and paints the desktop itself.) */
 
     thread_create_kernel(idle_thread);  /* always-runnable fallback */
 

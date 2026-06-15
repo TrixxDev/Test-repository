@@ -14,12 +14,14 @@ brokered by a userspace network daemon.
 
 It has moved well past a "teaching kernel" — it is an early Unix-like execution
 environment that is starting to look like a platform of services, and now has the
-first piece of its macOS-like visual stack (a linear framebuffer, a 2D library,
-and a static desktop with a menu bar and Dock). It is **not** yet a daily-driver
-OS (no external networking yet — loopback only; the GUI is a static desktop, no
-window server yet; a basic permission model — uid + rwx — but no login/groups).
+first slice of its macOS-like visual stack: a framebuffer, a 2D library with an
+8×16 font, and a **userspace window server** with an event loop that takes
+keyboard input and an interactive Terminal app. It is **not** yet a daily-driver
+OS (no external networking yet — loopback only; the GUI's live multi-process run
+is unconfirmed on hardware; a basic permission model — uid + rwx — but no
+login/groups; no mouse yet).
 
-- **Current version:** v0.9.3
+- **Current version:** v0.9.4
 - **Size:** ~6,800 lines of C / assembly (plus a generated 8×16 font header)
   across kernel + drivers + fs + libc + userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
@@ -38,14 +40,14 @@ window server yet; a basic permission model — uid + rwx — but no login/group
 | Memory | ✅ | E820 parse, bitmap PMM, paging (recursive), per-process address spaces, kernel heap, `sbrk`. |
 | Scheduling | ✅ | Preemptive round-robin threads, run states, block/wake, idle thread, context switch. |
 | Processes | ✅ | PCB, `fork`/`exec`/`wait`/`exit`, exit codes, reparent-to-init, zombie reaping, `kill`. |
-| Ring 3 | ✅ | User mode via TSS + `iret`, `int 0x80` syscalls (26 calls). |
+| Ring 3 | ✅ | User mode via TSS + `iret`, `int 0x80` syscalls (27 calls). |
 | Filesystem | ✅ | VFS (mounts, vnodes, ops, rwx/owner); tmpfs (rw); FAT32 **read/write** over ATA (create/grow/truncate); console device. |
 | Executables | ✅ | ELF32 loader (PT_LOAD), `argc`/`argv` setup, crt0. |
 | IPC | ✅ | Pipes (`pipe`/`dup2`), message passing (`msgsend`/`msgrecv`), named service registry. |
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
 | Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`. |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | 🟡 (9.0–9.2) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); static desktop; **userspace `windowserver` process** + Terminal app + `fb_map` (surfaces, z-order, window IPC, core PNG-verified). Live multi-process run + mouse pending a real boot. |
+| Graphics | 🟡 (9.0–9.2) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** + **keyboard pipeline** + interactive Terminal (surfaces, z-order, focus, window IPC; core PNG-verified). Live loop + mouse pending a real boot. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What it looks like
@@ -98,11 +100,10 @@ command (see the session history / NEXT_STEPS for how tests are run).
 
 ```
 arch/i386/   CPU/arch: boot, GDT/TSS, IDT, ISR, PMM, paging, context switch, ring3
-drivers/     vga, serial, keyboard, pit, ata, console
+drivers/     vga, serial, keyboard, pit, ata, console, fb (framebuffer + VBE)
 fs/          vfs, tmpfs, fat32
 lib/         freestanding kernel lib: string, printf (kprintf), kheap
 kernel/      kmain, scheduler, process, pipe, socket, elf, syscall, gfx, desktop, font8x16.h
-drivers/     vga, serial, keyboard, pit, ata, console, fb (framebuffer + VBE)
 include/     kio.h, multiboot.h, syscall_abi.h (shared ABI), syscall.h, net.h (netd protocol)
 user/        crt0, libc (libc.h + libc/), wm (windowserver core: wm.h + wm.c),
              programs (init, logger, netd, sh, cat, grep, hello, orphan,

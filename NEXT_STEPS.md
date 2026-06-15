@@ -68,26 +68,25 @@ app → window server → compositor → framebuffer
   Multiboot-framebuffer ISO (`make iso`). **Open item:** actually see the Dock on
   a QEMU screen and confirm framebuffer mapping / pitch / mode-switch — this
   cannot be done in the current sandbox (no QEMU/display).
-- **9.2 — Window server (userspace process) — built, core PNG-verified.** A real
-  `windowserver` daemon (`user/wserver.c`, registered as `wm`) keeps the window
-  table + z-order and serves the window IPC
-  (`WM_CREATE/DESTROY/MOVE/DRAW_RECT/DRAW_TEXT/PRESENT`); the kernel adds one
-  primitive, `fb_map`, to hand it the framebuffer. The first app `user/term.c`
-  (Terminal) opens a window over IPC; `init` starts both. The window-server core
-  (`user/wm.c`) is driven by `make screenshot-wm` → `aurora_windows.png`. Out of
-  the kernel by design:
+- **9.2 — Window server (event-driven, userspace) — built, core PNG-verified.** A
+  real `windowserver` (`user/wserver.c`, registered as `wm`): single-source event
+  loop, sole framebuffer writer, full recomposite per `PRESENT`, window IPC
+  (`WM_CREATE/DESTROY/MOVE/DRAW_RECT/DRAW_TEXT/PRESENT`). The kernel adds two tiny
+  primitives — `fb_map` (hand over the framebuffer) and `fb_active` (so `init`
+  picks GUI vs text). **Keyboard pipeline** closed: a forked reader child
+  (`read(0)`) → `WM_KEY` → focused window's owner app → redraw; the interactive
+  `user/term.c` Terminal echoes typed keys. `init` runs windowserver + Terminal in
+  graphics mode (no invisible shell), the shell in text mode. Out of the kernel by
+  design:
   ```
   kernel:        framebuffer · input · IPC
   windowserver:  windows · z-order · focus · compositor   (userspace)
   ```
-  - [ ] **Not "done" until it runs in real QEMU.** The live multi-process path
-    (windowserver `fb_map`s the screen; Terminal opens a window) builds clean but
-    needs an on-screen boot to confirm; it activates once the framebuffer is live
-    (9.0.5).
+  - [ ] **Not "done" until it runs in real QEMU.** The live loop (framebuffer +
+    real keyboard + on-screen redraw) builds clean but needs an on-screen boot;
+    it activates once the framebuffer is live (9.0.5).
   - [ ] upgrade surface transport from server-side draw commands to **client-side
     shared-memory surfaces** (needs a kernel shm primitive).
-  - then: PS/2 mouse + cursor (9.3) → window dragging (9.4/9.5) → Dock as its own
-    process (9.6). Mouse/other devices stay deferred until there is a real run.
 - **9.3 — Aurora Desktop.** Promote the static desktop to a live one (menu bar,
   Dock, wallpaper, mouse cursor) driven by the window server.
 - **9.4 — Windows.** Move/drag, minimise, close, focus.

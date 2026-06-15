@@ -34,6 +34,7 @@
 #define SYS_SETUID  24  /* setuid(uid)               -> 0 / -1       */
 #define SYS_UIDOF   25  /* uid_of(pid)               -> uid / -1     */
 #define SYS_FBMAP   26  /* fb_map(uint info[3])      -> user vaddr/0 */
+#define SYS_FBACTIVE 27 /* fb_active()               -> 1 / 0        */
 /* Note: SYS_REGISTER takes a service mode in arg2 (was reserved/0).   */
 
 /* wait() flags (passed in arg2) */
@@ -46,7 +47,7 @@
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
 
-#define SYS_MAX    27   /* one past the last valid syscall number    */
+#define SYS_MAX    28   /* one past the last valid syscall number    */
 
 /* ---- socket layer (AF_LOOPBACK only for now) ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

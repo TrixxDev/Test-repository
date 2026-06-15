@@ -7,6 +7,9 @@
 /* Map and record the Multiboot framebuffer. Returns 1 if one is active. */
 int  fb_init(const multiboot_info_t *mb);
 
+/* True if a graphics framebuffer is active (lets init pick GUI vs text mode). */
+int  fb_is_active(void);
+
 /* Render the first desktop onto the framebuffer (no-op if inactive). */
 void fb_draw_desktop(void);
 
