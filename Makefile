@@ -83,5 +83,15 @@ debug: $(KERNEL) $(DISK)
 	qemu-system-i386 -kernel $(KERNEL) -serial stdio -m 64M \
 	    -drive file=$(DISK),format=raw,if=ide -s -S
 
+# Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
+# needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
+SCREENSHOT := aurora_desktop.png
+.PHONY: screenshot
+screenshot:
+	$(CC) -I. -Ikernel tools/render_desktop.c -o /tmp/aurora_render
+	/tmp/aurora_render /tmp/aurora_desktop.ppm
+	python3 tools/ppm2png.py /tmp/aurora_desktop.ppm $(SCREENSHOT)
+	@echo "Wrote $(SCREENSHOT)"
+
 clean:
 	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o

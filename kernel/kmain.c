@@ -22,6 +22,7 @@
 #include "tmpfs.h"
 #include "fat32.h"
 #include "ata.h"
+#include "fb.h"
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
 
@@ -46,7 +47,7 @@ static void banner(void)
         "  / _ \\| || | '_/ _ \\ '_/ _` | \n"
         " /_/ \\_\\\\_,_|_| \\___/_| \\__,_| \n");
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
-    terminal_writestring("        AuroraOS  v0.8.2  (sockets + security + FS write)\n\n");
+    terminal_writestring("        AuroraOS  v0.9.0  (framebuffer + first desktop)\n\n");
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info)
@@ -102,6 +103,12 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
         kprintf("      no ATA disk; using embedded init\n");
     }
 
+    kprintf("[boot] graphics...\n");
+    if (fb_init(mb))
+        kprintf("      linear framebuffer up; drawing desktop\n");
+    else
+        kprintf("      no framebuffer from loader; staying in text mode\n");
+
     __asm__ volatile("sti");
 
     kprintf("[boot] scheduler + process model...\n");
@@ -119,6 +126,8 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
 
     int initpid = process_spawn(buf, f->size, "init");
     kfree(buf);
+
+    fb_draw_desktop();                  /* first AuroraOS desktop (if graphics) */
 
     thread_create_kernel(idle_thread);  /* always-runnable fallback */
 

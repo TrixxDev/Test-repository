@@ -3,13 +3,14 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.8.2.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.0.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
-netd + poll), Phase 8A.5 (security: VFS rwx, service permissions, privileged
-ports) and FS write (FAT32 read/write) are implemented and build clean. FS write
-is additionally verified by running the real `fs/fat32.c` write path on the host
-against the disk image and re-parsing it independently; the in-QEMU boot test is
-the pending step (no QEMU in the current CI sandbox).
+netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and the first
+graphics (Phase 9.0 framebuffer + minimal 9.1 2D library + a static desktop) are
+implemented and build clean. FS write and the desktop rendering are verified on
+the host (the real `fs/fat32.c` write path + image re-parse; the real
+`kernel/gfx.c`+`kernel/desktop.c` rendered to a PNG). In-QEMU boot tests of the
+newest pieces are the pending step (no QEMU in the current CI sandbox).
 
 ## Phase status
 
@@ -27,7 +28,9 @@ the pending step (no QEMU in the current CI sandbox).
 | 8A | Loopback sockets (kernel `struct socket`) + `netd` broker + `poll` + uid foundation | v0.8.0 | ✅ |
 | 8A.5 | Security foundation: VFS rwx/owner, service-registry permissions, privileged ports | v0.8.1 | ✅ |
 | 8.2 | FS write: ATA sector write + FAT32 read/write (create/grow/truncate), `open(O_CREAT/O_TRUNC)` | v0.8.2 | ✅ |
-| 9 | Graphics (framebuffer → 2D → window server → compositor → desktop) | — | ⏳ **next** |
+| 9.0/9.1 | Framebuffer (Multiboot) + 2D library + static desktop (wallpaper + menu bar + Dock) | v0.9.0 | ✅ |
+| 9.2 | Window server + compositor (off-screen surfaces), PS/2 mouse | — | ⏳ **next** |
+| 9.3+ | Desktop, windows, Finder, design system (fonts/alpha/shadows) | — | ⏳ later |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
 
@@ -53,6 +56,9 @@ the pending step (no QEMU in the current CI sandbox).
 - FS write: `save /disk/NOTE.TXT hello` creates/writes a FAT32 file, `cat`
   reads it back; files persist on the disk image. (Verified on the host with
   the real driver code + independent re-parse of the image.)
+- Graphics: a static desktop (wallpaper + menu bar + Dock) renders via the 2D
+  library. Verified by rendering the real `kernel/gfx.c`+`desktop.c` to a PNG
+  (`make screenshot` → `aurora_desktop.png`); in-QEMU display test pending.
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.

@@ -109,9 +109,14 @@
 > приложения **не** рисуют в фреймбуфер напрямую: `app → window server →
 > compositor → framebuffer`.
 
-- [ ] **9.0** Фреймбуфер: уйти от VGA, линейный RGB-режим (VBE/VESA; позже GOP)
-- [ ] **9.1** 2D-библиотека: пиксель, прямоугольник, скругления, альфа, текст,
-  PNG-декодер
+- [x] **9.0** Фреймбуфер: линейный RGB-режим (Multiboot 1024×768×32),
+  `drivers/fb.c` (v0.9.0). Гейтится: без фреймбуфера — текстовый режим.
+- [x] **9.1 (минимум)** 2D-библиотека (`kernel/gfx.c`: rect, rounded rect,
+  circle, градиент, blit) + **первый рабочий стол** (`kernel/desktop.c`: обои +
+  панель + Dock). `make screenshot` → `aurora_desktop.png`. См.
+  [`docs/GRAPHICS.md`](docs/GRAPHICS.md).
+- [ ] 9.1 далее: альфа, текст (шрифт), декодер PNG, fallback Bochs-VBE/PCI для
+  живого фреймбуфера под `qemu -kernel`
 - [ ] **9.2** Window Server + композитор (off-screen surfaces, тени, «стекло»)
 - [ ] **9.3** Aurora Desktop: верхняя панель, Dock, обои, курсор
 - [ ] **9.4** Окна: перетаскивание, сворачивание, закрытие, фокус

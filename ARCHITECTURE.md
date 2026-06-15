@@ -31,8 +31,9 @@ This is the system-level overview. Detailed contracts live in [`docs/`](docs/):
   ├─ scheduler (threads, states, context switch)
   ├─ memory (PMM, paging, per-proc address space, kheap)
   ├─ socket layer (struct socket endpoints, sock_link, poll) — mechanism only
+  ├─ graphics (framebuffer + 2D library + static desktop)
   ├─ VFS ── tmpfs / FAT32 / console
-  ├─ drivers (ata, keyboard, pit, serial, vga)
+  ├─ drivers (ata, keyboard, pit, serial, vga, fb)
   └─ arch (GDT/TSS, IDT, ISR/IRQ, PIC)
                           │
                        hardware (QEMU i686)
@@ -133,6 +134,21 @@ backed by fds, joined by the root-only `sock_link`, with `poll` for readiness;
 owns ports and the bind/connect/accept rendezvous, then asks the kernel to link
 the two endpoints, after which data flows endpoint-to-endpoint. Verified end to
 end by `echosrv`/`echocli`. Full design in [docs/NETWORKING.md](docs/NETWORKING.md).
+
+## Graphics (Phase 9.0 / 9.1)
+
+The first slice of the macOS-like visual stack, built with the intended layering
+from the start (`app → window server → compositor → framebuffer`):
+
+- **Framebuffer** (`drivers/fb.c`) — a 1024×768×32 linear mode requested via the
+  Multiboot header; `fb_init` maps the loader-provided framebuffer into a
+  `gfx_surface_t`. Fully gated: with no framebuffer the kernel stays in text mode.
+- **2D library** (`kernel/gfx.c`) — portable software rendering: rects, rounded
+  rects, circles, vertical gradients, blit (no alpha/fonts yet).
+- **Static desktop** (`kernel/desktop.c`) — wallpaper + menu bar + Dock, drawn
+  once from `kmain`. Because the 2D code is portable it also renders to a PNG on
+  the host (`make screenshot`). Window server + compositor are next. See
+  [docs/GRAPHICS.md](docs/GRAPHICS.md).
 
 ## Security (foundation, Phase 8A.5)
 

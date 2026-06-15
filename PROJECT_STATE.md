@@ -13,13 +13,14 @@ service model (init + daemons + message-passing IPC), and loopback sockets
 brokered by a userspace network daemon.
 
 It has moved well past a "teaching kernel" — it is an early Unix-like execution
-environment that is starting to look like a platform of services. The aim is a
-macOS-like desktop, so the next push is the visual stack. It is **not** yet a
-daily-driver OS (no external networking yet — loopback only; no GUI yet; a basic
-permission model — uid + rwx — but no login/groups).
+environment that is starting to look like a platform of services, and now has the
+first piece of its macOS-like visual stack (a linear framebuffer, a 2D library,
+and a static desktop with a menu bar and Dock). It is **not** yet a daily-driver
+OS (no external networking yet — loopback only; the GUI is a static desktop, no
+window server yet; a basic permission model — uid + rwx — but no login/groups).
 
-- **Current version:** v0.8.2
-- **Size:** ~6,000 lines of C / assembly across kernel + drivers + fs + libc +
+- **Current version:** v0.9.0
+- **Size:** ~6,200 lines of C / assembly across kernel + drivers + fs + libc +
   userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
   `qemu-system-i386 -kernel`.
@@ -44,8 +45,15 @@ permission model — uid + rwx — but no login/groups).
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
 | Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`. |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | ⏳ | Text mode only — the visual stack (Phase 9) is next. |
+| Graphics | 🟡 (9.0/9.1) | Linear framebuffer (Multiboot); 2D library (rects, rounded rects, circles, gradient, blit); static desktop (wallpaper + menu bar + Dock). No window server/fonts yet. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
+
+## What it looks like
+
+The first AuroraOS desktop (rendered by the real `kernel/gfx.c` +
+`kernel/desktop.c`; run `make screenshot` to regenerate):
+
+![AuroraOS desktop](aurora_desktop.png)
 
 ## What you can do today
 
@@ -84,12 +92,14 @@ arch/i386/   CPU/arch: boot, GDT/TSS, IDT, ISR, PMM, paging, context switch, rin
 drivers/     vga, serial, keyboard, pit, ata, console
 fs/          vfs, tmpfs, fat32
 lib/         freestanding kernel lib: string, printf (kprintf), kheap
-kernel/      kmain, scheduler, process, pipe, socket, elf, syscall
+kernel/      kmain, scheduler, process, pipe, socket, elf, syscall, gfx, desktop
+drivers/     vga, serial, keyboard, pit, ata, console, fb (framebuffer)
 include/     kio.h, multiboot.h, syscall_abi.h (shared ABI), syscall.h, net.h (netd protocol)
 user/        crt0, libc (libc.h + libc/), programs (init, logger, netd, sh, cat,
              grep, hello, orphan, echosrv, echocli, save)
-tools/       bin2c.py (embed ELF), mkfat32.py (build FAT32 image)
-docs/        ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING
+tools/       bin2c.py (embed ELF), mkfat32.py (FAT32 image), render_desktop.c +
+             ppm2png.py (host desktop -> PNG)
+docs/        ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS
 linker.ld    kernel link map (load at 1 MiB)
 Makefile     clang/lld cross-build + user programs + disk image
 ```
