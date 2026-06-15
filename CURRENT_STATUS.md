@@ -3,11 +3,13 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.8.1.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.8.2.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
-netd + poll) and Phase 8A.5 (security foundation: VFS rwx, service permissions,
-privileged ports) are implemented and build clean; the in-QEMU boot test is the
-pending verification step (no QEMU in the current CI sandbox).
+netd + poll), Phase 8A.5 (security: VFS rwx, service permissions, privileged
+ports) and FS write (FAT32 read/write) are implemented and build clean. FS write
+is additionally verified by running the real `fs/fat32.c` write path on the host
+against the disk image and re-parsing it independently; the in-QEMU boot test is
+the pending step (no QEMU in the current CI sandbox).
 
 ## Phase status
 
@@ -24,9 +26,10 @@ pending verification step (no QEMU in the current CI sandbox).
 | 7.1 | Lifecycle hardening (reparent, bg auto-reap, kill, graceful shutdown) | v0.7.1 | ✅ |
 | 8A | Loopback sockets (kernel `struct socket`) + `netd` broker + `poll` + uid foundation | v0.8.0 | ✅ |
 | 8A.5 | Security foundation: VFS rwx/owner, service-registry permissions, privileged ports | v0.8.1 | ✅ |
-| 8B | Ethernet/IP stack (virtio-net driver, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ next |
-| 9 | Graphics (window server → compositor → framebuffer) | — | ⏳ later |
-| 10 | Desktop + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
+| 8.2 | FS write: ATA sector write + FAT32 read/write (create/grow/truncate), `open(O_CREAT/O_TRUNC)` | v0.8.2 | ✅ |
+| 9 | Graphics (framebuffer → 2D → window server → compositor → desktop) | — | ⏳ **next** |
+| 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
+| 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
 
 ## Verified behaviors
 
@@ -47,6 +50,9 @@ pending verification step (no QEMU in the current CI sandbox).
   owner/root-only (no service-name hijack).
 - Privileged ports: binding a port < 1024 requires root (the echo demo uses
   7000); netd checks the requester's uid via `uid_of`.
+- FS write: `save /disk/NOTE.TXT hello` creates/writes a FAT32 file, `cat`
+  reads it back; files persist on the disk image. (Verified on the host with
+  the real driver code + independent re-parse of the image.)
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.

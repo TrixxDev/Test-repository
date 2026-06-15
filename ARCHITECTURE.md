@@ -102,9 +102,13 @@ VFS (`fs/vfs.c`) abstracts concrete filesystems behind `vfs_node_t` + an ops
 table, attached at mount points:
 
 - **tmpfs** (`/tmp`) — in-memory, read/write/create.
-- **FAT32** (`/disk`) — read-only, over the ATA PIO driver; reads the disk image
-  built by `tools/mkfat32.py`.
+- **FAT32** (`/disk`) — **read/write**, over the ATA PIO driver (`ata_read_sectors`
+  / `ata_write_sectors`); mounts the image built by `tools/mkfat32.py`. Supports
+  file create/grow/overwrite/truncate with FAT + directory-entry updates.
 - **console** — a device node backing stdin/stdout/stderr.
+
+Nodes carry `owner_uid` + `mode`; `open`/`exec` are permission-checked (see the
+security section).
 
 File descriptors live in the PCB (`open/read/write/close`, inherited across
 fork, refcounted). See [docs/VFS.md](docs/VFS.md).

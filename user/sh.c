@@ -113,7 +113,8 @@ int main(int argc, char **argv)
         if (strcmp(av[0], "exit") == 0) { printf("bye\n"); return 0; }
         if (strcmp(av[0], "help") == 0) {
             printf("builtins: help, exit, id, kill <pid>, log <msg>. pipes: a | b. "
-                   "net demo: echosrv & then echocli [msg]. else runs /disk/NAME.ELF\n");
+                   "net demo: echosrv & then echocli [msg]. fs write: save <path> <text> "
+                   "then cat <path>. else runs /disk/NAME.ELF\n");
             continue;
         }
         if (strcmp(av[0], "id") == 0) {

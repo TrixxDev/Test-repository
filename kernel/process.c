@@ -106,18 +106,66 @@ static void close_all_fds(process_t *p)
     }
 }
 
+/* Create `path`'s file in its parent directory (used for O_CREAT). Requires
+ * write permission on the parent. Returns the new node, owned by the caller. */
+static vfs_node_t *create_file(const char *path, int uid)
+{
+    int len = 0;
+    while (path[len] && len < 255) len++;
+    int slash = -1;
+    for (int i = 0; i < len; i++)
+        if (path[i] == '/') slash = i;
+    if (slash < 0)
+        return NULL;
+
+    char dir[128], base[64];
+    int di = 0;
+    if (slash == 0) {
+        dir[di++] = '/';
+    } else {
+        for (int i = 0; i < slash && di < 127; i++) dir[di++] = path[i];
+    }
+    dir[di] = '\0';
+    int bi = 0;
+    for (int i = slash + 1; i < len && bi < 63; i++) base[bi++] = path[i];
+    base[bi] = '\0';
+    if (base[0] == '\0')
+        return NULL;
+
+    vfs_node_t *d = vfs_resolve(dir);
+    if (!d || !vfs_permitted(d, uid, VFS_W))
+        return NULL;
+
+    vfs_node_t *node = vfs_create(d, base, VFS_FILE);
+    if (node) {
+        node->owner_uid = uid;
+        node->mode = 0644;
+    }
+    return node;
+}
+
 int sys_open(const char *path, int flags)
 {
+    int uid = process_current()->uid;
     vfs_node_t *node = vfs_resolve(path);
-    if (!node)
-        return -1;
+
+    if (!node) {
+        if (!(flags & O_CREAT))
+            return -1;
+        node = create_file(path, uid);
+        if (!node)
+            return -1;
+    }
 
     int want = VFS_R;
     int acc = flags & 3;
     if (acc == O_WRONLY)      want = VFS_W;
     else if (acc == O_RDWR)   want = VFS_R | VFS_W;
-    if (!vfs_permitted(node, process_current()->uid, want))
+    if (!vfs_permitted(node, uid, want))
         return -1;
+
+    if (flags & O_TRUNC)
+        node->size = 0;     /* logical truncate; the next write persists it */
 
     return fd_install(process_current(), node);
 }

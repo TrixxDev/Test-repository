@@ -13,12 +13,13 @@ service model (init + daemons + message-passing IPC), and loopback sockets
 brokered by a userspace network daemon.
 
 It has moved well past a "teaching kernel" — it is an early Unix-like execution
-environment that is starting to look like a platform of services. It is **not**
-yet a daily-driver OS (no external networking yet — loopback only; no GUI; no FS
-writes to disk; a basic permission model — uid + rwx — but no login/groups).
+environment that is starting to look like a platform of services. The aim is a
+macOS-like desktop, so the next push is the visual stack. It is **not** yet a
+daily-driver OS (no external networking yet — loopback only; no GUI yet; a basic
+permission model — uid + rwx — but no login/groups).
 
-- **Current version:** v0.8.1
-- **Size:** ~5,700 lines of C / assembly across kernel + drivers + fs + libc +
+- **Current version:** v0.8.2
+- **Size:** ~6,000 lines of C / assembly across kernel + drivers + fs + libc +
   userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
   `qemu-system-i386 -kernel`.
@@ -37,13 +38,13 @@ writes to disk; a basic permission model — uid + rwx — but no login/groups).
 | Scheduling | ✅ | Preemptive round-robin threads, run states, block/wake, idle thread, context switch. |
 | Processes | ✅ | PCB, `fork`/`exec`/`wait`/`exit`, exit codes, reparent-to-init, zombie reaping, `kill`. |
 | Ring 3 | ✅ | User mode via TSS + `iret`, `int 0x80` syscalls (26 calls). |
-| Filesystem | ✅ | VFS (mounts, vnodes, ops); tmpfs (rw); FAT32 (read-only) over ATA; console device. |
+| Filesystem | ✅ | VFS (mounts, vnodes, ops, rwx/owner); tmpfs (rw); FAT32 **read/write** over ATA (create/grow/truncate); console device. |
 | Executables | ✅ | ELF32 loader (PT_LOAD), `argc`/`argv` setup, crt0. |
 | IPC | ✅ | Pipes (`pipe`/`dup2`), message passing (`msgsend`/`msgrecv`), named service registry. |
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
 | Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`. |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | ❌ | Text mode only. |
+| Graphics | ⏳ | Text mode only — the visual stack (Phase 9) is next. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What you can do today
@@ -57,6 +58,8 @@ aurora> log system online        # IPC message to the logger daemon
 aurora> id                       # shows uid=1000 (the shell runs unprivileged)
 aurora> echosrv &                # loopback echo server (binds port 7000 via netd)
 aurora> echocli hello-loopback   # client -> netd -> server -> back
+aurora> save /disk/NOTE.TXT hi   # write a file to disk (FAT32 write)
+aurora> cat /disk/NOTE.TXT       # read it back (persists across reboot)
 aurora> orphan                   # orphan reparented to init and reaped
 aurora> hello job &              # background job, auto-reaped
 aurora> exit                     # graceful shutdown of services
@@ -84,7 +87,7 @@ lib/         freestanding kernel lib: string, printf (kprintf), kheap
 kernel/      kmain, scheduler, process, pipe, socket, elf, syscall
 include/     kio.h, multiboot.h, syscall_abi.h (shared ABI), syscall.h, net.h (netd protocol)
 user/        crt0, libc (libc.h + libc/), programs (init, logger, netd, sh, cat,
-             grep, hello, orphan, echosrv, echocli)
+             grep, hello, orphan, echosrv, echocli, save)
 tools/       bin2c.py (embed ELF), mkfat32.py (build FAT32 image)
 docs/        ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING
 linker.ld    kernel link map (load at 1 MiB)

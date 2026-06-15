@@ -5,93 +5,102 @@ Forward plan and the reasoning behind the ordering. Status of what's done:
 
 ## Guiding rule
 
-Keep the architecture clean over chasing features. New subsystems (network,
-graphics, assistant) should be **userspace services** that talk over IPC, not
-kernel code. Do not start graphics until there is a stable network daemon,
-sockets, filesystem writes, and a minimal service model — otherwise the GUI has
-nothing solid to live on.
+Keep the architecture clean over chasing features. New subsystems (graphics,
+network, assistant) are **userspace services** that talk over IPC, not kernel
+code.
 
-## Phase 8 — Networking
+**Priority shift — AuroraOS targets a macOS-like desktop.** What a user
+perceives as "macOS" is the *visual* layer (window manager, compositor, Dock,
+Finder, animations, typography), not TCP/ARP. So the work splits into two
+branches:
 
-Build it as userspace services over IPC, not inside the kernel.
+- **Branch A — infrastructure:** FS write, security, services, *then* network.
+- **Branch B — visual environment:** framebuffer → 2D → compositor → desktop.
 
-- **8A — loopback — DONE (v0.8.0).** Kernel `struct socket` endpoints
-  (`AF_LOOPBACK`), `socket`/`sock_link`/`poll` syscalls, and a `netd` daemon
-  that owns ports and brokers bind/connect/accept over message IPC. Verified
-  end to end by `echosrv`/`echocli` (client → netd → server → back). See
-  [docs/NETWORKING.md](docs/NETWORKING.md).
-  - [x] socket API (kernel mechanism + IPC RPC to `netd`)
-  - [x] loopback endpoint pair with blocking recv/send + EOF
-  - [x] `poll()` readiness wait
-  - [ ] follow-ups: real `poll` timeouts (tick-driven), poll ops for
-    pipe/console, datagram (`SOCK_DGRAM`) sockets, in-QEMU boot test of the demo
-- **8A.5 — security foundation — DONE (v0.8.1).** Done *before* the network
-  widens the attack surface: per-process uid + `getuid`/`setuid`/`uid_of`; rwx +
-  owner on VFS nodes enforced at `open`/`exec`; service-registry permissions
-  (lookup gated, no name hijack); privileged ports (<1024) root-only in netd.
-  See [docs/VFS.md](docs/VFS.md), [docs/IPC.md](docs/IPC.md).
-- **8B — Ethernet/IP — next.** Same daemon boundary:
-  `app → IPC → netd → driver → hardware`.
-  - [ ] NIC driver: **virtio-net** (preferred over rtl8139 — simpler, faster,
-    less legacy cruft; rtl8139 only as a learning aside).
-  - [ ] ARP → IPv4 → UDP → TCP → DNS, in that order, behind the existing socket
-    API. TCP will likely take longer than the whole loopback phase.
-  - [ ] HTTP only after the above
+Branch B starts **earlier** than it would for a classic Unix, because the
+desktop is the product. The one infrastructure piece the desktop genuinely needs
+first is **filesystem writes** (Finder, settings, Dock state, app data). The
+network can wait until after the desktop exists.
 
-Out of scope for Phase 8 (deferred): TLS, HTTPS, IPv6, DHCP, Wi-Fi.
+### Chosen path from here
 
-Rationale: most hobby OSes start at TCP and suffer; loopback + a daemon
-boundary keeps the stack testable and the kernel small.
+```
+FS write (done) → Framebuffer → Window Server → Compositor →
+Dock + Desktop → Mouse + Windows → Finder → Network
+```
 
-## Other near-term debts (pick up alongside 8)
+## FS write — DONE (v0.8.2)
 
-- **Security — extend the model.** The foundation is in (uid, VFS rwx, service
-  perms, privileged ports — see 8A.5 above). Next, when justified: a `gid` +
-  group bits; a real login / user database; permissions persisted by a writable
-  FS; and restricting `kill`/`msgsend` across uids if it becomes a concern.
-- **Filesystem writes:** FAT32 is read-only. Add write support (or a writable
-  on-disk FS) + a block cache. Needed for persistence and many services.
-- **Real signals:** shutdown is currently a `"shutdown"` IPC message by
-  convention. A minimal signal mechanism (`kill` + handlers) would generalize
-  job control and shutdown.
-- **Shell features:** multi-stage pipes (`a | b | c`), redirects (`>`, `<`),
-  more builtins, a small set of coreutils.
-- **libc growth:** more string/stdio, a better allocator (coalescing/splitting).
+FAT32 is now read/write. ATA gained sector writes; FAT32 gained cluster
+allocation, file create, growing writes (read-modify-write of partial clusters),
+and directory-entry/size updates across both FAT copies. `open` supports
+`O_CREAT`/`O_TRUNC` (with a parent-directory write-permission check); the `save`
+program + `cat` demonstrate persistence. See [docs/VFS.md](docs/VFS.md).
 
-## Phase 9 — Graphics
+- [x] `ata_write_sectors` + cache flush
+- [x] FAT32 write/create/grow/truncate, FAT + dirent updates
+- [x] `open(O_CREAT|O_TRUNC)`, `save` userspace tool
+- [ ] follow-ups: file delete + cluster freeing (truncate currently leaks the
+  tail of the chain), subdirectory create, a block cache, persisted owner/mode
+  (FAT perms are synthetic and reset on remount), in-QEMU boot test
 
-Only after netd + sockets + FS writes + a minimal service model.
+## Phase 9 — Graphics (Branch B, the macOS feel) — NEXT
 
-- Build the right layering from day one — do **not** let apps draw straight to
-  the framebuffer:
+Build the layering correctly from day one — apps never draw to the framebuffer
+directly:
 
-  ```
-  app → window server → compositor → framebuffer
-  ```
+```
+app → window server → compositor → framebuffer
+```
 
-- [ ] VBE/VESA linear framebuffer (later GOP/UEFI)
-- [ ] software rendering: blits, fonts, alpha
-- [ ] compositor (overlap, shadows, rounded corners — macOS-like "glass")
-- [ ] mouse (PS/2) + input events routed through the window server
-- [ ] widgets: windows, buttons, menu bar, a Dock-like panel
+- **9.0 — Framebuffer.** Leave VGA text mode. Get a linear RGB framebuffer
+  (VBE/VESA now; GOP later if/when UEFI). Target 1024×768+ ; expose it as a
+  device the compositor owns.
+- **9.1 — 2D graphics library.** pixel, rect, rounded rect, alpha blending,
+  text rendering (a bitmap/edge-AA font), and a PNG decoder for assets.
+- **9.2 — Compositor + Window Server.** `app → window server → compositor →
+  framebuffer`. Apps render into off-screen surfaces; the compositor owns the
+  screen. This boundary is the single most important macOS-like decision.
+- **9.3 — Aurora Desktop.** First desktop: top menu bar, Dock, wallpaper, mouse
+  cursor — even before real windows.
+- **9.4 — Windows.** Move/drag, minimise, close, focus.
+- **9.5 — Finder analogue (`Aurora Files`).** A real GUI app over the VFS
+  (needs FS write — now available).
+- **9.6 — Design system.** 12–16px corner radii, translucency, shadows, blur,
+  smooth animations. This is where the "macOS feel" actually appears.
 
-## Phase 10 — Desktop & Aurora Assistant
+Mouse (PS/2) input is routed through the window server (added around 9.3/9.4).
 
-- [ ] window manager + desktop, system apps (terminal, file manager, settings)
-- [ ] **Aurora Assistant as a userspace daemon (`aurorad`)**, reached over IPC
-      by shell / GUI / file manager — never in the kernel. (AI work is
-      deliberately deferred until the platform underneath is ready.)
+## Phase 8B — Networking (Branch A, deferred until after the desktop)
 
-## Cross-cutting (whenever they block progress)
+Still the right design (userspace `netd`, `app → IPC → netd → driver → hw`), but
+intentionally **after** the visual stack for a desktop-first OS.
 
-- Driver model (a uniform device/registration interface).
-- Multi-user + permissions + a basic security model.
-- SMP / better scheduler (priorities, sleep/timers) if needed.
+- [ ] NIC driver: **virtio-net** (preferred over rtl8139 — simpler, faster, less
+  legacy cruft).
+- [ ] ARP → IPv4 → UDP → TCP → DNS, in that order, behind the existing socket
+  API. TCP will likely take longer than the whole loopback phase.
+- [ ] HTTP only after the above. Out of scope: TLS, HTTPS, IPv6, DHCP, Wi-Fi.
+
+## Phase 10 — Desktop apps & Aurora Assistant
+
+- [ ] system apps (terminal, settings) on top of the window server.
+- [ ] **Aurora Assistant as a userspace daemon (`aurorad`)**, reached over IPC —
+  never in the kernel. (AI work stays deferred until the platform is ready.)
+
+## Other near-term debts (pick up when they block progress)
+
+- **Security — extend the model:** `gid`/groups, a login/user database,
+  permissions persisted by the FS, restricting `kill`/`msgsend` across uids.
+- **Real signals:** shutdown is a `"shutdown"` IPC message by convention; a
+  minimal signal mechanism would generalise job control and shutdown.
+- **Shell features:** multi-stage pipes (`a | b | c`), redirects (`>`, `<`).
+- **libc growth:** more string/stdio, a coalescing allocator.
+- **Driver model / SMP / better scheduler** — when they start to bite.
 
 ## Suggested immediate next action
 
-Boot-test the Phase 8A/8A.5 demo in QEMU (`make run`, then `id`, `echosrv &`,
-`echocli`) to confirm the loopback path and the new permission checks
-interactively. Then start **Phase 8B**: a **virtio-net** driver and the
-ARP→IPv4→UDP→TCP path behind the existing `netd`/socket boundary, with the
-security model already in place.
+Boot-test the FS-write demo in QEMU (`make run`, then `save /disk/NOTE.TXT hello`
+→ `cat /disk/NOTE.TXT`). Then start **Phase 9.0 — framebuffer**: switch the boot
+into a linear-framebuffer video mode and stand up a minimal `gfx` surface, so the
+compositor and desktop have something to draw on.

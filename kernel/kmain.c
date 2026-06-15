@@ -46,7 +46,7 @@ static void banner(void)
         "  / _ \\| || | '_/ _ \\ '_/ _` | \n"
         " /_/ \\_\\\\_,_|_| \\___/_| \\__,_| \n");
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
-    terminal_writestring("        AuroraOS  v0.8.1  (loopback net + security)\n\n");
+    terminal_writestring("        AuroraOS  v0.8.2  (sockets + security + FS write)\n\n");
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info)

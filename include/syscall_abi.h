@@ -38,10 +38,12 @@
 /* wait() flags (passed in arg2) */
 #define WNOHANG    1    /* return 0 immediately if no child has exited */
 
-/* open() access mode (passed in arg2/flags) */
+/* open() flags (passed in arg2): low 2 bits are the access mode */
 #define O_RDONLY   0
 #define O_WRONLY   1
 #define O_RDWR     2
+#define O_CREAT    0x100    /* create the file if it does not exist */
+#define O_TRUNC    0x200    /* truncate to zero length on open      */
 
 #define SYS_MAX    26   /* one past the last valid syscall number    */
 

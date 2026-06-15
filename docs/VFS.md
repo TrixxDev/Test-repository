@@ -27,8 +27,7 @@ vfs_ops_t {
 }
 ```
 
-A filesystem only implements the ops it supports (e.g. FAT32 is read-only and
-has no `write`/`create`).
+A filesystem only implements the ops it supports.
 
 ## Mounts and path resolution
 
@@ -42,12 +41,15 @@ has no `write`/`create`).
 | Mount    | Filesystem | Backing            | Capabilities          |
 |----------|------------|--------------------|-----------------------|
 | `/tmp`   | tmpfs (`fs/tmpfs.c`) | kernel heap   | read/write/create/readdir |
-| `/disk`  | FAT32 (`fs/fat32.c`) | ATA PIO disk  | read/finddir/readdir (read-only) |
+| `/disk`  | FAT32 (`fs/fat32.c`) | ATA PIO disk  | read/write/create/finddir/readdir |
 | (device) | console (`drivers/console.c`) | keyboard + VGA | read (stdin) / write (stdout) |
 
 - **tmpfs**: in-memory nodes; files grow on write.
-- **FAT32**: parses the BPB, follows cluster chains, reads 8.3 directory
-  entries; sits on the ATA PIO driver (`drivers/ata.c`).
+- **FAT32**: parses the BPB, follows cluster chains, reads/writes 8.3 entries.
+  Writes go through `drivers/ata.c` (`ata_write_sectors` + cache flush):
+  `create` makes a root-directory entry, `write` allocates clusters and grows
+  the chain (read-modify-writing partial clusters), and the file's size + first
+  cluster are written back to its directory entry in **both** FAT copies.
 - **console**: a single device node used for the standard streams.
 
 ## Permissions (Phase 8A.5)
@@ -61,7 +63,9 @@ Enforcement happens at **path open time**, not per read/write (a descriptor is a
 capability once obtained, as in Unix):
 
 - `open(path, flags)` checks `VFS_R`/`VFS_W` according to the access mode
-  (`O_RDONLY`/`O_WRONLY`/`O_RDWR`).
+  (`O_RDONLY`/`O_WRONLY`/`O_RDWR`). With `O_CREAT`, the file is created if absent
+  — which checks `VFS_W` on the **parent directory** and makes the new file owned
+  by the caller (mode `0644`). `O_TRUNC` resets the length to zero.
 - `exec(path)` checks `VFS_X`.
 
 Pipes, sockets and the console are installed as descriptors directly (never via a
@@ -86,7 +90,11 @@ sockets are also descriptors).
 
 ## Limitations / TODO
 
-- No write support for FAT32, no block cache.
-- Permissions have no group bits and FAT32 perms are synthetic (read-only
-  medium); a writable FS would persist real owner/mode.
+- FAT32 write covers create/grow/overwrite/truncate of files in the **root
+  directory**. Not yet: file delete, freeing clusters on truncate (the tail of
+  the chain leaks), subdirectory creation, and a block cache (every op hits the
+  disk).
+- Permissions have no group bits, and FAT32 perms are synthetic (`0755` files /
+  `0777` dirs, root-owned) so they reset on remount; a metadata-carrying FS would
+  persist real owner/mode.
 - No path normalization for `.`/`..`.
