@@ -118,6 +118,15 @@ screenshot:
 	python3 tools/ppm2png.py /tmp/aurora_desktop.ppm $(SCREENSHOT)
 	@echo "Wrote $(SCREENSHOT)"
 
+# Render the window server / compositor scene (two overlapping app windows) to a
+# PNG with the real kernel/userspace code — previews Phase 9.2 without a display.
+.PHONY: screenshot-wm
+screenshot-wm:
+	$(CC) -I. -Ikernel -Iuser tools/render_wm.c -o /tmp/aurora_render_wm
+	/tmp/aurora_render_wm /tmp/aurora_windows.ppm
+	python3 tools/ppm2png.py /tmp/aurora_windows.ppm aurora_windows.png
+	@echo "Wrote aurora_windows.png"
+
 clean:
 	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o
 	rm -rf isodir aurora.iso

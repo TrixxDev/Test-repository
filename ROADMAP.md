@@ -121,10 +121,14 @@
   DISPI + поиск LFB по PCI) и GRUB-ISO (`make iso`). Осталось: подтвердить Dock
   на экране QEMU (в песочнице нет QEMU/дисплея).
 - [ ] 9.1 далее: альфа-смешивание, декодер PNG для ассетов
-- [ ] **9.2** Window Server + композитор — **отдельный userspace-сервис** (не в
-  ядре!): ядро = framebuffer + input + IPC; windowserver = окна, z-order, фокус,
-  композитор. Затем: мышь PS/2 + курсор → первое окно → перетаскивание → Dock как
-  процесс
+- [x] **9.2 (архитектура, проверено PNG)** Surface-модель + хром окна (title bar,
+  traffic lights, тень) + **z-order композитор** как портируемый userspace-код
+  (`user/wm.c`/`wm.h`) + протокол IPC окон (`WM_CREATE/DESTROY/PRESENT/MOVE`).
+  `make screenshot-wm` → `aurora_windows.png` (рабочий стол + 2 перекрывающихся
+  окна: Files и Terminal). **Не считается завершённым до прогона в реальном QEMU.**
+  - [ ] живой `windowserver` (процесс): нужны маппинг framebuffer в userspace +
+    shared-memory surfaces; потом мышь PS/2 + курсор → первое окно → перетаскивание
+    → Dock как процесс (железо — только после первого живого запуска)
 - [ ] **9.3** Aurora Desktop: верхняя панель, Dock, обои, курсор
 - [ ] **9.4** Окна: перетаскивание, сворачивание, закрытие, фокус
 - [ ] **9.5** Finder-аналог `Aurora Files` (поверх VFS — запись уже есть)

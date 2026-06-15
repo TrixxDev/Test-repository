@@ -19,8 +19,8 @@ and a static desktop with a menu bar and Dock). It is **not** yet a daily-driver
 OS (no external networking yet — loopback only; the GUI is a static desktop, no
 window server yet; a basic permission model — uid + rwx — but no login/groups).
 
-- **Current version:** v0.9.1
-- **Size:** ~6,400 lines of C / assembly (plus a generated 8×16 font header)
+- **Current version:** v0.9.2
+- **Size:** ~6,500 lines of C / assembly (plus a generated 8×16 font header)
   across kernel + drivers + fs + libc + userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
   `qemu-system-i386 -kernel`.
@@ -45,7 +45,7 @@ window server yet; a basic permission model — uid + rwx — but no login/group
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
 | Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`. |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | 🟡 (9.0/9.1) | Linear framebuffer (Multiboot **or** Bochs-VBE fallback via PCI); 2D library (rects, rounded rects, circles, gradient, blit, **8×16 text**); static desktop (wallpaper + menu bar + Dock with labels). No window server yet. |
+| Graphics | 🟡 (9.0–9.2) | Linear framebuffer (Multiboot **or** Bochs-VBE fallback via PCI); 2D library (rects, rounded rects, circles, gradient, blit, **8×16 text**); static desktop; **userspace compositor** (surfaces + window chrome + z-order, PNG-verified). Live windowserver/mouse pending a real run. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What it looks like
@@ -54,6 +54,11 @@ The first AuroraOS desktop (rendered by the real `kernel/gfx.c` +
 `kernel/desktop.c`; run `make screenshot` to regenerate):
 
 ![AuroraOS desktop](aurora_desktop.png)
+
+The userspace compositor stacking two app windows by z-order (`make
+screenshot-wm`):
+
+![AuroraOS windows](aurora_windows.png)
 
 ## What you can do today
 
@@ -80,7 +85,8 @@ make          # builds aurora.elf + disk.img (kernel, user programs, FAT32 image
 make run      # text shell in QEMU (qemu -kernel; serial log on stdio)
 make run-vbe  # GUI desktop in QEMU, no GRUB tools (Bochs-VBE fallback)
 make gui      # GUI desktop via GRUB ISO (build + iso + qemu); needs grub-mkrescue
-make screenshot   # render the desktop to aurora_desktop.png (no QEMU needed)
+make screenshot     # render the desktop to aurora_desktop.png (no QEMU needed)
+make screenshot-wm  # render the compositor (two windows) to aurora_windows.png
 make debug    # text boot, waits for GDB on :1234
 make clean
 ```
@@ -98,11 +104,12 @@ lib/         freestanding kernel lib: string, printf (kprintf), kheap
 kernel/      kmain, scheduler, process, pipe, socket, elf, syscall, gfx, desktop, font8x16.h
 drivers/     vga, serial, keyboard, pit, ata, console, fb (framebuffer + VBE)
 include/     kio.h, multiboot.h, syscall_abi.h (shared ABI), syscall.h, net.h (netd protocol)
-user/        crt0, libc (libc.h + libc/), programs (init, logger, netd, sh, cat,
-             grep, hello, orphan, echosrv, echocli, save)
+user/        crt0, libc (libc.h + libc/), wm (compositor: wm.h + wm.c),
+             programs (init, logger, netd, sh, cat, grep, hello, orphan,
+             echosrv, echocli, save)
 boot/        grub.cfg (for the `make iso` GRUB boot path)
 tools/       bin2c.py (embed ELF), mkfat32.py (FAT32 image), render_desktop.c +
-             ppm2png.py (host desktop -> PNG), genfont.py (8×16 font header)
+             render_wm.c + ppm2png.py (host -> PNG), genfont.py (8×16 font header)
 docs/        ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS
 linker.ld    kernel link map (load at 1 MiB)
 Makefile     clang/lld cross-build + user programs + disk image

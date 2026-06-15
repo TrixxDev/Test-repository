@@ -94,10 +94,29 @@ into an off-screen buffer and converts it to PNG (`tools/ppm2png.py`). It is bot
 the project's reference screenshot and the way the rendering is verified in this
 environment.
 
-## Next (9.2+)
+## 9.2 — Window server + compositor (architecture, PNG-verified)
 
-- Window server + compositor: apps draw into off-screen surfaces; the compositor
-  owns the screen (`app → window server → compositor → framebuffer`).
-- PS/2 mouse + input events routed through the window server.
-- Then windows (move/focus/close), a Finder-like file app, and the design system
-  (rounded corners, translucency, shadows, blur, animations, fonts).
+Built as portable userspace code (`user/wm.c` + `user/wm.h`), **not** in the
+kernel:
+
+- **Surface model.** Each app renders into its own `gfx_surface_t` (an off-screen
+  pixel buffer). The compositor never lets apps touch the screen directly.
+- **Window chrome.** `wm_draw_window` paints a rounded title bar with the three
+  traffic-light buttons, a centered title, a drop shadow, and blits the app's
+  content surface.
+- **Z-order compositor.** `wm_composite` paints the desktop, then the windows
+  back-to-front by `z`, so overlapping windows stack correctly.
+- **Window IPC protocol.** `WM_CREATE / WM_DESTROY / WM_PRESENT / WM_MOVE`
+  (`wm_req_t`/`wm_rep_t`) — the contract the future `windowserver` daemon speaks.
+
+Preview (a desktop with two overlapping windows, Files behind Terminal):
+
+```sh
+make screenshot-wm     # -> aurora_windows.png
+```
+
+**Not done until it runs in real QEMU.** Turning this into a live `windowserver`
+*process* needs two kernel primitives first — mapping the framebuffer into
+userspace, and shared-memory surfaces between app and server — plus an on-screen
+run. Those wait for the first live framebuffer (9.0.5). PS/2 mouse + cursor,
+window dragging and a Dock process follow after that.

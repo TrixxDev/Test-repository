@@ -3,7 +3,7 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.1.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.2.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
 netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
 (Phase 9.0 framebuffer + minimal 9.1 2D library with an 8×16 font + a static
@@ -31,7 +31,8 @@ QEMU run to confirm on screen — pending (no QEMU in the current CI sandbox).
 | 8.2 | FS write: ATA sector write + FAT32 read/write (create/grow/truncate), `open(O_CREAT/O_TRUNC)` | v0.8.2 | ✅ |
 | 9.0/9.1 | Framebuffer (Multiboot) + 2D library + static desktop (wallpaper + menu bar + Dock) | v0.9.0 | ✅ |
 | 9.0.5 | Live output: 8×16 text/font; Bochs-VBE fallback (`run-vbe`) + GRUB ISO (`iso`) | v0.9.1 | ✅ (needs on-screen confirm) |
-| 9.2 | Window server + compositor (userspace), PS/2 mouse | — | ⏳ **next** |
+| 9.2 | Userspace compositor: surfaces + window chrome + z-order + window IPC protocol | v0.9.2 | 🟡 arch done (PNG); live windowserver pending real run |
+| 9.3+ | PS/2 mouse + cursor, live window dragging, Dock as a process | — | ⏳ after a live run |
 | 9.3+ | Desktop, windows, Finder, design system (fonts/alpha/shadows) | — | ⏳ later |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
@@ -63,6 +64,11 @@ QEMU run to confirm on screen — pending (no QEMU in the current CI sandbox).
   rendering the real `kernel/gfx.c`+`desktop.c` to a PNG (`make screenshot` →
   `aurora_desktop.png`). Live paths (`make run-vbe`, `make iso`) await on-screen
   confirmation in QEMU.
+- Compositor (9.2): a userspace surface model + z-order compositor stacks two
+  app windows (Files behind Terminal) with title bars, traffic lights and
+  shadows. Verified via `make screenshot-wm` → `aurora_windows.png`; live
+  windowserver process pending the framebuffer-userspace map + shared memory +
+  a real run.
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.

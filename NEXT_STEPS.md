@@ -68,15 +68,25 @@ app → window server → compositor → framebuffer
   Multiboot-framebuffer ISO (`make iso`). **Open item:** actually see the Dock on
   a QEMU screen and confirm framebuffer mapping / pitch / mode-switch — this
   cannot be done in the current sandbox (no QEMU/display).
-- **9.2 — Compositor + Window Server — NEXT (after the live confirm).** Build it
-  as a **userspace service** (like `logger`/`netd`), never in the kernel — the
-  kernel keeps only framebuffer + input + IPC:
+- **9.2 — Compositor + Window Server — architecture built, PNG-verified.** The
+  surface model, window chrome (title bar + traffic lights + shadow) and a
+  back-to-front **z-order compositor** are implemented as portable userspace code
+  (`user/wm.c` + `user/wm.h`), with the window **IPC protocol**
+  (`WM_CREATE/DESTROY/PRESENT/MOVE`) defined. `make screenshot-wm` composites a
+  desktop with two overlapping app windows (Files + Terminal) →
+  `aurora_windows.png`. Kept out of the kernel:
   ```
   kernel:        framebuffer · input · IPC
   windowserver:  windows · z-order · focus · compositor   (userspace)
   ```
-  Order: surface API + z-order → PS/2 mouse + cursor (9.3) → first window (9.4)
-  → window dragging (9.5) → Dock as its own process (9.6).
+  - [ ] **Not "done" until it runs in real QEMU.** The live `windowserver`
+    process needs two kernel primitives first: a way to map the framebuffer into
+    userspace, and **shared-memory surfaces** between app and server. Those touch
+    memory mapping and want an on-screen run to confirm — so they wait for the
+    first live framebuffer (9.0.5).
+  - then: PS/2 mouse + cursor (9.3) → first live window (9.4) → window dragging
+    (9.5) → Dock as its own process (9.6). Mouse/other devices stay deferred
+    until there is a real run.
 - **9.3 — Aurora Desktop.** Promote the static desktop to a live one (menu bar,
   Dock, wallpaper, mouse cursor) driven by the window server.
 - **9.4 — Windows.** Move/drag, minimise, close, focus.
@@ -114,11 +124,20 @@ intentionally **after** the visual stack for a desktop-first OS.
 - **libc growth:** more string/stdio, a coalescing allocator.
 - **Driver model / SMP / better scheduler** — when they start to bite.
 
+## Two tracks (per the agreed rule)
+
+- **Architecture (no QEMU needed, verify via PNG):** the window server model,
+  surfaces, z-order compositor and window IPC protocol — done for 9.2
+  (`make screenshot-wm`). Next architectural pieces could be a mouse *event*
+  model and a Dock/app process model, still PNG-verifiable.
+- **Hardware (needs a real run):** the live framebuffer (`make run-vbe`/`gui`),
+  then framebuffer-to-userspace mapping + shared-memory surfaces to turn the
+  compositor into a live `windowserver` process, then PS/2 mouse. **Rule: no GUI
+  stage counts as done until it has run once in real QEMU.**
+
 ## Suggested immediate next action
 
-**Confirm the desktop on a real QEMU screen first** (the architectural gate
-before building the window server): `make run-vbe`, or `make iso` then boot the
-ISO. This validates framebuffer mapping, pitch, VBE mode-switch and screen update
-— things the off-screen PNG cannot. Only once the Dock shows on screen, start
-**Phase 9.2**: a userspace window server + compositor (surface API + z-order),
-then PS/2 mouse + cursor.
+**Confirm the desktop on a real QEMU screen** (`make run-vbe`, or `make gui`):
+this is the gate that turns the PNG-verified graphics into "really runs", and
+unblocks the live `windowserver`. In parallel, the compositor architecture can
+keep advancing on the PNG path.

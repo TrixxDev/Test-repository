@@ -4,11 +4,11 @@
 загружаемое в QEMU. Долгосрочная цель — десктоп-ОС в духе macOS со своей
 «изюминкой» (варианты обсуждаются в [ROADMAP.md](ROADMAP.md)).
 
-Это **версия 0.9.1** — ОС с сервисной моделью, сокетами loopback, базовой
-безопасностью, записью на диск (FAT32 read/write) и **первым графическим
-стеком**: линейный фреймбуфер (Multiboot или Bochs-VBE), 2D-библиотека с
-**текстом (8×16 шрифт)** и статичный рабочий стол (обои + панель с подписями +
-часы + Dock). Живой вывод: `make run-vbe` или `make iso`. Конечная цель — desktop-ОС в духе macOS. Ядро запускает
+Это **версия 0.9.2** — ОС с сервисной моделью, сокетами loopback, базовой
+безопасностью, записью на диск (FAT32 read/write) и **графическим стеком**:
+линейный фреймбуфер (Multiboot или Bochs-VBE), 2D-библиотека с **текстом
+(8×16)**, статичный рабочий стол и **userspace-композитор** (поверхности + хром
+окон + z-order). Живой вывод: `make run-vbe` или `make iso`. Конечная цель — desktop-ОС в духе macOS. Ядро запускает
 **init (PID 1)**, который поднимает **logger**, **netd** и **shell**. Есть
 **message-passing IPC**, **реестр сервисов** с правами, **сокеты `AF_LOOPBACK`**
 через `netd`, **uid + rwx на VFS**, привилегированные порты, **запись файлов на
@@ -16,8 +16,10 @@
 
 ![Рабочий стол AuroraOS](aurora_desktop.png)
 
-> Первый рабочий стол AuroraOS, отрисованный реальным кодом ядра
-> (`kernel/gfx.c` + `kernel/desktop.c`); пересобрать — `make screenshot`.
+> Рабочий стол AuroraOS (`make screenshot`). Ниже — userspace-композитор
+> раскладывает два окна по z-order (`make screenshot-wm`):
+
+![Окна AuroraOS](aurora_windows.png)
 
 > Имя `Aurora` — рабочее, его легко поменять (см. `kernel/kmain.c` и Makefile).
 
@@ -167,6 +169,18 @@ attack surface мал:
   ядро само ставит VBE-режим) **или** `make gui` (build + GRUB ISO + запуск
   одной командой; нужны `grub-mkrescue`/`xorriso`/`mtools`).
 - **Документация** — [`docs/GRAPHICS.md`](docs/GRAPHICS.md).
+
+**Window Server / композитор (v0.9.2 / Этап 9.2) — userspace, не в ядре**
+- **Surface-модель** — каждое приложение рисует в свой offscreen-буфер
+  (`gfx_surface_t`); композитор владеет экраном.
+- **Хром окон** (`user/wm.c`) — скруглённый title bar, traffic-lights, заголовок,
+  тень; контент приложения блитится внутрь.
+- **z-order композитор** — окна рисуются сзади-вперёд по `z` (перекрытие верно).
+- **Протокол IPC окон** — `WM_CREATE/DESTROY/PRESENT/MOVE` (для будущего демона
+  `windowserver`).
+- **Превью** — `make screenshot-wm` → `aurora_windows.png` (рабочий стол + два
+  перекрывающихся окна). Живой `windowserver`-процесс — после первого реального
+  запуска (нужны маппинг framebuffer в userspace + shared-memory surfaces).
 
 ## Стек сборки
 
