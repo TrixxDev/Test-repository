@@ -33,8 +33,7 @@ interactive QEMU run to confirm on screen — pending (no QEMU in this sandbox).
 | 9.0/9.1 | Framebuffer (Multiboot) + 2D library + static desktop (wallpaper + menu bar + Dock) | v0.9.0 | ✅ |
 | 9.0.5 | Live output: 8×16 text/font; Bochs-VBE fallback (`run-vbe`) + GRUB ISO (`iso`) | v0.9.1 | ✅ (needs on-screen confirm) |
 | 9.2 | Event-driven **windowserver** + keyboard pipeline + interactive Terminal; `fb_map`/`fb_active`; frame consistency | v0.9.4 | 🟡 built + core PNG-verified; live loop pending |
-| 9.3+ | PS/2 mouse + cursor, click-to-focus, live window dragging, Dock as a process | — | ⏳ after a live run |
-| 9.3+ | Desktop, windows, Finder, design system (fonts/alpha/shadows) | — | ⏳ later |
+| 9.3–9.7 | Mouse + cursor → click-to-focus → window dragging → Dock process → Launcher/Finder (design in docs/INPUT.md) | — | ⏳ after the 9.2 live gate |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
 
@@ -94,7 +93,7 @@ interactive QEMU run to confirm on screen — pending (no QEMU in this sandbox).
   init, logger, netd, sh, cat, grep, hello, orphan, echosrv, echocli, save,
   wserver (windowserver), term (Terminal app).
 - **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py, genfont.py.
-- **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS.
+- **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT.
 
 ## Syscalls (27)
 

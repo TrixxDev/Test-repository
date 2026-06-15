@@ -85,17 +85,20 @@ app → window server → compositor → framebuffer
   - [ ] **Not "done" until it runs in real QEMU.** The live loop (framebuffer +
     real keyboard + on-screen redraw) builds clean but needs an on-screen boot;
     it activates once the framebuffer is live (9.0.5).
-  - [ ] upgrade surface transport from server-side draw commands to **client-side
-    shared-memory surfaces** (needs a kernel shm primitive).
-- **9.3 — Aurora Desktop.** Promote the static desktop to a live one (menu bar,
-  Dock, wallpaper, mouse cursor) driven by the window server.
-- **9.4 — Windows.** Move/drag, minimise, close, focus.
-- **9.5 — Finder analogue (`Aurora Files`).** A real GUI app over the VFS
-  (needs FS write — now available).
-- **9.6 — Design system.** 12–16px corner radii, translucency, shadows, blur,
-  smooth animations. This is where the "macOS feel" actually appears.
+- **9.3+ — pointer, focus, drag — design ready, implement after the live gate.**
+  The mouse/cursor/click-to-focus/drag architecture is specified in
+  [docs/INPUT.md](docs/INPUT.md): PS/2 mouse → IRQ12 → a kernel read source →
+  windowserver reader child → `WM_MOUSE` → cursor + hit-test + focus + drag, all
+  full-recomposite. **The PS/2 driver and IRQ routing are intentionally NOT
+  written until 9.2 is confirmed on a real screen** — hardware/IRQ code built
+  blind would be wasted if the framebuffer behaves differently than assumed.
+  Order: **9.3** cursor → **9.4** click-to-focus → **9.5** window dragging (the
+  headline: grab a window by its title bar and move it) → **9.6** Dock as its own
+  process → **9.7** Launcher/Finder.
 
-Mouse (PS/2) input is routed through the window server (added around 9.2/9.3).
+Deferred until the desktop feels real (per the agreed priority): client-side
+shared-memory surfaces, animations, and the network stack. The current
+`app → IPC → windowserver → framebuffer` path is enough for the first windows.
 
 ## Phase 8B — Networking (Branch A, deferred until after the desktop)
 
@@ -137,7 +140,9 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**Confirm the desktop on a real QEMU screen** (`make run-vbe`, or `make gui`):
-this is the gate that turns the PNG-verified graphics into "really runs", and
-unblocks the live `windowserver`. In parallel, the compositor architecture can
-keep advancing on the PNG path.
+**Confirm 9.2 on a real QEMU screen** (`make run-vbe`, or `make gui`) — see the
+checklist in [docs/GRAPHICS.md](docs/GRAPHICS.md): Terminal window appears, typing
+shows text, focus works, no recomposite artifacts. That gate is the only thing
+between here and 9.3. The 9.3 input architecture is already specified
+([docs/INPUT.md](docs/INPUT.md)); the PS/2 driver gets written once the gate is
+green.

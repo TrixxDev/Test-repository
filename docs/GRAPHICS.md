@@ -94,6 +94,22 @@ into an off-screen buffer and converts it to PNG (`tools/ppm2png.py`). It is bot
 the project's reference screenshot and the way the rendering is verified in this
 environment.
 
+## Verifying 9.2 live (the gate)
+
+The window-server core is PNG-verified; the remaining check is a real boot. Run
+`make run-vbe` (or `make gui`) and confirm, on screen:
+
+1. the **Terminal** window appears over the desktop;
+2. typing produces text in it (keyboard → windowserver → app → redraw);
+3. **focus** works (the top-most window receives keys);
+4. no artifacts from the full recomposite on each `PRESENT`.
+
+If all four hold, Phase 9.2 is done. Serial (`-serial stdio`) should show
+`[fb] ... pitch=N`, `[wm] ready ... framebuffer WxH`, `[term] opened window N`.
+If the screen is black/garbled, send the serial log — the usual suspects are the
+PCI LFB address, the pitch, or the VBE mode-set. Input/redraw next steps live in
+[INPUT.md](INPUT.md).
+
 ## 9.2 — Window server (userspace process), PNG-verified core
 
 A real daemon, `user/wserver.c` (registered as `wm`, like `logger`/`netd`) —

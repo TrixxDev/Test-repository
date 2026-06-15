@@ -111,7 +111,7 @@ user/        crt0, libc (libc.h + libc/), wm (windowserver core: wm.h + wm.c),
 boot/        grub.cfg (for the `make iso` GRUB boot path)
 tools/       bin2c.py (embed ELF), mkfat32.py (FAT32 image), render_desktop.c +
              render_wm.c + ppm2png.py (host -> PNG), genfont.py (8×16 font header)
-docs/        ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS
+docs/        ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT
 linker.ld    kernel link map (load at 1 MiB)
 Makefile     clang/lld cross-build + user programs + disk image
 ```
