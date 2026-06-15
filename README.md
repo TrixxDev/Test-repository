@@ -163,8 +163,9 @@ attack surface мал:
   меню, часы, Dock с буквами на иконках. Рисуется один раз из `kmain`.
 - **Превью без дисплея** — `make screenshot` рендерит реальный код ядра в
   `aurora_desktop.png` (через `tools/render_desktop.c` + `tools/ppm2png.py`).
-- **Живой вывод в QEMU** — `make run-vbe` (Bochs-VBE, без доп. тулов) или
-  `make iso` + GRUB (нужны `grub-mkrescue`/`xorriso`).
+- **Живой вывод в QEMU** — `make run-vbe` (проще всего: только QEMU, без GRUB,
+  ядро само ставит VBE-режим) **или** `make gui` (build + GRUB ISO + запуск
+  одной командой; нужны `grub-mkrescue`/`xorriso`/`mtools`).
 - **Документация** — [`docs/GRAPHICS.md`](docs/GRAPHICS.md).
 
 ## Стек сборки

@@ -77,8 +77,11 @@ aurora> exit                     # graceful shutdown of services
 
 ```sh
 make          # builds aurora.elf + disk.img (kernel, user programs, FAT32 image)
-make run      # boots in QEMU with the disk attached (serial log on stdio)
-make debug    # same, waits for GDB on :1234
+make run      # text shell in QEMU (qemu -kernel; serial log on stdio)
+make run-vbe  # GUI desktop in QEMU, no GRUB tools (Bochs-VBE fallback)
+make gui      # GUI desktop via GRUB ISO (build + iso + qemu); needs grub-mkrescue
+make screenshot   # render the desktop to aurora_desktop.png (no QEMU needed)
+make debug    # text boot, waits for GDB on :1234
 make clean
 ```
 

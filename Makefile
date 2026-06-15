@@ -34,7 +34,7 @@ C_SRC := $(sort $(C_SRC) $(EMBEDDED))
 S_SRC := $(shell find kernel arch drivers lib fs -name '*.S')
 OBJ   := $(C_SRC:.c=.o) $(S_SRC:.S=.o)
 
-.PHONY: all run debug clean
+.PHONY: all run debug run-vbe iso gui clean
 
 all: $(KERNEL) $(DISK)
 
@@ -99,6 +99,14 @@ iso: $(KERNEL) $(DISK)
 	cp boot/grub.cfg isodir/boot/grub/grub.cfg
 	grub-mkrescue -o aurora.iso isodir
 	@echo "Built aurora.iso"
+
+# One command for the GUI: build everything, make the GRUB ISO, and boot it in
+# QEMU with the desktop. This is the "real boot" path (needs grub-mkrescue +
+# xorriso + mtools). No GRUB tools? `make run-vbe` shows the same desktop using
+# only QEMU (Bochs-VBE fallback).
+gui: iso
+	qemu-system-i386 -cdrom aurora.iso -m 1024 -vga std -serial stdio \
+	    -drive file=$(DISK),format=raw,if=ide
 
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.

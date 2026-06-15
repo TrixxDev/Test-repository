@@ -31,9 +31,17 @@ in a `gfx_surface_t`; if neither is available the kernel stays in VGA text mode
 ### Seeing it live in QEMU
 
 ```sh
-make run-vbe     # qemu -kernel ... -vga std -append vbe  (Bochs VBE fallback)
-# or, the "real boot" path (needs grub-mkrescue + xorriso):
-make iso && qemu-system-i386 -cdrom aurora.iso -m 64M \
+make run-vbe     # easiest: QEMU only, no GRUB tools (Bochs-VBE fallback)
+make gui         # one command: build + GRUB ISO + boot the desktop
+```
+
+`make gui` is the "real boot" path (build → `grub-mkrescue` ISO → QEMU with the
+disk attached); it needs `grub-mkrescue` + `xorriso` + `mtools`. If you don't
+have those, `make run-vbe` brings up the identical desktop with plain QEMU,
+because the kernel sets the VBE mode itself. Equivalent manual command:
+
+```sh
+make iso && qemu-system-i386 -cdrom aurora.iso -m 1024 -vga std -serial stdio \
     -drive file=disk.img,format=raw,if=ide
 ```
 
