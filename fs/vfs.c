@@ -95,6 +95,17 @@ vfs_node_t *vfs_resolve(const char *path)
     return node;
 }
 
+int vfs_permitted(vfs_node_t *node, int uid, int want)
+{
+    if (!node)
+        return 0;
+    if (uid == 0)
+        return 1;                       /* root bypasses permission checks */
+    int bits = (uid == node->owner_uid) ? (int)((node->mode >> 6) & 7)
+                                        : (int)(node->mode & 7);
+    return (bits & want) == want;
+}
+
 int vfs_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf)
 {
     if (node && node->ops && node->ops->read)

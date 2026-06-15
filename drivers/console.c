@@ -34,9 +34,11 @@ static vfs_ops_t console_ops = {
 };
 
 static vfs_node_t con = {
-    .name  = "console",
-    .flags = VFS_FILE,
-    .ops   = &console_ops,
+    .name      = "console",
+    .flags     = VFS_FILE,
+    .mode      = 0666,          /* rw for everyone (shared terminal) */
+    .owner_uid = 0,
+    .ops       = &console_ops,
 };
 
 vfs_node_t *console_node(void)

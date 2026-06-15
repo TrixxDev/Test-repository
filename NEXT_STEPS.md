@@ -25,11 +25,17 @@ Build it as userspace services over IPC, not inside the kernel.
   - [x] `poll()` readiness wait
   - [ ] follow-ups: real `poll` timeouts (tick-driven), poll ops for
     pipe/console, datagram (`SOCK_DGRAM`) sockets, in-QEMU boot test of the demo
+- **8A.5 — security foundation — DONE (v0.8.1).** Done *before* the network
+  widens the attack surface: per-process uid + `getuid`/`setuid`/`uid_of`; rwx +
+  owner on VFS nodes enforced at `open`/`exec`; service-registry permissions
+  (lookup gated, no name hijack); privileged ports (<1024) root-only in netd.
+  See [docs/VFS.md](docs/VFS.md), [docs/IPC.md](docs/IPC.md).
 - **8B — Ethernet/IP — next.** Same daemon boundary:
   `app → IPC → netd → driver → hardware`.
-  - [ ] Ethernet driver (e.g. virtio-net or rtl8139 in QEMU)
-  - [ ] ARP → IPv4 → UDP → TCP → DNS, in that order (loopback addr `127.0.0.1`
-    routed through the existing socket API)
+  - [ ] NIC driver: **virtio-net** (preferred over rtl8139 — simpler, faster,
+    less legacy cruft; rtl8139 only as a learning aside).
+  - [ ] ARP → IPv4 → UDP → TCP → DNS, in that order, behind the existing socket
+    API. TCP will likely take longer than the whole loopback phase.
   - [ ] HTTP only after the above
 
 Out of scope for Phase 8 (deferred): TLS, HTTPS, IPv6, DHCP, Wi-Fi.
@@ -39,12 +45,10 @@ boundary keeps the stack testable and the kernel small.
 
 ## Other near-term debts (pick up alongside 8)
 
-- **Security — rwx on VFS nodes (next security step).** The uid foundation
-  exists (per-process uid, `getuid`/`setuid`, root vs uid 1000, `sock_link`
-  gated to root). Next: add owner-uid + mode bits to `vfs_node_t`, set them
-  when nodes are created (tmpfs/fat32/console/socket), and enforce in
-  `sys_open`/`exec`/`write`. Doing this while processes are few is much easier
-  than after the network grows.
+- **Security — extend the model.** The foundation is in (uid, VFS rwx, service
+  perms, privileged ports — see 8A.5 above). Next, when justified: a `gid` +
+  group bits; a real login / user database; permissions persisted by a writable
+  FS; and restricting `kill`/`msgsend` across uids if it becomes a concern.
 - **Filesystem writes:** FAT32 is read-only. Add write support (or a writable
   on-disk FS) + a block cache. Needed for persistence and many services.
 - **Real signals:** shutdown is currently a `"shutdown"` IPC message by
@@ -86,8 +90,8 @@ Only after netd + sockets + FS writes + a minimal service model.
 
 ## Suggested immediate next action
 
-Boot-test the Phase 8A demo in QEMU (`make run`, then `echosrv &` / `echocli`)
-to confirm the loopback path interactively, then start **Phase 8B**: add a NIC
-driver and the ARP→IPv4→UDP→TCP path behind the existing `netd`/socket boundary.
-The rwx-on-VFS security step is a good parallel pickup while process counts are
-still small.
+Boot-test the Phase 8A/8A.5 demo in QEMU (`make run`, then `id`, `echosrv &`,
+`echocli`) to confirm the loopback path and the new permission checks
+interactively. Then start **Phase 8B**: a **virtio-net** driver and the
+ARP→IPv4→UDP→TCP path behind the existing `netd`/socket boundary, with the
+security model already in place.

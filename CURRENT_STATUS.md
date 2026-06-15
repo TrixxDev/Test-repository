@@ -3,9 +3,10 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.8.0.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.8.1.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
-netd + poll) is implemented and builds clean; its in-QEMU boot test is the
+netd + poll) and Phase 8A.5 (security foundation: VFS rwx, service permissions,
+privileged ports) are implemented and build clean; the in-QEMU boot test is the
 pending verification step (no QEMU in the current CI sandbox).
 
 ## Phase status
@@ -22,7 +23,8 @@ pending verification step (no QEMU in the current CI sandbox).
 | 7 | Init + service model + message-passing IPC + docs | v0.7 | ✅ |
 | 7.1 | Lifecycle hardening (reparent, bg auto-reap, kill, graceful shutdown) | v0.7.1 | ✅ |
 | 8A | Loopback sockets (kernel `struct socket`) + `netd` broker + `poll` + uid foundation | v0.8.0 | ✅ |
-| 8B | Ethernet/IP stack (NIC driver, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ next |
+| 8A.5 | Security foundation: VFS rwx/owner, service-registry permissions, privileged ports | v0.8.1 | ✅ |
+| 8B | Ethernet/IP stack (virtio-net driver, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ next |
 | 9 | Graphics (window server → compositor → framebuffer) | — | ⏳ later |
 | 10 | Desktop + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
 
@@ -34,11 +36,17 @@ pending verification step (no QEMU in the current CI sandbox).
 - Pipelines across processes: `cat /disk/poem.txt | grep aurora`.
 - Background jobs (`cmd &`) started and auto-reaped.
 - Message-passing IPC to a named service: shell `log <msg>` → `logger` daemon.
-- Loopback sockets: `echosrv` binds port 7 via `netd`; `echocli` connects,
+- Loopback sockets: `echosrv` binds port 7000 via `netd`; `echocli` connects,
   sends a line, and reads the echo back (client → netd → server → back).
 - `poll()` on a connected socket (the echo server waits for data with it).
 - uid foundation: services run as root (uid 0), the shell and its children run
   as uid 1000 (`id` shows it); `sock_link` is gated to root.
+- VFS permissions: `/disk` files are root-owned `0755`; open/exec are
+  permission-checked (uid 1000 can read+exec them but not write).
+- Service permissions: `log`/`net` are public (`0644`); re-registering a name is
+  owner/root-only (no service-name hijack).
+- Privileged ports: binding a port < 1024 requires root (the echo demo uses
+  7000); netd checks the requester's uid via `uid_of`.
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.
@@ -61,8 +69,8 @@ pending verification step (no QEMU in the current CI sandbox).
 - **tools:** bin2c.py, mkfat32.py.
 - **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING.
 
-## Syscalls (24)
+## Syscalls (26)
 
 `putc, yield, exit, fork, exec, wait, open, read, write, close, getpid, pipe,
 dup2, sbrk, msgsend, msgrecv, register, lookup, kill, socket, sock_link, poll,
-getuid, setuid`. See [docs/SYSCALLS.md](docs/SYSCALLS.md).
+getuid, setuid, uid_of`. See [docs/SYSCALLS.md](docs/SYSCALLS.md).

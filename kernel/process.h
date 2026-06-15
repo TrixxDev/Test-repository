@@ -81,7 +81,7 @@ uint32_t sys_sbrk(int increment);
 /* message-passing IPC + named service registry */
 int  sys_msgsend(int pid, const void *buf, int len);
 int  sys_msgrecv(void *buf, int len, int *from);
-int  sys_register(const char *name);
+int  sys_register(const char *name, uint32_t mode);
 int  sys_lookup(const char *name);
 
 /* sockets (loopback) + poll */
@@ -89,6 +89,7 @@ int  sys_socket(int domain, int type);
 int  sys_poll(struct pollfd *fds, int nfds, int timeout);
 int  sys_getuid(void);
 int  sys_setuid(int uid);
+int  sys_uid_of(int pid);
 
 /* Resolve a (pid, fd) to its socket VFS node, or NULL if it is not a socket
  * descriptor in that process. Used by the netd broker via sock_link(). */

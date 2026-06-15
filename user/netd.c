@@ -90,7 +90,12 @@ int main(int argc, char **argv)
 
         switch (req.op) {
         case NET_BIND:
-            reply(from, add_bound(req.port, from), req.port, 0);
+            /* Privileged ports (< 1024) are reserved for root. The uid comes
+             * from the kernel (uid_of), not the request, so it can't be forged. */
+            if (req.port < PORT_PRIVILEGED && uid_of(from) != 0)
+                reply(from, -1, req.port, 0);
+            else
+                reply(from, add_bound(req.port, from), req.port, 0);
             break;
 
         case NET_ACCEPT: {

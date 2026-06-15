@@ -12,7 +12,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 4  | `fork`   | `fork() -> pid` | Duplicate the process. Returns child pid to the parent, `0` to the child. |
 | 5  | `exec`   | `exec(const char *path, char **argv)` | Replace the process image. No return on success. |
 | 6  | `wait`   | `wait(int *status, int flags) -> pid` | Reap an exited child. Blocks unless `flags & WNOHANG` (then `0` if none ready). `-1` if no children. |
-| 7  | `open`   | `open(const char *path, int flags) -> fd` | Open a VFS path. |
+| 7  | `open`   | `open(const char *path, int flags) -> fd` | Open a VFS path. `flags` is the access mode (`O_RDONLY`/`O_WRONLY`/`O_RDWR`); the open is permission-checked (`VFS_R`/`VFS_W`). |
 | 8  | `read`   | `read(int fd, void *buf, uint len) -> n` | Read; `0` = EOF. May block (console/pipe). |
 | 9  | `write`  | `write(int fd, const void *buf, uint len) -> n` | Write. |
 | 10 | `close`  | `close(int fd)` | Close a descriptor. |
@@ -22,14 +22,15 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 14 | `sbrk`   | `sbrk(int incr) -> old_brk` | Grow the user heap; returns the previous break. |
 | 15 | `msgsend`| `msgsend(int pid, const void *buf, int len) -> 0/-1` | Send an IPC message to a process. |
 | 16 | `msgrecv`| `msgrecv(void *buf, int len, int *from) -> n` | Block until a message arrives; returns length, sets sender pid. |
-| 17 | `register` | `register(const char *name) -> 0/-1` | Register the current pid under a service name. |
-| 18 | `lookup` | `lookup(const char *name) -> pid/-1` | Resolve a service name to a pid. |
+| 17 | `register` | `register(const char *name, uint mode) -> 0/-1` | Register the current pid under a service name with a permission `mode` (libc `svc_register` defaults to `0644`). Re-registering a name is allowed only for its owner or root. |
+| 18 | `lookup` | `lookup(const char *name) -> pid/-1` | Resolve a service name to a pid. Requires "read" permission on the service (`-1` if denied or absent). |
 | 19 | `kill`   | `kill(int pid) -> 0/-1` | Forcibly terminate another process (force-kill fallback for shutdown). |
 | 20 | `socket` | `socket(int domain, int type) -> fd/-1` | Create an unconnected socket endpoint (AF_LOOPBACK / SOCK_STREAM). Backed by an fd, so `read`=recv, `write`=send, `close` tear it down. |
 | 21 | `sock_link` | `sock_link(int handle_a, int handle_b) -> 0/-1` | Join two unconnected endpoints into a connected pair. Each handle is `SOCK_HANDLE(pid, fd)`. **Root only** — the `netd` broker uses it; ordinary processes get `-1`. |
 | 22 | `poll`   | `poll(struct pollfd *fds, int nfds, int timeout) -> nready/-1` | Wait for descriptors to become ready (`POLLIN`/`POLLOUT`, or `POLLERR`). `timeout==0` polls once; otherwise blocks until a socket peer makes progress. |
 | 23 | `getuid` | `getuid() -> uid` | Owner uid of the calling process. |
 | 24 | `setuid` | `setuid(int uid) -> 0/-1` | Drop privilege: root may set any uid; a non-root process may not lower its uid number. |
+| 25 | `uid_of` | `uid_of(int pid) -> uid/-1` | Owner uid of another process (e.g. so `netd` can enforce privileged ports without trusting the request). |
 
 ## Notes
 

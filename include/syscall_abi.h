@@ -32,11 +32,18 @@
 #define SYS_POLL    22  /* poll(pollfd*, nfds, tmo)  -> nready / -1  */
 #define SYS_GETUID  23  /* getuid()                  -> uid          */
 #define SYS_SETUID  24  /* setuid(uid)               -> 0 / -1       */
+#define SYS_UIDOF   25  /* uid_of(pid)               -> uid / -1     */
+/* Note: SYS_REGISTER takes a service mode in arg2 (was reserved/0).   */
 
 /* wait() flags (passed in arg2) */
 #define WNOHANG    1    /* return 0 immediately if no child has exited */
 
-#define SYS_MAX    25   /* one past the last valid syscall number    */
+/* open() access mode (passed in arg2/flags) */
+#define O_RDONLY   0
+#define O_WRONLY   1
+#define O_RDWR     2
+
+#define SYS_MAX    26   /* one past the last valid syscall number    */
 
 /* ---- socket layer (AF_LOOPBACK only for now) ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

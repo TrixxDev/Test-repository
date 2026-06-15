@@ -92,6 +92,10 @@ static vfs_node_t *make_node(const char *name, uint32_t flags,
     n->flags = flags;
     n->inode = cluster;
     n->size  = size;
+    /* FAT32 is a read-only medium with no on-disk permissions: present every
+     * node as root-owned and world readable+executable (rwxr-xr-x). */
+    n->mode      = 0755;
+    n->owner_uid = 0;
     n->ops   = &fat_ops;
     return n;
 }

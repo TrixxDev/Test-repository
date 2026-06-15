@@ -91,10 +91,10 @@ See [docs/ABI.md](docs/ABI.md).
 
 ## System call interface
 
-`int 0x80`; `eax` = number, `ebx`/`ecx`/`edx` = args, `eax` = return. 24 calls:
+`int 0x80`; `eax` = number, `ebx`/`ecx`/`edx` = args, `eax` = return. 26 calls:
 process control, fds, pipes/dup2, sbrk, message-passing IPC, the name registry,
-loopback sockets (`socket`/`sock_link`/`poll`), and uid (`getuid`/`setuid`).
-Full table in [docs/SYSCALLS.md](docs/SYSCALLS.md).
+loopback sockets (`socket`/`sock_link`/`poll`), and uid
+(`getuid`/`setuid`/`uid_of`). Full table in [docs/SYSCALLS.md](docs/SYSCALLS.md).
 
 ## Filesystem
 
@@ -130,14 +130,25 @@ owns ports and the bind/connect/accept rendezvous, then asks the kernel to link
 the two endpoints, after which data flows endpoint-to-endpoint. Verified end to
 end by `echosrv`/`echocli`. Full design in [docs/NETWORKING.md](docs/NETWORKING.md).
 
-## Security (foundation)
+## Security (foundation, Phase 8A.5)
 
-Each process carries a `uid` (`kernel/process.h`), inherited across
-`fork`/`exec`/spawn. The kernel and its services (init, logger, netd) run as
-root (uid 0); the shell — and therefore everything it launches — runs as uid
-1000. `setuid` only drops privilege (root may pick any uid; a non-root process
-cannot lower its uid number), and `sock_link` is gated to root. rwx permissions
-on VFS nodes are the next step (see [NEXT_STEPS.md](NEXT_STEPS.md)).
+A deliberately-placed security model, added *before* the network grows the
+attack surface:
+
+- **uid** — each process carries a `uid` (`kernel/process.h`), inherited across
+  `fork`/`exec`/spawn. Kernel + services (init, logger, netd) are root (uid 0);
+  the shell and everything it launches are uid 1000. `setuid` only drops
+  privilege; `uid_of(pid)` lets a daemon learn a peer's uid from the kernel.
+- **VFS rwx** — nodes have `owner_uid` + Unix-style `mode`; `open` checks R/W
+  and `exec` checks X (root bypasses). `/disk` is root-owned `0755`.
+- **Service registry** — services have an owner + mode; "read" gates `lookup`,
+  and a name can only be re-registered by its owner or root (no hijack).
+- **Privileged ports** — netd refuses to `bind` a port < 1024 for non-root,
+  using `uid_of` so the requester can't forge its uid.
+
+See [docs/VFS.md](docs/VFS.md), [docs/IPC.md](docs/IPC.md),
+[docs/NETWORKING.md](docs/NETWORKING.md). Login, groups, and per-FS persisted
+permissions are future work ([NEXT_STEPS.md](NEXT_STEPS.md)).
 
 ## Userland & build pipeline
 

@@ -108,10 +108,17 @@ static void close_all_fds(process_t *p)
 
 int sys_open(const char *path, int flags)
 {
-    (void)flags;
     vfs_node_t *node = vfs_resolve(path);
     if (!node)
         return -1;
+
+    int want = VFS_R;
+    int acc = flags & 3;
+    if (acc == O_WRONLY)      want = VFS_W;
+    else if (acc == O_RDWR)   want = VFS_R | VFS_W;
+    if (!vfs_permitted(node, process_current()->uid, want))
+        return -1;
+
     return fd_install(process_current(), node);
 }
 
@@ -208,7 +215,22 @@ uint32_t sys_sbrk(int increment)
 #define MAX_SERVICES 16
 #define MBOX_LIMIT   64
 
-static struct { char name[32]; int pid; int used; } services[MAX_SERVICES];
+static struct {
+    char     name[32];
+    int      pid;
+    int      used;
+    int      owner_uid;
+    uint32_t mode;          /* service permission bits; "read" (4) gates lookup */
+} services[MAX_SERVICES];
+
+/* Unix-style rwx check against an owner/mode pair (no group concept yet). */
+static int perm_ok(int uid, int owner, uint32_t mode, int want)
+{
+    if (uid == 0)
+        return 1;
+    int bits = (uid == owner) ? (int)((mode >> 6) & 7) : (int)(mode & 7);
+    return (bits & want) == want;
+}
 
 static process_t *find_proc(int pid)
 {
@@ -290,13 +312,19 @@ static void unregister_pid(int pid)
             services[i].used = 0;
 }
 
-int sys_register(const char *name)
+int sys_register(const char *name, uint32_t mode)
 {
+    int uid = process_current()->uid;
     int pid = process_current()->pid;
-    /* replace an existing entry with the same name */
+    /* Re-register an existing name only if owned by the caller (or by root):
+     * this stops an unprivileged process from hijacking a service name. */
     for (int i = 0; i < MAX_SERVICES; i++) {
         if (services[i].used && strcmp(services[i].name, name) == 0) {
+            if (services[i].owner_uid != uid && uid != 0)
+                return -1;
             services[i].pid = pid;
+            services[i].owner_uid = uid;
+            services[i].mode = mode;
             return 0;
         }
     }
@@ -306,6 +334,8 @@ int sys_register(const char *name)
             while (name[j] && j < 31) { services[i].name[j] = name[j]; j++; }
             services[i].name[j] = '\0';
             services[i].pid = pid;
+            services[i].owner_uid = uid;
+            services[i].mode = mode;
             services[i].used = 1;
             return 0;
         }
@@ -315,9 +345,14 @@ int sys_register(const char *name)
 
 int sys_lookup(const char *name)
 {
+    int uid = process_current()->uid;
     for (int i = 0; i < MAX_SERVICES; i++)
-        if (services[i].used && strcmp(services[i].name, name) == 0)
+        if (services[i].used && strcmp(services[i].name, name) == 0) {
+            /* "read" permission gates discovery; a denied lookup looks absent. */
+            if (!perm_ok(uid, services[i].owner_uid, services[i].mode, VFS_R))
+                return -1;
             return services[i].pid;
+        }
     return -1;
 }
 
@@ -475,6 +510,14 @@ int sys_setuid(int uid)
         return -1;
     p->uid = uid;
     return 0;
+}
+
+/* Owner uid of another process (e.g. so netd can enforce privileged ports), or
+ * -1 if there is no such running process. */
+int sys_uid_of(int pid)
+{
+    process_t *p = find_proc(pid);
+    return p ? p->uid : -1;
 }
 
 /* ---- address-space + argv stack setup ---- */
@@ -705,6 +748,10 @@ void do_exec(const char *path, char **argv, registers_t *regs)
 
     vfs_node_t *f = vfs_resolve(kpath);
     if (!f) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+    if (!vfs_permitted(f, p->uid, VFS_X)) {     /* must be executable by us */
         regs->eax = (uint32_t)-1;
         return;
     }

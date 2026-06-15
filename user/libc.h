@@ -33,7 +33,10 @@ static inline void *sbrk(int incr)                      { return (void *)_syscal
 /* message-passing IPC + named services */
 static inline int msgsend(int pid, const void *b, int n) { return _syscall(SYS_MSGSEND, pid, (int)b, n); }
 static inline int msgrecv(void *b, int n, int *from)     { return _syscall(SYS_MSGRECV, (int)b, n, (int)from); }
-static inline int svc_register(const char *name)         { return _syscall(SYS_REGISTER, (int)name, 0, 0); }
+/* svc_register defaults to a world-discoverable service (0644); use
+ * svc_register_mode for a private one (e.g. 0600 = root-only lookup). */
+static inline int svc_register_mode(const char *name, int mode) { return _syscall(SYS_REGISTER, (int)name, mode, 0); }
+static inline int svc_register(const char *name)         { return _syscall(SYS_REGISTER, (int)name, 0644, 0); }
 static inline int svc_lookup(const char *name)           { return _syscall(SYS_LOOKUP, (int)name, 0, 0); }
 
 /* sockets (loopback) + poll + uid */
@@ -42,6 +45,7 @@ static inline int sock_link(int handle_a, int handle_b)  { return _syscall(SYS_S
 static inline int poll(struct pollfd *fds, int nfds, int timeout) { return _syscall(SYS_POLL, (int)fds, nfds, timeout); }
 static inline int getuid(void)                           { return _syscall(SYS_GETUID, 0, 0, 0); }
 static inline int setuid(int uid)                        { return _syscall(SYS_SETUID, uid, 0, 0); }
+static inline int uid_of(int pid)                        { return _syscall(SYS_UIDOF, pid, 0, 0); }
 
 /* send/recv are just write/read on a connected socket fd. */
 static inline int send(int fd, const void *b, int n)     { return write(fd, b, n); }

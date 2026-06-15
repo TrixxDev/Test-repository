@@ -34,6 +34,8 @@ static tnode_t *new_node(const char *name, uint32_t flags)
     memset(t, 0, sizeof(*t));
     set_name(t->v.name, name);
     t->v.flags = flags;
+    t->v.mode  = (flags & VFS_DIR) ? 0755 : 0644;   /* Unix-style defaults */
+    t->v.owner_uid = 0;                             /* tmpfs nodes are root-created */
     t->v.ops = &tmpfs_ops;
     t->v.priv = t;
     return t;

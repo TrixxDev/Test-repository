@@ -89,8 +89,8 @@ int pipe_create(vfs_node_t **rnode, vfs_node_t **wnode)
     p->rnode = rn;
     p->wnode = wn;
 
-    rn->flags = VFS_FILE; rn->ops = &pipe_read_ops;  rn->priv = p;
-    wn->flags = VFS_FILE; wn->ops = &pipe_write_ops; wn->priv = p;
+    rn->flags = VFS_FILE; rn->mode = 0600; rn->ops = &pipe_read_ops;  rn->priv = p;
+    wn->flags = VFS_FILE; wn->mode = 0600; wn->ops = &pipe_write_ops; wn->priv = p;
 
     *rnode = rn;
     *wnode = wn;

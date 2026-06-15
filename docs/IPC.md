@@ -50,9 +50,22 @@ Datagram mailboxes attached to processes (`kernel/process.c`).
 
 So clients can find services without hardcoding pids:
 
-- `register(const char *name)` — bind the current pid to a name.
-- `lookup(const char *name) -> pid` — resolve a name to a pid (`-1` if absent).
+- `register(const char *name, mode)` — bind the current pid to a name with a
+  permission `mode` (libc `svc_register` defaults to `0644`; `svc_register_mode`
+  sets it explicitly). Re-registering an existing name is allowed only for its
+  owner or root, so an unprivileged process cannot **hijack** a service name.
+- `lookup(const char *name) -> pid` — resolve a name to a pid (`-1` if absent
+  **or not permitted**).
 - Entries are removed when the owning process exits.
+
+### Service permissions (Phase 8A.5)
+
+Each service has an `owner_uid` and a `mode`; the "read" bit gates **lookup**
+(discovery). `0644` is a public service (anyone may look it up — `log` and `net`
+are public, since the unprivileged shell uses them); `0600` is private (only the
+owner/root may resolve it), which is how a future admin daemon (e.g. `aurorad`)
+would be locked down. `msgsend` itself is not uid-gated — knowing a pid is the
+capability, and the lookup gate controls who can obtain it.
 
 ### Service model
 

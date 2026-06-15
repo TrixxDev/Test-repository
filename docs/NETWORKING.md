@@ -95,15 +95,22 @@ deadline — a tick-driven timeout is future work.
 
 ## Security note
 
-`sock_link` is a privileged broker primitive: the kernel rejects it unless the
-caller's uid is 0. netd runs as root; the shell and the echo programs run as
-uid 1000 and reach netd only through the message RPCs. This is the first use of
-the new uid foundation (see [PROCESS_MODEL.md](PROCESS_MODEL.md)).
+- `sock_link` is a privileged broker primitive: the kernel rejects it unless the
+  caller's uid is 0. netd runs as root; the shell and the echo programs run as
+  uid 1000 and reach netd only through the message RPCs.
+- **Privileged ports:** binding a port below `PORT_PRIVILEGED` (1024) requires
+  root. netd enforces this by asking the kernel for the requester's uid
+  (`uid_of(from)`) rather than trusting the request, so it cannot be forged. The
+  echo demo therefore uses port **7000** (unprivileged), which the uid-1000
+  server may bind; an attempt to bind, say, port 80 as a user is rejected.
+
+These build on the uid foundation (see [PROCESS_MODEL.md](PROCESS_MODEL.md)) and
+the service-permission model (see [IPC.md](IPC.md)).
 
 ## Demo
 
 ```
-aurora> echosrv &                 # binds loopback port 7 via netd
+aurora> echosrv &                 # binds loopback port 7000 via netd
 aurora> echocli hello-loopback    # client -> netd -> server -> echo back
 [echocli] sent: hello-loopback
 [echocli] echo: hello-loopback

@@ -76,7 +76,7 @@ void syscall_handler(registers_t *regs)
         break;
 
     case SYS_REGISTER:
-        regs->eax = (uint32_t)sys_register((const char *)regs->ebx);
+        regs->eax = (uint32_t)sys_register((const char *)regs->ebx, (uint32_t)regs->ecx);
         break;
 
     case SYS_LOOKUP:
@@ -109,6 +109,10 @@ void syscall_handler(registers_t *regs)
 
     case SYS_SETUID:
         regs->eax = (uint32_t)sys_setuid((int)regs->ebx);
+        break;
+
+    case SYS_UIDOF:
+        regs->eax = (uint32_t)sys_uid_of((int)regs->ebx);
         break;
 
     default:

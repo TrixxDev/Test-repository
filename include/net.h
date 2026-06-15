@@ -32,5 +32,8 @@ typedef struct {
     int peer_pid;   /* informational           */
 } net_rep_t;
 
-/* A well-known port for the echo demo. */
-#define PORT_ECHO 7
+/* Ports below PORT_PRIVILEGED may only be bound by root (uid 0). */
+#define PORT_PRIVILEGED 1024
+
+/* The echo demo uses an unprivileged port so the uid-1000 server can bind it. */
+#define PORT_ECHO 7000

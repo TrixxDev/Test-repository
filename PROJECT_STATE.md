@@ -15,10 +15,10 @@ brokered by a userspace network daemon.
 It has moved well past a "teaching kernel" — it is an early Unix-like execution
 environment that is starting to look like a platform of services. It is **not**
 yet a daily-driver OS (no external networking yet — loopback only; no GUI; no FS
-writes to disk; only a uid foundation, not a full permission model).
+writes to disk; a basic permission model — uid + rwx — but no login/groups).
 
-- **Current version:** v0.8.0
-- **Size:** ~5,600 lines of C / assembly across kernel + drivers + fs + libc +
+- **Current version:** v0.8.1
+- **Size:** ~5,700 lines of C / assembly across kernel + drivers + fs + libc +
   userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
   `qemu-system-i386 -kernel`.
@@ -36,7 +36,7 @@ writes to disk; only a uid foundation, not a full permission model).
 | Memory | ✅ | E820 parse, bitmap PMM, paging (recursive), per-process address spaces, kernel heap, `sbrk`. |
 | Scheduling | ✅ | Preemptive round-robin threads, run states, block/wake, idle thread, context switch. |
 | Processes | ✅ | PCB, `fork`/`exec`/`wait`/`exit`, exit codes, reparent-to-init, zombie reaping, `kill`. |
-| Ring 3 | ✅ | User mode via TSS + `iret`, `int 0x80` syscalls (19 calls). |
+| Ring 3 | ✅ | User mode via TSS + `iret`, `int 0x80` syscalls (26 calls). |
 | Filesystem | ✅ | VFS (mounts, vnodes, ops); tmpfs (rw); FAT32 (read-only) over ATA; console device. |
 | Executables | ✅ | ELF32 loader (PT_LOAD), `argc`/`argv` setup, crt0. |
 | IPC | ✅ | Pipes (`pipe`/`dup2`), message passing (`msgsend`/`msgrecv`), named service registry. |
@@ -44,7 +44,7 @@ writes to disk; only a uid foundation, not a full permission model).
 | Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`. |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
 | Graphics | ❌ | Text mode only. |
-| Security / multi-user | 🟡 | uid foundation (root vs user, `getuid`/`setuid`, propagated across fork/exec); rwx on VFS nodes not yet enforced. |
+| Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What you can do today
 
@@ -55,7 +55,7 @@ aurora> hello one two            # argv + malloc demo
 aurora> cat /disk/poem.txt | grep aurora   # pipes between two processes
 aurora> log system online        # IPC message to the logger daemon
 aurora> id                       # shows uid=1000 (the shell runs unprivileged)
-aurora> echosrv &                # loopback echo server (binds port 7 via netd)
+aurora> echosrv &                # loopback echo server (binds port 7000 via netd)
 aurora> echocli hello-loopback   # client -> netd -> server -> back
 aurora> orphan                   # orphan reparented to init and reaped
 aurora> hello job &              # background job, auto-reaped

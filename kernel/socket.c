@@ -151,6 +151,7 @@ vfs_node_t *sock_create(int domain, int type)
     s->refs   = 1;
     s->node   = n;
     n->flags  = VFS_FILE;
+    n->mode   = 0600;
     n->ops    = &sock_ops;
     n->priv   = s;
     memcpy(n->name, "socket", 7);

@@ -10,6 +10,11 @@
 #define VFS_FILE 0x01
 #define VFS_DIR  0x02
 
+/* Permission bits (used against a node's `mode`, Unix rwx semantics). */
+#define VFS_R 0x4
+#define VFS_W 0x2
+#define VFS_X 0x1
+
 struct vfs_node;
 
 typedef struct vfs_ops {
@@ -25,6 +30,8 @@ typedef struct vfs_node {
     uint32_t flags;     /* VFS_FILE / VFS_DIR */
     uint32_t size;      /* bytes (files) */
     uint32_t inode;     /* fs-specific id (e.g. FAT first cluster) */
+    uint32_t mode;      /* permission bits, Unix-style rwxrwxrwx (low 9 bits) */
+    int      owner_uid; /* owning uid (0 = root) */
     vfs_ops_t *ops;
     void    *priv;      /* fs-specific data */
 } vfs_node_t;
@@ -36,6 +43,11 @@ int vfs_mount(const char *path, vfs_node_t *root);
 
 /* Resolve an absolute path to a node, or NULL if not found. */
 vfs_node_t *vfs_resolve(const char *path);
+
+/* Does `uid` have all of `want` (VFS_R/W/X) on `node`? Root (uid 0) always
+ * passes; otherwise the owner bits apply to the owner and the "other" bits to
+ * everyone else (no group concept yet). */
+int vfs_permitted(vfs_node_t *node, int uid, int want);
 
 int vfs_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf);
 int vfs_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf);
