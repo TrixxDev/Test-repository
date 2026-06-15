@@ -39,12 +39,13 @@ void process_init(void);
 /* The process owning the currently running thread. */
 process_t *process_current(void);
 
-/* Create a process from an ELF image and start it in ring 3. Returns pid. */
-int process_spawn(const uint8_t *elf, uint32_t size);
+/* Create a process from an ELF image and start it in ring 3. `name` becomes
+ * argv[0]. Returns pid. */
+int process_spawn(const uint8_t *elf, uint32_t size, const char *name);
 
 /* System-call backends (operate on the current process). */
 int  do_fork(registers_t *regs);
-void do_exec(const char *path, registers_t *regs);   /* no return on success */
+void do_exec(const char *path, char **argv, registers_t *regs); /* no return on success */
 void process_exit(int code);                          /* never returns */
 int  process_wait(int pid, int *status_user);
 

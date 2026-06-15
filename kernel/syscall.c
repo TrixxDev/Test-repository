@@ -27,11 +27,11 @@ void syscall_handler(registers_t *regs)
         break;
 
     case SYS_EXEC:
-        do_exec((const char *)regs->ebx, regs);  /* no return on success */
+        do_exec((const char *)regs->ebx, (char **)regs->ecx, regs);  /* no return on success */
         break;
 
     case SYS_WAIT:
-        regs->eax = (uint32_t)process_wait((int)regs->ebx, (int *)regs->ecx);
+        regs->eax = (uint32_t)process_wait(-1, (int *)regs->ebx);
         break;
 
     case SYS_OPEN:

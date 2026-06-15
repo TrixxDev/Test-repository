@@ -15,6 +15,9 @@
 #define USER_CODE 0x1B
 #define USER_DATA 0x23
 
+#define MAX_ARG  16
+#define ARG_LEN  64
+
 static process_t proc_table[MAX_PROCS];
 static int next_pid;
 
@@ -58,7 +61,6 @@ static int fd_install(process_t *p, vfs_node_t *node)
 
 static void open_standard_streams(process_t *p)
 {
-    /* 0=stdin, 1=stdout, 2=stderr all wired to the console device. */
     vfs_node_t *con = console_node();
     for (int fd = 0; fd < 3; fd++) {
         file_t *f = (file_t *)kmalloc(sizeof(file_t));
@@ -82,11 +84,10 @@ static void close_all_fds(process_t *p)
 int sys_open(const char *path, int flags)
 {
     (void)flags;
-    process_t *p = process_current();
     vfs_node_t *node = vfs_resolve(path);
     if (!node)
         return -1;
-    return fd_install(p, node);
+    return fd_install(process_current(), node);
 }
 
 int sys_read(int fd, void *buf, uint32_t len)
@@ -125,20 +126,40 @@ int sys_close(int fd)
     return 0;
 }
 
-/* ---- creation ---- */
+/* ---- address-space + argv stack setup ---- */
 
-void process_init(void)
+/* Build argc/argv on the user stack of the *current* address space, returning
+ * the resulting user esp. Layout (low to high): argc, argv[0..argc-1], NULL,
+ * then the argument strings. */
+static uint32_t setup_user_stack(int argc, char kargs[][ARG_LEN])
 {
-    process_t *kp = alloc_proc();       /* pid 0: the kernel */
-    kp->ppid = 0;
-    kp->pd_phys = vmm_kernel_directory();
-    kp->thread = thread_current();
-    kp->parent = NULL;
-    thread_set_proc(thread_current(), kp);
+    uint32_t sp = USTACK_TOP;
+    uint32_t argv_ptrs[MAX_ARG];
+
+    for (int i = argc - 1; i >= 0; i--) {
+        uint32_t len = (uint32_t)strlen(kargs[i]) + 1;
+        sp -= len;
+        memcpy((void *)sp, kargs[i], len);
+        argv_ptrs[i] = sp;
+    }
+
+    sp &= ~3u;
+    sp -= 4;
+    *(uint32_t *)sp = 0;                         /* argv[argc] = NULL */
+    for (int i = argc - 1; i >= 0; i--) {
+        sp -= 4;
+        *(uint32_t *)sp = argv_ptrs[i];
+    }
+    sp -= 4;
+    *(uint32_t *)sp = (uint32_t)argc;            /* argc */
+    return sp;
 }
 
-static int load_into_new_space(const uint8_t *elf, uint32_t size,
-                               uint32_t *pd_out, uint32_t *entry_out)
+/* Create a new address space, load the ELF, map a user stack, and set up
+ * argv. Leaves the previous address space active. */
+static int load_image(const uint8_t *elf, uint32_t size, int argc,
+                      char kargs[][ARG_LEN], uint32_t *pd_out,
+                      uint32_t *entry_out, uint32_t *esp_out)
 {
     uint32_t saved = vmm_current_directory();
     uint32_t pd    = vmm_create_address_space();
@@ -154,16 +175,34 @@ static int load_into_new_space(const uint8_t *elf, uint32_t size,
         vmm_map_page(USTACK_TOP - (uint32_t)i * 0x1000, pmm_alloc_frame(),
                      PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
 
+    uint32_t esp = setup_user_stack(argc, kargs);
+
     vmm_switch_address_space(saved);
     *pd_out = pd;
     *entry_out = entry;
+    *esp_out = esp;
     return 0;
 }
 
-int process_spawn(const uint8_t *elf, uint32_t size)
+void process_init(void)
 {
-    uint32_t pd, entry;
-    if (load_into_new_space(elf, size, &pd, &entry) != 0)
+    process_t *kp = alloc_proc();       /* pid 0: the kernel */
+    kp->ppid = 0;
+    kp->pd_phys = vmm_kernel_directory();
+    kp->thread = thread_current();
+    kp->parent = NULL;
+    thread_set_proc(thread_current(), kp);
+}
+
+int process_spawn(const uint8_t *elf, uint32_t size, const char *name)
+{
+    char kargs[1][ARG_LEN];
+    int i = 0;
+    while (name[i] && i < ARG_LEN - 1) { kargs[0][i] = name[i]; i++; }
+    kargs[0][i] = '\0';
+
+    uint32_t pd, entry, esp;
+    if (load_image(elf, size, 1, kargs, &pd, &entry, &esp) != 0)
         return -1;
 
     process_t *p = alloc_proc();
@@ -174,7 +213,7 @@ int process_spawn(const uint8_t *elf, uint32_t size)
     p->ppid    = p->parent ? p->parent->pid : 0;
     open_standard_streams(p);
 
-    thread_t *t = thread_create_user(pd, entry, USTACK_TOP);
+    thread_t *t = thread_create_user(pd, entry, esp);
     p->thread = t;
     thread_set_proc(t, p);
     return p->pid;
@@ -182,14 +221,12 @@ int process_spawn(const uint8_t *elf, uint32_t size)
 
 /* ---- fork ---- */
 
-/* Trampoline for a forked child: return to ring 3 using the copied frame. */
 extern void return_to_user(registers_t *r);
 static void fork_child_entry(void)
 {
     return_to_user((registers_t *)thread_start_arg(thread_current()));
 }
 
-/* Copy every present user page of the current address space into `child_pd`. */
 static int copy_user_space(uint32_t child_pd)
 {
     uint32_t *PD = (uint32_t *)0xFFFFF000;
@@ -261,39 +298,52 @@ int do_fork(registers_t *regs)
     child->parent  = parent;
     child->ppid    = parent->pid;
 
-    /* Inherit the descriptor table (shared open files). */
     for (int fd = 0; fd < MAX_FDS; fd++) {
         child->fds[fd] = parent->fds[fd];
         if (child->fds[fd])
             child->fds[fd]->refcount++;
     }
 
-    /* Child resumes exactly where the parent was, but fork() returns 0. */
     child->saved_regs = *regs;
-    child->saved_regs.eax = 0;
+    child->saved_regs.eax = 0;          /* fork() returns 0 in the child */
 
     thread_t *t = thread_create_trampoline(child_pd, (uint32_t)fork_child_entry,
                                            &child->saved_regs);
     child->thread = t;
     thread_set_proc(t, child);
 
-    return child->pid;      /* parent's return value */
+    return child->pid;                  /* parent's return value */
 }
 
 /* ---- exec ---- */
 
-void do_exec(const char *path, registers_t *regs)
+void do_exec(const char *path, char **argv, registers_t *regs)
 {
     process_t *p = process_current();
 
-    /* Copy the path out of user memory before we tear the image down. */
+    /* Copy the path and argv out of user memory before tearing the image down. */
     char kpath[128];
     int i = 0;
-    while (path[i] && i < 127) {
-        kpath[i] = path[i];
-        i++;
-    }
+    while (path[i] && i < 127) { kpath[i] = path[i]; i++; }
     kpath[i] = '\0';
+
+    char kargs[MAX_ARG][ARG_LEN];
+    int argc = 0;
+    if (argv) {
+        while (argv[argc] && argc < MAX_ARG) {
+            int j = 0;
+            const char *a = argv[argc];
+            while (a[j] && j < ARG_LEN - 1) { kargs[argc][j] = a[j]; j++; }
+            kargs[argc][j] = '\0';
+            argc++;
+        }
+    }
+    if (argc == 0) {                    /* always pass argv[0] = program path */
+        int j = 0;
+        while (kpath[j] && j < ARG_LEN - 1) { kargs[0][j] = kpath[j]; j++; }
+        kargs[0][j] = '\0';
+        argc = 1;
+    }
 
     vfs_node_t *f = vfs_resolve(kpath);
     if (!f) {
@@ -307,8 +357,8 @@ void do_exec(const char *path, registers_t *regs)
     }
     vfs_read(f, 0, f->size, buf);
 
-    uint32_t new_pd, entry;
-    if (load_into_new_space(buf, f->size, &new_pd, &entry) != 0) {
+    uint32_t new_pd, entry, esp;
+    if (load_image(buf, f->size, argc, kargs, &new_pd, &entry, &esp) != 0) {
         kfree(buf);
         regs->eax = (uint32_t)-1;
         return;
@@ -316,8 +366,6 @@ void do_exec(const char *path, registers_t *regs)
     kfree(buf);
 
     uint32_t old_pd = p->pd_phys;
-
-    /* Leave the old space before freeing it. */
     vmm_switch_address_space(vmm_kernel_directory());
     vmm_destroy_address_space(old_pd);
 
@@ -325,14 +373,13 @@ void do_exec(const char *path, registers_t *regs)
     thread_set_pd(p->thread, new_pd);
     vmm_switch_address_space(new_pd);
 
-    /* Jump into the new image with a clean ring-3 frame. */
     registers_t r;
     memset(&r, 0, sizeof(r));
     r.ds      = USER_DATA;
     r.eip     = entry;
     r.cs      = USER_CODE;
     r.eflags  = 0x202;
-    r.useresp = USTACK_TOP;
+    r.useresp = esp;
     r.ss      = USER_DATA;
     return_to_user(&r);
 }
@@ -345,7 +392,6 @@ void process_exit(int code)
 
     close_all_fds(p);
 
-    /* Free the user address space (after leaving it). */
     vmm_switch_address_space(vmm_kernel_directory());
     vmm_destroy_address_space(p->pd_phys);
     p->pd_phys = 0;
@@ -353,7 +399,6 @@ void process_exit(int code)
     p->exit_code = code;
     p->state = PROC_ZOMBIE;
 
-    /* Wake the parent if it is waiting. */
     if (p->parent && p->parent->waiting)
         thread_wake(p->parent->thread);
 
@@ -398,7 +443,7 @@ int process_wait(int pid, int *status_user)
                 *status_user = code;
 
             thread_free(child->thread);
-            child->state = PROC_UNUSED;     /* reap the PCB */
+            child->state = PROC_UNUSED;
             return cpid;
         }
 
@@ -407,9 +452,8 @@ int process_wait(int pid, int *status_user)
             return -1;
         }
 
-        /* Block until a child exits. */
         p->waiting = 1;
-        thread_block();                     /* yields with interrupts off */
+        thread_block();
         p->waiting = 0;
     }
 }

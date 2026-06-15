@@ -1,8 +1,8 @@
 /* AuroraOS kernel entry point.
  *
- * Stage 3 bring-up: a Unix-like process model. The kernel starts an init
- * process from disk; init fork()s, the child exec()s another program, and init
- * wait()s for it, reaping its exit code. The kernel finally reaps init. */
+ * Stage 4 bring-up: the kernel starts an interactive shell as the first user
+ * process. The shell reads commands from stdin and fork()/exec()s programs from
+ * /disk. The kernel reaps the shell when it exits. */
 #include <stdint.h>
 
 #include "kio.h"
@@ -25,6 +25,14 @@
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
 
+/* Always-runnable thread: keeps the CPU alive (interrupts on) when every other
+ * thread is blocked, so device IRQs can still wake them. */
+static void idle_thread(void)
+{
+    for (;;)
+        __asm__ volatile("sti; hlt");
+}
+
 /* init, embedded as a fallback if no disk is present. */
 extern const unsigned char user_elf[];
 extern const unsigned int  user_elf_len;
@@ -38,7 +46,7 @@ static void banner(void)
         "  / _ \\| || | '_/ _ \\ '_/ _` | \n"
         " /_/ \\_\\\\_,_|_| \\___/_| \\__,_| \n");
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
-    terminal_writestring("        AuroraOS  v0.4.0  (processes: fork/exec/wait)\n\n");
+    terminal_writestring("        AuroraOS  v0.5.0  (interactive shell)\n\n");
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info)
@@ -72,12 +80,12 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     vfs_init();
     vfs_mount("/tmp", tmpfs_create());
 
-    /* tmpfs fallback copy of init. */
+    /* tmpfs fallback copy of the shell. */
     vfs_node_t *tmp = vfs_resolve("/tmp");
-    vfs_node_t *fb = vfs_create(tmp, "init.elf", VFS_FILE);
+    vfs_node_t *fb = vfs_create(tmp, "sh.elf", VFS_FILE);
     vfs_write(fb, 0, user_elf_len, user_elf);
 
-    const char *init_path = "/tmp/init.elf";
+    const char *init_path = "/tmp/sh.elf";
     kprintf("[boot] probing ATA disk...\n");
     if (ata_init()) {
         vfs_node_t *root = fat32_mount();
@@ -87,11 +95,11 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
             char name[64];
             for (uint32_t i = 0; vfs_readdir(root, i, name, sizeof(name)) == 0; i++)
                 kprintf("        /disk/%s\n", name);
-            if (vfs_resolve("/disk/INIT.ELF"))
-                init_path = "/disk/INIT.ELF";
+            if (vfs_resolve("/disk/SH.ELF"))
+                init_path = "/disk/SH.ELF";
         }
     } else {
-        kprintf("      no ATA disk; using embedded init\n");
+        kprintf("      no ATA disk; using embedded shell\n");
     }
 
     __asm__ volatile("sti");
@@ -106,21 +114,23 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     vfs_read(f, 0, f->size, buf);
 
     terminal_setcolor(VGA_LIGHT_GREEN, VGA_BLACK);
-    kprintf("\n[exec] starting init from %s\n\n", init_path);
+    kprintf("\n[exec] starting shell from %s\n", init_path);
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
 
-    int initpid = process_spawn(buf, f->size);
+    int shpid = process_spawn(buf, f->size, "sh");
     kfree(buf);
+
+    thread_create_kernel(idle_thread);  /* always-runnable fallback */
 
     scheduler_enable();
 
-    /* The kernel reaps init when it exits (demonstrates wait/cleanup). */
+    /* The kernel reaps the shell when it exits (demonstrates wait/cleanup). */
     int status = -1;
-    int reaped = process_wait(initpid, &status);
+    int reaped = process_wait(shpid, &status);
 
     scheduler_disable();
     terminal_setcolor(VGA_LIGHT_CYAN, VGA_BLACK);
-    kprintf("\n[kernel] reaped init (pid %d), exit code %d. System idle.\n",
+    kprintf("\n[kernel] shell (pid %d) exited with code %d. System idle.\n",
             reaped, status);
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
 

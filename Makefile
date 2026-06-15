@@ -21,10 +21,10 @@ LDFLAGS := -m elf_i386 -no-pie -T linker.ld
 KERNEL  := aurora.elf
 DISK    := disk.img
 
-# User programs are built separately. init is embedded into the kernel image as
-# a fallback; both init and child are written to the FAT32 disk.
+# User programs are built separately. The shell is embedded into the kernel
+# image as a fallback; all programs are written to the FAT32 disk.
 EMBEDDED   := kernel/embedded_user.c
-USER_PROGS := user/init.elf user/child.elf
+USER_PROGS := user/sh.elf user/hello.elf
 
 C_SRC := $(shell find kernel arch drivers lib fs -name '*.c')
 C_SRC := $(sort $(C_SRC) $(EMBEDDED))
@@ -39,18 +39,23 @@ $(KERNEL): $(OBJ) linker.ld
 	$(LD) $(LDFLAGS) $(OBJ) -o $@
 	@echo "Built $(KERNEL)"
 
-# --- user programs ---
-user/%.elf: user/%.c user/ulib.h user/user.ld
-	$(CC) --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
-	      -O2 -Iuser -c user/$*.c -o user/$*.o
-	$(LD) -m elf_i386 -no-pie -T user/user.ld user/$*.o -o $@
+# --- user programs (crt0 provides _start and calls main) ---
+UCFLAGS := --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
+           -O2 -Iinclude -Iuser
 
-$(EMBEDDED): user/init.elf tools/bin2c.py
-	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
+user/crt0.o: user/crt0.S
+	$(CC) --target=$(TARGET) -m32 -ffreestanding -Iinclude -c user/crt0.S -o $@
+
+user/%.elf: user/%.c user/ulib.h user/crt0.o user/user.ld
+	$(CC) $(UCFLAGS) -c user/$*.c -o user/$*.o
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/$*.o -o $@
+
+$(EMBEDDED): user/sh.elf tools/bin2c.py
+	python3 tools/bin2c.py user/sh.elf user_elf > $(EMBEDDED)
 
 # --- FAT32 disk image containing the user programs ---
 $(DISK): $(USER_PROGS) tools/mkfat32.py
-	python3 tools/mkfat32.py $(DISK) INIT.ELF user/init.elf CHILD.ELF user/child.elf
+	python3 tools/mkfat32.py $(DISK) SH.ELF user/sh.elf HELLO.ELF user/hello.elf
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -69,4 +74,4 @@ debug: $(KERNEL) $(DISK)
 	    -drive file=$(DISK),format=raw,if=ide -s -S
 
 clean:
-	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o $(USER_PROGS)
+	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf
