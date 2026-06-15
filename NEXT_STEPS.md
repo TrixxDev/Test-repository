@@ -56,17 +56,27 @@ app → window server → compositor → framebuffer
 - **9.0 — Framebuffer — DONE (v0.9.0).** Multiboot 1024×768×32 linear mode;
   `drivers/fb.c` maps the loader-provided framebuffer into a `gfx_surface_t`,
   gated so text mode still works without one. See [docs/GRAPHICS.md](docs/GRAPHICS.md).
-- **9.1 — 2D graphics library — minimal DONE (v0.9.0).** `kernel/gfx.c`: rects,
-  rounded rects, circles, vertical gradient, blit. Plus a **static desktop**
-  (`kernel/desktop.c`: wallpaper + menu bar + Dock), rendered to a PNG via
-  `make screenshot`.
-  - [ ] still to do for 9.1: alpha blending, **text rendering** (a bitmap font),
-    a PNG/image decoder for assets, and a Bochs-VBE/PCI fallback so the live
-    framebuffer comes up under bare `qemu -kernel` (currently needs a
-    framebuffer-capable loader like GRUB).
-- **9.2 — Compositor + Window Server — NEXT.** `app → window server → compositor
-  → framebuffer`. Apps render into off-screen surfaces; the compositor owns the
-  screen. This boundary is the single most important macOS-like decision.
+- **9.1 — 2D graphics library — minimal DONE (v0.9.0/9.1).** `kernel/gfx.c`:
+  rects, rounded rects, circles, vertical gradient, blit, and an **8×16 bitmap
+  font** (`kernel/font8x16.h` via `tools/genfont.py`). Plus a **static desktop**
+  (`kernel/desktop.c`: wallpaper + labelled menu bar + clock + lettered Dock),
+  rendered to a PNG via `make screenshot`.
+  - [ ] still to do for 9.1: alpha blending, a PNG/image decoder for assets.
+- **9.0.5 — Live output — DONE in code (v0.9.1), needs on-screen confirm.** Two
+  ways to bring up a real framebuffer: the Bochs/std-VGA VBE fallback
+  (`make run-vbe`, programs the DISPI regs + finds the LFB via PCI) and a GRUB
+  Multiboot-framebuffer ISO (`make iso`). **Open item:** actually see the Dock on
+  a QEMU screen and confirm framebuffer mapping / pitch / mode-switch — this
+  cannot be done in the current sandbox (no QEMU/display).
+- **9.2 — Compositor + Window Server — NEXT (after the live confirm).** Build it
+  as a **userspace service** (like `logger`/`netd`), never in the kernel — the
+  kernel keeps only framebuffer + input + IPC:
+  ```
+  kernel:        framebuffer · input · IPC
+  windowserver:  windows · z-order · focus · compositor   (userspace)
+  ```
+  Order: surface API + z-order → PS/2 mouse + cursor (9.3) → first window (9.4)
+  → window dragging (9.5) → Dock as its own process (9.6).
 - **9.3 — Aurora Desktop.** Promote the static desktop to a live one (menu bar,
   Dock, wallpaper, mouse cursor) driven by the window server.
 - **9.4 — Windows.** Move/drag, minimise, close, focus.
@@ -106,11 +116,9 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-The first desktop renders (`make screenshot` → `aurora_desktop.png`). Two tracks
-from here:
-
-1. **Make it live:** boot via a framebuffer-capable path (GRUB, or add the
-   Bochs-VBE/PCI fallback) so the desktop shows in QEMU, not just as a PNG.
-2. **Phase 9.2 — window server + compositor:** off-screen per-app surfaces
-   composited to the framebuffer, then a PS/2 mouse cursor — the boundary that
-   makes the rest of the macOS-like UI possible.
+**Confirm the desktop on a real QEMU screen first** (the architectural gate
+before building the window server): `make run-vbe`, or `make iso` then boot the
+ISO. This validates framebuffer mapping, pitch, VBE mode-switch and screen update
+— things the off-screen PNG cannot. Only once the Dock shows on screen, start
+**Phase 9.2**: a userspace window server + compositor (surface API + z-order),
+then PS/2 mouse + cursor.

@@ -25,3 +25,8 @@ void gfx_fill_circle(gfx_surface_t *s, int cx, int cy, int r, uint32_t color);
 void gfx_fill_vgradient(gfx_surface_t *s, int x, int y, int w, int h,
                         uint32_t top, uint32_t bottom);
 void gfx_blit(gfx_surface_t *s, int x, int y, const uint32_t *src, int sw, int sh);
+
+/* Text (8x16 bitmap font, ASCII 32..126; unknown chars render as '?'). */
+void gfx_draw_char(gfx_surface_t *s, int x, int y, char c, uint32_t color);
+void gfx_draw_text(gfx_surface_t *s, int x, int y, const char *str, uint32_t color);
+int  gfx_text_width(const char *str);   /* width in pixels */

@@ -1,5 +1,6 @@
 /* AuroraOS 2D graphics library — see gfx.h. Software rendering, 32-bpp. */
 #include "gfx.h"
+#include "font8x16.h"
 
 static inline void put(gfx_surface_t *s, int x, int y, uint32_t color)
 {
@@ -105,4 +106,35 @@ void gfx_blit(gfx_surface_t *s, int x, int y, const uint32_t *src, int sw, int s
     for (int yy = 0; yy < sh; yy++)
         for (int xx = 0; xx < sw; xx++)
             put(s, x + xx, y + yy, src[yy * sw + xx]);
+}
+
+void gfx_draw_char(gfx_surface_t *s, int x, int y, char c, uint32_t color)
+{
+    unsigned ch = (unsigned char)c;
+    if (ch < FONT_FIRST || ch > FONT_LAST)
+        ch = '?';
+    const uint8_t *g = font8x16[ch - FONT_FIRST];
+    for (int row = 0; row < FONT_H; row++) {
+        uint8_t bits = g[row];
+        for (int col = 0; col < FONT_W; col++)
+            if (bits & (0x80 >> col))
+                put(s, x + col, y + row, color);
+    }
+}
+
+void gfx_draw_text(gfx_surface_t *s, int x, int y, const char *str, uint32_t color)
+{
+    int cx = x;
+    for (; *str; str++) {
+        if (*str == '\n') { y += FONT_H; cx = x; continue; }
+        gfx_draw_char(s, cx, y, *str, color);
+        cx += FONT_W;
+    }
+}
+
+int gfx_text_width(const char *str)
+{
+    int n = 0;
+    while (str[n]) n++;
+    return n * FONT_W;
 }

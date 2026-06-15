@@ -3,14 +3,15 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.0.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.1.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
-netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and the first
-graphics (Phase 9.0 framebuffer + minimal 9.1 2D library + a static desktop) are
-implemented and build clean. FS write and the desktop rendering are verified on
-the host (the real `fs/fat32.c` write path + image re-parse; the real
-`kernel/gfx.c`+`kernel/desktop.c` rendered to a PNG). In-QEMU boot tests of the
-newest pieces are the pending step (no QEMU in the current CI sandbox).
+netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
+(Phase 9.0 framebuffer + minimal 9.1 2D library with an 8×16 font + a static
+desktop, plus two live-output paths) are implemented and build clean. FS write
+and the desktop rendering are verified on the host (the real `fs/fat32.c` write
+path + image re-parse; the real `kernel/gfx.c`+`kernel/desktop.c` rendered to a
+PNG). The live framebuffer (`make run-vbe` / `make iso`) needs an interactive
+QEMU run to confirm on screen — pending (no QEMU in the current CI sandbox).
 
 ## Phase status
 
@@ -29,7 +30,8 @@ newest pieces are the pending step (no QEMU in the current CI sandbox).
 | 8A.5 | Security foundation: VFS rwx/owner, service-registry permissions, privileged ports | v0.8.1 | ✅ |
 | 8.2 | FS write: ATA sector write + FAT32 read/write (create/grow/truncate), `open(O_CREAT/O_TRUNC)` | v0.8.2 | ✅ |
 | 9.0/9.1 | Framebuffer (Multiboot) + 2D library + static desktop (wallpaper + menu bar + Dock) | v0.9.0 | ✅ |
-| 9.2 | Window server + compositor (off-screen surfaces), PS/2 mouse | — | ⏳ **next** |
+| 9.0.5 | Live output: 8×16 text/font; Bochs-VBE fallback (`run-vbe`) + GRUB ISO (`iso`) | v0.9.1 | ✅ (needs on-screen confirm) |
+| 9.2 | Window server + compositor (userspace), PS/2 mouse | — | ⏳ **next** |
 | 9.3+ | Desktop, windows, Finder, design system (fonts/alpha/shadows) | — | ⏳ later |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
@@ -56,9 +58,11 @@ newest pieces are the pending step (no QEMU in the current CI sandbox).
 - FS write: `save /disk/NOTE.TXT hello` creates/writes a FAT32 file, `cat`
   reads it back; files persist on the disk image. (Verified on the host with
   the real driver code + independent re-parse of the image.)
-- Graphics: a static desktop (wallpaper + menu bar + Dock) renders via the 2D
-  library. Verified by rendering the real `kernel/gfx.c`+`desktop.c` to a PNG
-  (`make screenshot` → `aurora_desktop.png`); in-QEMU display test pending.
+- Graphics: a static desktop (wallpaper + menu bar with labels + a clock + a
+  Dock with lettered icons) renders via the 2D library and 8×16 font. Verified by
+  rendering the real `kernel/gfx.c`+`desktop.c` to a PNG (`make screenshot` →
+  `aurora_desktop.png`). Live paths (`make run-vbe`, `make iso`) await on-screen
+  confirmation in QEMU.
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.

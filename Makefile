@@ -83,6 +83,23 @@ debug: $(KERNEL) $(DISK)
 	qemu-system-i386 -kernel $(KERNEL) -serial stdio -m 64M \
 	    -drive file=$(DISK),format=raw,if=ide -s -S
 
+# Boot into graphics: bring up the desktop via the Bochs/std-VGA VBE fallback
+# (needs no extra tooling). `vbe` on the cmdline opts into the framebuffer path.
+run-vbe: $(KERNEL) $(DISK)
+	qemu-system-i386 -kernel $(KERNEL) -serial stdio -m 64M \
+	    -drive file=$(DISK),format=raw,if=ide -vga std -append vbe
+
+# Build a GRUB rescue ISO (preferred "real boot": GRUB sets the Multiboot
+# framebuffer, so the desktop comes up with no cmdline flag). Needs grub-mkrescue
+# + xorriso installed. Boot: qemu-system-i386 -cdrom aurora.iso -m 64M \
+#   -drive file=disk.img,format=raw,if=ide
+iso: $(KERNEL) $(DISK)
+	mkdir -p isodir/boot/grub
+	cp $(KERNEL) isodir/boot/aurora.elf
+	cp boot/grub.cfg isodir/boot/grub/grub.cfg
+	grub-mkrescue -o aurora.iso isodir
+	@echo "Built aurora.iso"
+
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
 SCREENSHOT := aurora_desktop.png
@@ -95,3 +112,4 @@ screenshot:
 
 clean:
 	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o
+	rm -rf isodir aurora.iso

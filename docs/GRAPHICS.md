@@ -15,16 +15,27 @@ desktop straight onto the framebuffer.
 ## 9.0 — Framebuffer (`drivers/fb.c`)
 
 The Multiboot header (`arch/i386/boot.S`) requests a 1024×768×32 linear video
-mode. If the loader supplies one, `multiboot_info_t` carries
-`framebuffer_addr/pitch/width/height/bpp/type`; `fb_init()` identity-maps the
-region and wraps it in a `gfx_surface_t`. If no framebuffer is supplied (e.g.
-QEMU's bare `-kernel` loader may ignore the request), the kernel simply stays in
-VGA text mode — the graphics path is fully gated, so the text boot is unaffected.
+mode. `fb_init()` (`drivers/fb.c`) brings up a framebuffer two ways and wraps it
+in a `gfx_surface_t`; if neither is available the kernel stays in VGA text mode
+(fully gated, so the text boot is never affected):
 
-> Live-on-hardware note: a framebuffer appears when booted by a Multiboot
-> framebuffer-capable loader (e.g. GRUB). Booting `qemu -kernel` directly may not
-> provide one; a Bochs-VBE/PCI mode-set fallback is a planned addition. The
-> rendering itself is verified off-screen (see below).
+1. **Loader-provided (preferred).** If the loader honors the Multiboot video
+   request, `multiboot_info_t` carries `framebuffer_addr/pitch/width/height/bpp`
+   and we use it directly. GRUB does this.
+2. **Bochs/std-VGA VBE fallback.** Bare `qemu -kernel` may ignore the request, so
+   on the opt-in cmdline flag `vbe` we set the mode ourselves: program the Bochs
+   DISPI registers (ports `0x01CE/0x01CF`) for 1024×768×32 + LFB, and find the
+   framebuffer address from the PCI display controller's BAR0 (config ports
+   `0xCF8/0xCFC`). Gated on the cmdline so the default boot is untouched.
+
+### Seeing it live in QEMU
+
+```sh
+make run-vbe     # qemu -kernel ... -vga std -append vbe  (Bochs VBE fallback)
+# or, the "real boot" path (needs grub-mkrescue + xorriso):
+make iso && qemu-system-i386 -cdrom aurora.iso -m 64M \
+    -drive file=disk.img,format=raw,if=ide
+```
 
 ## 9.1 — 2D library (`kernel/gfx.c`)
 
@@ -35,18 +46,28 @@ Pure, portable software rendering over a linear 32-bpp surface
 - `gfx_fill_round_rect` (quarter-circle corners), `gfx_fill_circle`
 - `gfx_fill_vgradient` (per-scanline channel interpolation)
 - `gfx_blit` (copy an image rectangle)
+- `gfx_draw_char` / `gfx_draw_text` over an **8×16 bitmap font**
+  (`kernel/font8x16.h`, ASCII 32..126)
 
-No alpha blending or fonts yet — those come with the design system (9.6). The
-same code runs in the kernel and on the host.
+No alpha blending yet (that comes with the design system, 9.6). The same code
+runs in the kernel and on the host.
+
+### Font
+
+`kernel/font8x16.h` is a 1-bpp 8×16 font generated once from a monospace TTF by
+`tools/genfont.py` (committed, so the build has no font dependency). Text is
+essential for debugging the GUI — menu labels, the clock and the Dock icon
+letters in the desktop all use it.
 
 ## First desktop (`kernel/desktop.c`)
 
-`desktop_render(surface)` paints, with shapes only:
+`desktop_render(surface)` paints:
 
-- a blue→violet gradient **wallpaper**,
-- a light **menu bar** with a logo accent and status pills + a hairline
-  separator,
-- a dark rounded **Dock** centered at the bottom with five rounded app icons.
+- a blue→violet gradient **wallpaper** with a centered greeting,
+- a light **menu bar**: logo accent, "Aurora" wordmark, menu items
+  (File/Edit/View/Window/Help), a clock, and a hairline separator,
+- a dark rounded **Dock** centered at the bottom with five rounded, lettered app
+  icons.
 
 `kmain` calls it once after boot (`fb_draw_desktop`). It is a static scene — the
 "does it look like an OS?" milestone before the window server exists.

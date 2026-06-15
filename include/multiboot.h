@@ -4,6 +4,7 @@
 
 /* Bits in multiboot_info_t.flags that we care about. */
 #define MULTIBOOT_FLAG_MEM   (1 << 0)   /* mem_lower / mem_upper valid */
+#define MULTIBOOT_FLAG_CMDLINE (1 << 2) /* cmdline valid */
 #define MULTIBOOT_FLAG_MMAP  (1 << 6)   /* mmap_* valid */
 #define MULTIBOOT_FLAG_FB    (1 << 12)  /* framebuffer_* valid */
 

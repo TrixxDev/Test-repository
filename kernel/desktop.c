@@ -14,11 +14,18 @@ void desktop_render(gfx_surface_t *s)
     /* Top menu bar: a light bar with a thin separator under it. */
     gfx_fill_rect(s, 0, 0, W, MENUBAR_H, GFX_RGB(0xf4, 0xf4, 0xf8));
     gfx_fill_rect(s, 0, MENUBAR_H, W, 1, GFX_RGB(0xcf, 0xcf, 0xd6));
-    /* Logo accent at the left (a rounded square stands in for the wordmark). */
+    /* Logo accent + wordmark, then menu items. */
     gfx_fill_round_rect(s, 12, 6, 16, 16, 4, GFX_RGB(0x33, 0x66, 0xff));
-    /* A couple of status "pills" at the right. */
-    gfx_fill_round_rect(s, W - 96, 9, 34, 11, 5, GFX_RGB(0x9a, 0x9a, 0xa2));
-    gfx_fill_round_rect(s, W - 54, 9, 42, 11, 5, GFX_RGB(0x9a, 0x9a, 0xa2));
+    uint32_t ink = GFX_RGB(0x22, 0x22, 0x2a), dim = GFX_RGB(0x55, 0x55, 0x60);
+    gfx_draw_text(s, 36, 6, "Aurora", ink);
+    gfx_draw_text(s, 100, 6, "File",   dim);
+    gfx_draw_text(s, 148, 6, "Edit",   dim);
+    gfx_draw_text(s, 196, 6, "View",   dim);
+    gfx_draw_text(s, 244, 6, "Window", dim);
+    gfx_draw_text(s, 308, 6, "Help",   dim);
+    /* A clock at the right. */
+    const char *clock = "12:26";
+    gfx_draw_text(s, W - gfx_text_width(clock) - 14, 6, clock, ink);
 
     /* Dock: a dark rounded panel centered near the bottom. */
     int icon = 56, pad = 16, gap = 16;
@@ -36,9 +43,16 @@ void desktop_render(gfx_surface_t *s)
         GFX_RGB(0x33, 0x99, 0xff),   /* blue   */
         GFX_RGB(0xa8, 0x6f, 0xff),   /* purple */
     };
+    static const char *label = "TFENS";   /* Terminal, Files, Editor, Net, Settings */
     for (int i = 0; i < DOCK_ICONS; i++) {
         int ix = dock_x + pad + i * (icon + gap);
         int iy = dock_y + pad;
         gfx_fill_round_rect(s, ix, iy, icon, icon, 14, palette[i]);
+        char ch[2] = { label[i], 0 };
+        gfx_draw_text(s, ix + (icon - 8) / 2, iy + (icon - 16) / 2, ch, GFX_RGB(0xff, 0xff, 0xff));
     }
+
+    /* A centered greeting on the wallpaper. */
+    const char *hello = "Welcome to AuroraOS";
+    gfx_draw_text(s, (W - gfx_text_width(hello)) / 2, H / 2 - 8, hello, GFX_RGB(0xe8, 0xe8, 0xf2));
 }

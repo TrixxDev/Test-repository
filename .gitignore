@@ -8,6 +8,9 @@
 # Generated sources
 kernel/embedded_user.c
 
+# GRUB ISO staging
+isodir/
+
 # Local previews / screenshots
 .preview_*.png
 *.ppm

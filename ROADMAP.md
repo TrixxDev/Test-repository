@@ -115,9 +115,16 @@
   circle, градиент, blit) + **первый рабочий стол** (`kernel/desktop.c`: обои +
   панель + Dock). `make screenshot` → `aurora_desktop.png`. См.
   [`docs/GRAPHICS.md`](docs/GRAPHICS.md).
-- [ ] 9.1 далее: альфа, текст (шрифт), декодер PNG, fallback Bochs-VBE/PCI для
-  живого фреймбуфера под `qemu -kernel`
-- [ ] **9.2** Window Server + композитор (off-screen surfaces, тени, «стекло»)
+- [x] **9.1: текст** — 8×16 bitmap-шрифт (`kernel/font8x16.h` через
+  `tools/genfont.py`), `gfx_draw_text`; подписи в меню-баре, часы, буквы на иконках
+- [x] **9.0.5: живой вывод (в коде)** — Bochs-VBE fallback (`make run-vbe`,
+  DISPI + поиск LFB по PCI) и GRUB-ISO (`make iso`). Осталось: подтвердить Dock
+  на экране QEMU (в песочнице нет QEMU/дисплея).
+- [ ] 9.1 далее: альфа-смешивание, декодер PNG для ассетов
+- [ ] **9.2** Window Server + композитор — **отдельный userspace-сервис** (не в
+  ядре!): ядро = framebuffer + input + IPC; windowserver = окна, z-order, фокус,
+  композитор. Затем: мышь PS/2 + курсор → первое окно → перетаскивание → Dock как
+  процесс
 - [ ] **9.3** Aurora Desktop: верхняя панель, Dock, обои, курсор
 - [ ] **9.4** Окна: перетаскивание, сворачивание, закрытие, фокус
 - [ ] **9.5** Finder-аналог `Aurora Files` (поверх VFS — запись уже есть)
