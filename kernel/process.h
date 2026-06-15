@@ -65,7 +65,8 @@ int process_spawn(const uint8_t *elf, uint32_t size, const char *name);
 int  do_fork(registers_t *regs);
 void do_exec(const char *path, char **argv, registers_t *regs); /* no return on success */
 void process_exit(int code);                          /* never returns */
-int  process_wait(int pid, int *status_user);
+int  process_wait(int pid, int *status_user, int nohang);
+int  sys_kill(int pid);
 
 int  sys_open(const char *path, int flags);
 int  sys_read(int fd, void *buf, uint32_t len);

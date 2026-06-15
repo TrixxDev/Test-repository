@@ -11,7 +11,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 3  | `exit`   | `exit(int code)` | Terminate the calling process. No return. |
 | 4  | `fork`   | `fork() -> pid` | Duplicate the process. Returns child pid to the parent, `0` to the child. |
 | 5  | `exec`   | `exec(const char *path, char **argv)` | Replace the process image. No return on success. |
-| 6  | `wait`   | `wait(int *status) -> pid` | Block until a child exits; reap it and read its exit code. `-1` if no children. |
+| 6  | `wait`   | `wait(int *status, int flags) -> pid` | Reap an exited child. Blocks unless `flags & WNOHANG` (then `0` if none ready). `-1` if no children. |
 | 7  | `open`   | `open(const char *path, int flags) -> fd` | Open a VFS path. |
 | 8  | `read`   | `read(int fd, void *buf, uint len) -> n` | Read; `0` = EOF. May block (console/pipe). |
 | 9  | `write`  | `write(int fd, const void *buf, uint len) -> n` | Write. |
@@ -24,6 +24,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 16 | `msgrecv`| `msgrecv(void *buf, int len, int *from) -> n` | Block until a message arrives; returns length, sets sender pid. |
 | 17 | `register` | `register(const char *name) -> 0/-1` | Register the current pid under a service name. |
 | 18 | `lookup` | `lookup(const char *name) -> pid/-1` | Resolve a service name to a pid. |
+| 19 | `kill`   | `kill(int pid) -> 0/-1` | Forcibly terminate another process (force-kill fallback for shutdown). |
 
 ## Notes
 

@@ -110,6 +110,9 @@ thread_t *thread_create_kernel(thread_entry_t entry)
     return t;
 }
 
+/* User threads are created BLOCKED and linked into the scheduler, but not run
+ * until thread_start() wakes them. This lets the caller finish wiring up the
+ * owning process (thread->proc) before the thread can be scheduled. */
 thread_t *thread_create_user(uint32_t pd_phys, uint32_t entry, uint32_t user_stack)
 {
     thread_t *t = alloc_thread(pd_phys, (uint32_t)user_thread_start);
@@ -117,6 +120,7 @@ thread_t *thread_create_user(uint32_t pd_phys, uint32_t entry, uint32_t user_sta
         return NULL;
     t->user_entry = entry;
     t->user_stack = user_stack;
+    t->state = TS_BLOCKED;
     link_thread(t);
     return t;
 }
@@ -127,8 +131,16 @@ thread_t *thread_create_trampoline(uint32_t pd_phys, uint32_t start_eip, void *a
     if (!t)
         return NULL;
     t->start_arg = arg;
+    t->state = TS_BLOCKED;
     link_thread(t);
     return t;
+}
+
+/* Make a thread created BLOCKED runnable. */
+void thread_start(thread_t *t)
+{
+    if (t)
+        t->state = TS_READY;
 }
 
 static thread_t *next_runnable(thread_t *from)

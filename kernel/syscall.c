@@ -31,7 +31,7 @@ void syscall_handler(registers_t *regs)
         break;
 
     case SYS_WAIT:
-        regs->eax = (uint32_t)process_wait(-1, (int *)regs->ebx);
+        regs->eax = (uint32_t)process_wait(-1, (int *)regs->ebx, (int)regs->ecx);
         break;
 
     case SYS_OPEN:
@@ -80,6 +80,10 @@ void syscall_handler(registers_t *regs)
 
     case SYS_LOOKUP:
         regs->eax = (uint32_t)sys_lookup((const char *)regs->ebx);
+        break;
+
+    case SYS_KILL:
+        regs->eax = (uint32_t)sys_kill((int)regs->ebx);
         break;
 
     default:

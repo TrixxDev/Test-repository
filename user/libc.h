@@ -22,6 +22,8 @@ static inline int   close(int fd)                       { return _syscall(SYS_CL
 static inline int   fork(void)                          { return _syscall(SYS_FORK, 0, 0, 0); }
 static inline int   execv(const char *p, char **argv)   { return _syscall(SYS_EXEC, (int)p, (int)argv, 0); }
 static inline int   wait(int *status)                   { return _syscall(SYS_WAIT, (int)status, 0, 0); }
+static inline int   wait_nohang(int *status)            { return _syscall(SYS_WAIT, (int)status, WNOHANG, 0); }
+static inline int   kill(int pid)                       { return _syscall(SYS_KILL, pid, 0, 0); }
 static inline int   getpid(void)                        { return _syscall(SYS_GETPID, 0, 0, 0); }
 static inline void  _exit(int c)                        { _syscall(SYS_EXIT, c, 0, 0); }
 static inline int   pipe(int fd[2])                     { return _syscall(SYS_PIPE, (int)fd, 0, 0); }

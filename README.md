@@ -4,11 +4,12 @@
 загружаемое в QEMU. Долгосрочная цель — десктоп-ОС в духе macOS со своей
 «изюминкой» (варианты обсуждаются в [ROADMAP.md](ROADMAP.md)).
 
-Это **версия 0.7** — ОС с сервисной моделью: ядро запускает **init (PID 1)**,
-который поднимает **logger** (демон) и **shell**, а упавшие демоны
-перезапускает. Добавлено **message-passing IPC** (`msgsend`/`msgrecv`) и
-**именованный реестр сервисов** (`register`/`lookup`) — поверх уже имеющихся
-пайпов и мини-libc. Архитектура зафиксирована в [`docs/`](docs/).
+Это **версия 0.7.1** — ОС с сервисной моделью и зрелым жизненным циклом
+процессов: ядро запускает **init (PID 1)**, который поднимает **logger** и
+**shell**, перезапускает упавшие демоны, **усыновляет сирот** и делает
+**graceful shutdown**. Есть **message-passing IPC** (`msgsend`/`msgrecv`),
+**реестр сервисов** (`register`/`lookup`), `kill` и неблокирующий `wait`.
+Архитектура зафиксирована в [`docs/`](docs/).
 
 > Имя `Aurora` — рабочее, его легко поменять (см. `kernel/kmain.c` и Makefile).
 
@@ -96,6 +97,9 @@
   процессов с блокировкой).
 - **Реестр имён** — `register(name)`/`lookup(name)`: сервисы находят друг друга
   по имени, без хардкода pid. Shell: builtin `log <msg>`.
+- **Жизненный цикл (v0.7.1)** — reparenting сирот к init, авто-reap фоновых
+  процессов (`cmd &`, неблокирующий `wait`), `kill(pid)`, graceful shutdown
+  (init → `shutdown`-сообщение сервисам → wait → force-kill).
 - **Документация** — [`docs/ABI.md`](docs/ABI.md),
   [`docs/SYSCALLS.md`](docs/SYSCALLS.md),
   [`docs/PROCESS_MODEL.md`](docs/PROCESS_MODEL.md),
@@ -172,6 +176,7 @@ user/           пользовательские программы (собир�
   sh.c          интерактивный shell (пайпы, builtins, фон, log)
   hello.c       демо argv + malloc
   cat.c grep.c  утилиты (для 'cat | grep')
+  orphan.c      тест reparenting (сирота → init)
   poem.txt      тестовый текст на диск
 docs/           архитектурная документация (ABI, syscalls, процессы, VFS, IPC)
 tools/          утилиты сборки

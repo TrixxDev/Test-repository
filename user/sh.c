@@ -97,6 +97,11 @@ int main(int argc, char **argv)
     char *av[ARG_MAX];
 
     for (;;) {
+        /* Reap any finished background jobs. */
+        int bgst, bgpid;
+        while ((bgpid = wait_nohang(&bgst)) > 0)
+            printf("[bg] pid %d finished (exit %d)\n", bgpid, bgst);
+
         printf("aurora> ");
         if (readline(line, sizeof(line)) == 0)
             continue;
@@ -108,6 +113,14 @@ int main(int argc, char **argv)
         if (strcmp(av[0], "exit") == 0) { printf("bye\n"); return 0; }
         if (strcmp(av[0], "help") == 0) {
             printf("builtins: help, exit, log <msg>. pipes: a | b. else runs /disk/NAME.ELF\n");
+            continue;
+        }
+        if (strcmp(av[0], "kill") == 0) {
+            if (ac < 2) { printf("usage: kill <pid>\n"); continue; }
+            int pid = 0;
+            for (const char *q = av[1]; *q >= '0' && *q <= '9'; q++)
+                pid = pid * 10 + (*q - '0');
+            printf("kill %d -> %d\n", pid, kill(pid));
             continue;
         }
         if (strcmp(av[0], "log") == 0) {

@@ -19,6 +19,10 @@ int main(int argc, char **argv)
         if (n < 0)
             continue;
         buf[n] = '\0';
+        if (strcmp(buf, "shutdown") == 0) {
+            printf("[logger] received shutdown, exiting\n");
+            return 0;
+        }
         printf("[log] (pid %d) %s\n", from, buf);
     }
     return 0;

@@ -25,6 +25,9 @@ thread_t *thread_create_user(uint32_t pd_phys, uint32_t entry, uint32_t user_sta
  * thread_start_arg(). */
 thread_t *thread_create_trampoline(uint32_t pd_phys, uint32_t start_eip, void *arg);
 
+/* Make a thread created via the user/trampoline helpers runnable. */
+void thread_start(thread_t *t);
+
 void schedule(void);          /* yield to another runnable thread */
 void thread_block(void);      /* mark current BLOCKED + yield (call with IF off) */
 void thread_wake(thread_t *t);

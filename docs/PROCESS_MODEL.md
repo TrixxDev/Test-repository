@@ -73,7 +73,21 @@ process_t {
 - An **idle thread** is always `READY` so the CPU can `hlt` with interrupts on
   when every other thread is blocked, allowing IRQs to wake them.
 
-## Supervision
+## Reparenting and reaping
+
+- When a process exits, its still-living children are **reparented to init**
+  (`reparent_to_init`); init's `wait()` loop then reaps them. This prevents
+  leaked zombies as the number of services grows.
+- `wait(status, WNOHANG)` is non-blocking; the shell calls it each prompt to
+  **auto-reap finished background jobs** (`cmd &`).
+- `kill(pid)` forcibly terminates another process: it frees the target's
+  address space, fds, mailbox and thread, marks it a zombie, and reparents its
+  children. Used as the force-kill fallback during shutdown.
+
+## Supervision and shutdown
 
 `init` (pid 1) starts services and `wait()`s in a loop, restarting daemons that
-die. When the shell exits, `init` shuts down and the kernel reaps it.
+die and reaping adopted orphans. **Graceful shutdown** (when the shell exits):
+init sends a `"shutdown"` message to each service, waits for it to stop, and
+falls back to `kill()` if it does not exit in time. Then init exits and the
+kernel reaps it.

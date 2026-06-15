@@ -318,6 +318,70 @@ int sys_lookup(const char *name)
     return -1;
 }
 
+static process_t *get_init(void)
+{
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (proc_table[i].state == PROC_RUNNING && proc_table[i].pid == 1)
+            return &proc_table[i];
+    return NULL;
+}
+
+static void mailbox_clear(process_t *p)
+{
+    for (message_t *m = p->mbox_head; m; ) {
+        message_t *n = m->next;
+        kfree(m);
+        m = n;
+    }
+    p->mbox_head = p->mbox_tail = NULL;
+    p->mbox_count = 0;
+}
+
+/* Hand the dying process's children to init (pid 1). Zombies among them are
+ * reaped by init's wait loop, so wake it if it is waiting. */
+static void reparent_to_init(process_t *dying)
+{
+    process_t *in = get_init();
+    if (!in || in == dying)
+        return;
+    for (int i = 0; i < MAX_PROCS; i++) {
+        process_t *c = &proc_table[i];
+        if (c->state != PROC_UNUSED && c != dying && c->parent == dying) {
+            c->parent = in;
+            c->ppid = in->pid;
+            if (c->state == PROC_ZOMBIE && in->waiting)
+                thread_wake(in->thread);
+        }
+    }
+}
+
+/* Forcibly terminate another process (the force-kill fallback for shutdown). */
+int sys_kill(int pid)
+{
+    process_t *t = find_proc(pid);
+    if (!t || t == process_current())
+        return -1;
+
+    close_all_fds(t);
+    unregister_pid(t->pid);
+    mailbox_clear(t);
+    if (t->pd_phys) {
+        vmm_destroy_address_space(t->pd_phys);
+        t->pd_phys = 0;
+    }
+    if (t->thread) {
+        thread_free(t->thread);
+        t->thread = NULL;
+    }
+    t->exit_code = -9;
+    t->state = PROC_ZOMBIE;
+
+    reparent_to_init(t);
+    if (t->parent && t->parent->waiting)
+        thread_wake(t->parent->thread);
+    return 0;
+}
+
 /* ---- address-space + argv stack setup ---- */
 
 /* Build argc/argv on the user stack of the *current* address space, returning
@@ -409,6 +473,7 @@ int process_spawn(const uint8_t *elf, uint32_t size, const char *name)
     thread_t *t = thread_create_user(pd, entry, esp);
     p->thread = t;
     thread_set_proc(t, p);
+    thread_start(t);            /* now safe to schedule */
     return p->pid;
 }
 
@@ -505,6 +570,7 @@ int do_fork(registers_t *regs)
                                            &child->saved_regs);
     child->thread = t;
     thread_set_proc(t, child);
+    thread_start(t);            /* now safe to schedule */
 
     return child->pid;                  /* parent's return value */
 }
@@ -589,13 +655,7 @@ void process_exit(int code)
 
     /* Drop any pending messages and named-service registrations. */
     unregister_pid(p->pid);
-    for (message_t *m = p->mbox_head; m; ) {
-        message_t *next = m->next;
-        kfree(m);
-        m = next;
-    }
-    p->mbox_head = p->mbox_tail = NULL;
-    p->mbox_count = 0;
+    mailbox_clear(p);
 
     vmm_switch_address_space(vmm_kernel_directory());
     vmm_destroy_address_space(p->pd_phys);
@@ -603,6 +663,9 @@ void process_exit(int code)
 
     p->exit_code = code;
     p->state = PROC_ZOMBIE;
+
+    /* Orphaned children are adopted by init. */
+    reparent_to_init(p);
 
     if (p->parent && p->parent->waiting)
         thread_wake(p->parent->thread);
@@ -631,7 +694,7 @@ static int has_children(process_t *parent)
     return 0;
 }
 
-int process_wait(int pid, int *status_user)
+int process_wait(int pid, int *status_user, int nohang)
 {
     process_t *p = process_current();
 
@@ -647,14 +710,22 @@ int process_wait(int pid, int *status_user)
             if (status_user)
                 *status_user = code;
 
-            thread_free(child->thread);
+            if (child->thread) {        /* may already be freed by sys_kill */
+                thread_free(child->thread);
+                child->thread = NULL;
+            }
             child->state = PROC_UNUSED;
             return cpid;
         }
 
         if (!has_children(p)) {
             __asm__ volatile("sti");
-            return -1;
+            return -1;              /* no children at all */
+        }
+
+        if (nohang) {
+            __asm__ volatile("sti");
+            return 0;              /* children exist, none ready */
         }
 
         p->waiting = 1;

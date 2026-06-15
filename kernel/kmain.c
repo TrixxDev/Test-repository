@@ -126,7 +126,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
 
     /* The kernel reaps init when it exits (demonstrates wait/cleanup). */
     int status = -1;
-    int reaped = process_wait(initpid, &status);
+    int reaped = process_wait(initpid, &status, 0);
 
     scheduler_disable();
     terminal_setcolor(VGA_LIGHT_CYAN, VGA_BLACK);

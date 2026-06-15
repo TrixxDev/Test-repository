@@ -77,13 +77,15 @@
 - [x] Message-passing IPC (`msgsend`/`msgrecv`, почтовые ящики)
 - [x] Именованный реестр сервисов (`register`/`lookup`)
 - [x] Архитектурная документация (`docs/`)
-- [ ] Полноценный daemon-модель: перезапуск с политиками, graceful shutdown,
-      reparent сирот к init
+- [x] Reparenting сирот к init; авто-reap фоновых процессов (неблок. `wait`)
+- [x] `kill(pid)` и graceful shutdown (shutdown-сообщение → wait → force-kill)
+- [ ] Настоящие сигналы, политики перезапуска демонов
 
 ## Этап 8 — Сеть
 
-- [ ] loopback, Ethernet-драйвер, ARP, IPv4, UDP, TCP, DNS (в таком порядке)
-- [ ] Сетевой стек как набор userspace-сервисов поверх IPC
+- [ ] **8A: loopback** (`127.0.0.1`) без сетевой карты — для тестов сокетов/стека
+- [ ] **8B: netd** — сетевой стек как userspace-сервис (не в ядре)
+- [ ] Ethernet-драйвер, ARP, IPv4, UDP, TCP, DNS (в таком порядке)
 
 ## Этап 9 — Графика (тут начинается «как у macOS»)
 

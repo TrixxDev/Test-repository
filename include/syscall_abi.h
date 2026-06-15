@@ -26,5 +26,9 @@
 #define SYS_MSGRECV 16  /* msgrecv(buf, len, &from)  -> n (blocks)   */
 #define SYS_REGISTER 17 /* register(name)            -> 0 / -1       */
 #define SYS_LOOKUP  18  /* lookup(name)              -> pid / -1     */
+#define SYS_KILL    19  /* kill(pid)                 -> 0 / -1       */
 
-#define SYS_MAX    19   /* one past the last valid syscall number    */
+/* wait() flags (passed in arg2) */
+#define WNOHANG    1    /* return 0 immediately if no child has exited */
+
+#define SYS_MAX    20   /* one past the last valid syscall number    */
