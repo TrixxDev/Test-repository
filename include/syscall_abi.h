@@ -19,5 +19,8 @@
 #define SYS_WRITE  9    /* write(int fd, const void *buf, uint len)  */
 #define SYS_CLOSE  10   /* close(int fd)                             */
 #define SYS_GETPID 11   /* getpid() -> pid                           */
+#define SYS_PIPE   12   /* pipe(int fd[2])           -> 0 / -1       */
+#define SYS_DUP2   13   /* dup2(int oldfd, int newfd)-> newfd        */
+#define SYS_SBRK   14   /* sbrk(int incr)            -> old brk      */
 
-#define SYS_MAX    12   /* one past the last valid syscall number    */
+#define SYS_MAX    15   /* one past the last valid syscall number    */

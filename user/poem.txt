@@ -1,0 +1,6 @@
+AuroraOS is a small hobby operating system.
+It has a kernel, processes, a shell and pipes.
+aurora now supports composing programs.
+The quick brown fox jumps over the lazy dog.
+grep can find lines that mention aurora.
+End of file.

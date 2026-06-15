@@ -54,6 +54,18 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)process_current()->pid;
         break;
 
+    case SYS_PIPE:
+        regs->eax = (uint32_t)sys_pipe((int *)regs->ebx);
+        break;
+
+    case SYS_DUP2:
+        regs->eax = (uint32_t)sys_dup2((int)regs->ebx, (int)regs->ecx);
+        break;
+
+    case SYS_SBRK:
+        regs->eax = sys_sbrk((int)regs->ebx);
+        break;
+
     default:
         kprintf("\n[syscall] unknown call %u\n", regs->eax);
         regs->eax = (uint32_t)-1;

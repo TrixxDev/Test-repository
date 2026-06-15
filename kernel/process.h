@@ -14,10 +14,13 @@
 
 enum proc_state { PROC_UNUSED = 0, PROC_RUNNING, PROC_ZOMBIE };
 
+enum fd_role { FD_NORMAL = 0, FD_PIPE_R, FD_PIPE_W };
+
 typedef struct file {
     vfs_node_t *node;
     uint32_t    offset;
     int         refcount;
+    int         role;       /* FD_NORMAL / FD_PIPE_R / FD_PIPE_W */
 } file_t;
 
 typedef struct process {
@@ -31,6 +34,7 @@ typedef struct process {
     struct process *parent;
     registers_t saved_regs;         /* fork: child resumes from this frame */
     int      waiting;               /* parent is blocked in wait() */
+    uint32_t user_brk;              /* top of the user heap (sbrk) */
 } process_t;
 
 /* Set up the kernel process (pid 0) bound to the current/main thread. */
@@ -53,3 +57,6 @@ int  sys_open(const char *path, int flags);
 int  sys_read(int fd, void *buf, uint32_t len);
 int  sys_write(int fd, const void *buf, uint32_t len);
 int  sys_close(int fd);
+int  sys_pipe(int fds[2]);
+int  sys_dup2(int oldfd, int newfd);
+uint32_t sys_sbrk(int increment);

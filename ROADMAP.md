@@ -63,12 +63,13 @@
 - [x] idle-поток (IRQ будят заблокированные процессы)
 - [ ] Пайпы (`|`), редиректы (`>`, `<`), job control
 
-## Этап 6 — IPC и libc
+## Этап 6 — IPC и libc ✅ (готово, v0.6)
 
-- [ ] Пайпы (`|`), shared buffers, простой обмен сообщениями
-- [ ] Минимальная libc (printf, malloc, строки, обёртки syscall)
-- [ ] Базовые утилиты (ls, cat, echo)
-- [ ] Системные сервисы (logger, device services)
+- [x] Пайпы (`pipe`/`dup2`/`close`), shell поддерживает `a | b`
+- [x] `sbrk` (рост кучи), минимальная libc (printf, malloc/free, строки)
+- [x] Базовые утилиты (`cat`, `grep`)
+- [ ] Редиректы (`>`, `<`), shared memory / message passing, ещё утилиты
+- [ ] Системные сервисы (init, logger, device services) отдельными процессами
 
 ## Этап 7 — Графика (тут начинается «как у macOS»)
 

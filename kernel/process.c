@@ -7,10 +7,12 @@
 #include "string.h"
 #include "kio.h"
 #include "console.h"
+#include "pipe.h"
 
 #define MAX_PROCS    32
 #define USTACK_TOP   0xC0000000u
 #define USTACK_PAGES 4
+#define USER_HEAP_BASE 0x50000000u
 
 #define USER_CODE 0x1B
 #define USER_DATA 0x23
@@ -42,7 +44,22 @@ process_t *process_current(void)
 
 /* ---- file descriptors ---- */
 
-static int fd_install(process_t *p, vfs_node_t *node)
+/* Drop one reference to an open file; on the last reference, release any pipe
+ * end it represents and free it. */
+static void file_unref(file_t *f)
+{
+    if (!f)
+        return;
+    if (--f->refcount == 0) {
+        if (f->role == FD_PIPE_R)
+            pipe_close_end(f->node, 0);
+        else if (f->role == FD_PIPE_W)
+            pipe_close_end(f->node, 1);
+        kfree(f);
+    }
+}
+
+static int fd_install_role(process_t *p, vfs_node_t *node, int role)
 {
     for (int fd = 0; fd < MAX_FDS; fd++) {
         if (!p->fds[fd]) {
@@ -52,11 +69,17 @@ static int fd_install(process_t *p, vfs_node_t *node)
             f->node = node;
             f->offset = 0;
             f->refcount = 1;
+            f->role = role;
             p->fds[fd] = f;
             return fd;
         }
     }
     return -1;
+}
+
+static int fd_install(process_t *p, vfs_node_t *node)
+{
+    return fd_install_role(p, node, FD_NORMAL);
 }
 
 static void open_standard_streams(process_t *p)
@@ -67,6 +90,7 @@ static void open_standard_streams(process_t *p)
         f->node = con;
         f->offset = 0;
         f->refcount = 1;
+        f->role = FD_NORMAL;
         p->fds[fd] = f;
     }
 }
@@ -74,9 +98,7 @@ static void open_standard_streams(process_t *p)
 static void close_all_fds(process_t *p)
 {
     for (int fd = 0; fd < MAX_FDS; fd++) {
-        file_t *f = p->fds[fd];
-        if (f && --f->refcount == 0)
-            kfree(f);
+        file_unref(p->fds[fd]);
         p->fds[fd] = NULL;
     }
 }
@@ -119,11 +141,63 @@ int sys_close(int fd)
     process_t *p = process_current();
     if (fd < 0 || fd >= MAX_FDS || !p->fds[fd])
         return -1;
-    file_t *f = p->fds[fd];
-    if (--f->refcount == 0)
-        kfree(f);
+    file_unref(p->fds[fd]);
     p->fds[fd] = NULL;
     return 0;
+}
+
+int sys_pipe(int fds[2])
+{
+    process_t *p = process_current();
+    vfs_node_t *rnode, *wnode;
+    if (pipe_create(&rnode, &wnode) != 0)
+        return -1;
+
+    int rfd = fd_install_role(p, rnode, FD_PIPE_R);
+    int wfd = fd_install_role(p, wnode, FD_PIPE_W);
+    if (rfd < 0 || wfd < 0)
+        return -1;
+
+    fds[0] = rfd;
+    fds[1] = wfd;
+    return 0;
+}
+
+int sys_dup2(int oldfd, int newfd)
+{
+    process_t *p = process_current();
+    if (oldfd < 0 || oldfd >= MAX_FDS || !p->fds[oldfd])
+        return -1;
+    if (newfd < 0 || newfd >= MAX_FDS)
+        return -1;
+    if (oldfd == newfd)
+        return newfd;
+
+    if (p->fds[newfd])
+        file_unref(p->fds[newfd]);
+
+    p->fds[newfd] = p->fds[oldfd];
+    p->fds[newfd]->refcount++;
+    return newfd;
+}
+
+uint32_t sys_sbrk(int increment)
+{
+    process_t *p = process_current();
+    uint32_t old = p->user_brk;
+    uint32_t neu = old + (uint32_t)increment;
+
+    if (increment > 0) {
+        uint32_t a = old & ~0xFFFu;
+        while (a < neu) {
+            if (vmm_get_physical(a) == 0)
+                vmm_map_page(a, pmm_alloc_frame(),
+                             PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
+            a += 0x1000;
+        }
+    }
+    p->user_brk = neu;
+    return old;
 }
 
 /* ---- address-space + argv stack setup ---- */
@@ -211,6 +285,7 @@ int process_spawn(const uint8_t *elf, uint32_t size, const char *name)
     p->pd_phys = pd;
     p->parent  = process_current();
     p->ppid    = p->parent ? p->parent->pid : 0;
+    p->user_brk = USER_HEAP_BASE;
     open_standard_streams(p);
 
     thread_t *t = thread_create_user(pd, entry, esp);
@@ -297,6 +372,7 @@ int do_fork(registers_t *regs)
     child->pd_phys = child_pd;
     child->parent  = parent;
     child->ppid    = parent->pid;
+    child->user_brk = parent->user_brk;
 
     for (int fd = 0; fd < MAX_FDS; fd++) {
         child->fds[fd] = parent->fds[fd];
@@ -370,6 +446,7 @@ void do_exec(const char *path, char **argv, registers_t *regs)
     vmm_destroy_address_space(old_pd);
 
     p->pd_phys = new_pd;
+    p->user_brk = USER_HEAP_BASE;
     thread_set_pd(p->thread, new_pd);
     vmm_switch_address_space(new_pd);
 
