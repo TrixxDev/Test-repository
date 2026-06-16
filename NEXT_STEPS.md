@@ -82,19 +82,20 @@ app → window server → compositor → framebuffer
   kernel:        framebuffer · input · IPC
   windowserver:  windows · z-order · focus · compositor   (userspace)
   ```
-  - [ ] **Not "done" until it runs in real QEMU.** The live loop (framebuffer +
-    real keyboard + on-screen redraw) builds clean but needs an on-screen boot;
-    it activates once the framebuffer is live (9.0.5).
-- **9.3+ — pointer, focus, drag — design ready, implement after the live gate.**
+  - [x] **Confirmed live in QEMU (v0.9.5).** The framebuffer comes up (Bochs-VBE),
+    the windowserver paints the desktop, the Terminal window opens, and typed keys
+    flow keyboard → windowserver → focused app → on-screen redraw. Captured
+    headlessly with `make verify-gui` (`aurora_live_typed.png` shows the echoed
+    input). This unblocked a real bug — the PMM was not reserving the Multiboot
+    info/mmap/cmdline, so the framebuffer never activated; see CURRENT_STATUS.md.
+- **9.3+ — pointer, focus, drag — design ready, NOW UNBLOCKED (gate is green).**
   The mouse/cursor/click-to-focus/drag architecture is specified in
   [docs/INPUT.md](docs/INPUT.md): PS/2 mouse → IRQ12 → a kernel read source →
   windowserver reader child → `WM_MOUSE` → cursor + hit-test + focus + drag, all
-  full-recomposite. **The PS/2 driver and IRQ routing are intentionally NOT
-  written until 9.2 is confirmed on a real screen** — hardware/IRQ code built
-  blind would be wasted if the framebuffer behaves differently than assumed.
-  Order: **9.3** cursor → **9.4** click-to-focus → **9.5** window dragging (the
-  headline: grab a window by its title bar and move it) → **9.6** Dock as its own
-  process → **9.7** Launcher/Finder.
+  full-recomposite. The gate is green, so the PS/2 mouse driver + IRQ12 routing
+  can now be written. Order: **9.3** cursor → **9.4** click-to-focus → **9.5**
+  window dragging (the headline: grab a window by its title bar and move it) →
+  **9.6** Dock as its own process → **9.7** Launcher/Finder.
 
 Deferred until the desktop feels real (per the agreed priority): client-side
 shared-memory surfaces, animations, and the network stack. The current
@@ -140,9 +141,9 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**Confirm 9.2 on a real QEMU screen** (`make run-vbe`, or `make gui`) — see the
-checklist in [docs/GRAPHICS.md](docs/GRAPHICS.md): Terminal window appears, typing
-shows text, focus works, no recomposite artifacts. That gate is the only thing
-between here and 9.3. The 9.3 input architecture is already specified
-([docs/INPUT.md](docs/INPUT.md)); the PS/2 driver gets written once the gate is
-green.
+**Begin 9.3 — PS/2 mouse + cursor.** The 9.2 live gate is green (`make verify-gui`
+captures the desktop + Terminal + on-screen keyboard echo), so the input
+architecture in [docs/INPUT.md](docs/INPUT.md) can now be implemented for real:
+add the PS/2 aux-device driver + IRQ12 in the kernel (raw packets only), a second
+windowserver reader child that forwards `WM_MOUSE`, and the cursor draw (on top,
+last, every recomposite). Then 9.4 click-to-focus and 9.5 window dragging.

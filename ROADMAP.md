@@ -117,9 +117,11 @@
   [`docs/GRAPHICS.md`](docs/GRAPHICS.md).
 - [x] **9.1: текст** — 8×16 bitmap-шрифт (`kernel/font8x16.h` через
   `tools/genfont.py`), `gfx_draw_text`; подписи в меню-баре, часы, буквы на иконках
-- [x] **9.0.5: живой вывод (в коде)** — Bochs-VBE fallback (`make run-vbe`,
-  DISPI + поиск LFB по PCI) и GRUB-ISO (`make iso`). Осталось: подтвердить Dock
-  на экране QEMU (в песочнице нет QEMU/дисплея).
+- [x] **9.0.5: живой вывод — ПОДТВЕРЖДЕНО в QEMU** — Bochs-VBE fallback
+  (`make run-vbe`, DISPI + поиск LFB по PCI) и GRUB-ISO (`make iso`). Реальный
+  фреймбуфер снят с экрана QEMU (`make live-shot` → `aurora_live.png`). Исправлен
+  баг: `pmm_init` не резервировал Multiboot-структуры (info/mmap/cmdline), из-за
+  чего командная строка `vbe` затиралась и фреймбуфер не поднимался.
 - [ ] 9.1 далее: альфа-смешивание, декодер PNG для ассетов
 - [x] **9.2 (event-driven windowserver, ядро core проверено PNG)** Демон
   `user/wserver.c`: единый event loop, единственный писатель в framebuffer, полный
@@ -128,14 +130,15 @@
   `fb_active`. **Клавиатура замкнута:** forked reader (`read(0)`) → `WM_KEY` →
   фокусное окно → перерисовка; интерактивный `user/term.c` (Terminal) эхо-печатает
   ввод. `init` в графике запускает windowserver + Terminal (без невидимого shell),
-  в тексте — shell. `make screenshot-wm` → `aurora_windows.png`. **Не завершено до
-  прогона в реальном QEMU.**
-  - [ ] живой контур (framebuffer + реальная клавиатура + перерисовка на экране) —
-    собирается, нужен экран (контрольный запуск `make run-vbe`/`gui`)
-- [~] **9.3+ ввод/курсор — архитектура готова** ([`docs/INPUT.md`](docs/INPUT.md)):
+  в тексте — shell. `make screenshot-wm` → `aurora_windows.png`. **ПОДТВЕРЖДЕНО в
+  реальном QEMU (v0.9.5).**
+  - [x] живой контур (framebuffer + реальная клавиатура + перерисовка на экране) —
+    снят с экрана QEMU: `make live-shot`/`make verify-gui` →
+    `aurora_live.png`/`aurora_live_typed.png` (видно `aurora> hello aurora_`)
+- [ ] **9.3+ ввод/курсор — НАЧИНАЕМ** ([`docs/INPUT.md`](docs/INPUT.md)):
   PS/2 mouse → IRQ12 → kernel read-источник → reader-child windowserver →
-  `WM_MOUSE` → курсор + hit-test + фокус + drag. **Драйвер PS/2 и IRQ НЕ пишем до
-  подтверждения 9.2 на экране.** Порядок: 9.3 курсор → 9.4 click-to-focus →
+  `WM_MOUSE` → курсор + hit-test + фокус + drag. Гейт 9.2 зелёный — драйвер PS/2 и
+  IRQ12 можно писать. Порядок: 9.3 курсор → 9.4 click-to-focus →
   9.5 перетаскивание окон → 9.6 Dock как процесс → 9.7 Launcher/Finder
 - [ ] потом (когда десктоп «живой»): client-side surfaces, shared memory,
   анимации, сеть (virtio-net/TCP)

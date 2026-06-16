@@ -47,7 +47,7 @@ static void banner(void)
         "  / _ \\| || | '_/ _ \\ '_/ _` | \n"
         " /_/ \\_\\\\_,_|_| \\___/_| \\__,_| \n");
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
-    terminal_writestring("        AuroraOS  v0.9.4  (event-driven GUI + keyboard)\n\n");
+    terminal_writestring("        AuroraOS  v0.9.5  (live GUI + keyboard, QEMU-verified)\n\n");
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info)
@@ -61,12 +61,13 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
 
     const multiboot_info_t *mb = (const multiboot_info_t *)mb_info;
 
-    kprintf("[boot] GDT + TSS, IDT, interrupts, syscalls...\n");
-    gdt_install();
-    idt_install();
-    isr_install();
-    pit_install(100);
-    keyboard_install();
+    /* Each step logs before it runs, so if an early fault triple-faults and
+     * resets the machine, the last serial line names the exact failing step. */
+    kprintf("[boot] GDT + TSS...\n");      gdt_install();
+    kprintf("[boot] IDT...\n");            idt_install();
+    kprintf("[boot] interrupts...\n");     isr_install();
+    kprintf("[boot] PIT timer...\n");      pit_install(100);
+    kprintf("[boot] keyboard...\n");       keyboard_install();
 
     kprintf("[boot] physical memory...\n");
     pmm_init(mb);

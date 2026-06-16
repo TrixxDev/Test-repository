@@ -3,16 +3,27 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.4.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.5.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
 netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
 (framebuffer + 2D library with an 8×16 font + desktop; a userspace, event-driven
 **windowserver** with a keyboard input pipeline + interactive Terminal) are
-implemented and build clean. FS write and the rendering/window-server core are
-verified on the host (the real `fs/fat32.c` write path + image re-parse; the real
-`kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs). The live framebuffer and the
-keyboard → windowserver → app loop (`make run-vbe` / `make gui`) need an
-interactive QEMU run to confirm on screen — pending (no QEMU in this sandbox).
+implemented and build clean. **Phase 9.2 is now confirmed live in QEMU**: the
+Bochs-VBE framebuffer comes up, the windowserver paints the desktop, the Terminal
+window opens, and typing flows keyboard → windowserver → focused app → on-screen
+redraw — captured to PNG via `make verify-gui` (see `aurora_live.png`). FS write
+and the rendering/window-server core are additionally verified on the host (the
+real `fs/fat32.c` write path + image re-parse; the real
+`kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
+
+> **v0.9.5 fix.** The live framebuffer was being blocked by a real
+> memory-corruption bug: `pmm_init` reserved only the kernel image, not the
+> Multiboot structures (info struct, memory map, **command line**) the loader
+> leaves in RAM just above it. The first frame allocations clobbered them, so the
+> `vbe` command line was read back as garbage (framebuffer never activated) and,
+> depending on a given QEMU's structure placement, the boot could reset in a loop.
+> `pmm_init` now reserves those regions. The early boot also logs each init step
+> so any future early fault names the exact failing step on the serial console.
 
 ## Phase status
 
@@ -31,9 +42,9 @@ interactive QEMU run to confirm on screen — pending (no QEMU in this sandbox).
 | 8A.5 | Security foundation: VFS rwx/owner, service-registry permissions, privileged ports | v0.8.1 | ✅ |
 | 8.2 | FS write: ATA sector write + FAT32 read/write (create/grow/truncate), `open(O_CREAT/O_TRUNC)` | v0.8.2 | ✅ |
 | 9.0/9.1 | Framebuffer (Multiboot) + 2D library + static desktop (wallpaper + menu bar + Dock) | v0.9.0 | ✅ |
-| 9.0.5 | Live output: 8×16 text/font; Bochs-VBE fallback (`run-vbe`) + GRUB ISO (`iso`) | v0.9.1 | ✅ (needs on-screen confirm) |
-| 9.2 | Event-driven **windowserver** + keyboard pipeline + interactive Terminal; `fb_map`/`fb_active`; frame consistency | v0.9.4 | 🟡 built + core PNG-verified; live loop pending |
-| 9.3–9.7 | Mouse + cursor → click-to-focus → window dragging → Dock process → Launcher/Finder (design in docs/INPUT.md) | — | ⏳ after the 9.2 live gate |
+| 9.0.5 | Live output: 8×16 text/font; Bochs-VBE fallback (`run-vbe`) + GRUB ISO (`iso`) | v0.9.5 | ✅ live-confirmed in QEMU |
+| 9.2 | Event-driven **windowserver** + keyboard pipeline + interactive Terminal; `fb_map`/`fb_active`; frame consistency | v0.9.5 | ✅ live-confirmed in QEMU (`make verify-gui`) |
+| 9.3–9.7 | Mouse + cursor → click-to-focus → window dragging → Dock process → Launcher/Finder (design in docs/INPUT.md) | — | ⏳ NEXT (9.2 gate is green) |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
 
@@ -69,9 +80,11 @@ interactive QEMU run to confirm on screen — pending (no QEMU in this sandbox).
   interactive `Terminal`. Keyboard flows keyboard → windowserver (a forked
   reader child) → focused app → redraw. In graphics mode `init` runs the
   windowserver + Terminal (no text shell); in text mode it runs the shell as
-  before. The window-server core (window table, z-order, focus, draw commands,
-  compositor) is verified via `make screenshot-wm` → `aurora_windows.png`. The
-  live keyboard→screen loop builds clean but is pending an on-screen QEMU run.
+  before. **Confirmed live in QEMU**: `make live-shot` captures the desktop +
+  Terminal from the real framebuffer (`aurora_live.png`); `make verify-gui` types
+  into the Terminal and captures the echoed text (`aurora_live_typed.png`,
+  showing `aurora> hello aurora_`), proving the full keyboard→screen loop. The
+  window-server core is also PNG-verified via `make screenshot-wm`.
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.
@@ -92,7 +105,8 @@ interactive QEMU run to confirm on screen — pending (no QEMU in this sandbox).
 - **user:** crt0, libc (libc.h + string/printf/malloc/net), wm (compositor core),
   init, logger, netd, sh, cat, grep, hello, orphan, echosrv, echocli, save,
   wserver (windowserver), term (Terminal app).
-- **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py, genfont.py.
+- **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py,
+  genfont.py, screendump.py (headless live-framebuffer capture via QEMU monitor).
 - **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT.
 
 ## Syscalls (27)

@@ -94,21 +94,49 @@ into an off-screen buffer and converts it to PNG (`tools/ppm2png.py`). It is bot
 the project's reference screenshot and the way the rendering is verified in this
 environment.
 
-## Verifying 9.2 live (the gate)
+## Verifying 9.2 live (the gate) — PASSED ✅
 
-The window-server core is PNG-verified; the remaining check is a real boot. Run
-`make run-vbe` (or `make gui`) and confirm, on screen:
+Phase 9.2 is confirmed on a real (emulated) framebuffer. The four gate checks all
+hold on a live QEMU boot:
 
-1. the **Terminal** window appears over the desktop;
-2. typing produces text in it (keyboard → windowserver → app → redraw);
-3. **focus** works (the top-most window receives keys);
-4. no artifacts from the full recomposite on each `PRESENT`.
+1. ✅ the **Terminal** window appears over the desktop;
+2. ✅ typing produces text in it (keyboard → windowserver → app → redraw);
+3. ✅ **focus** works (the top-most window receives keys);
+4. ✅ no artifacts from the full recomposite on each `PRESENT`.
 
-If all four hold, Phase 9.2 is done. Serial (`-serial stdio`) should show
-`[fb] ... pitch=N`, `[wm] ready ... framebuffer WxH`, `[term] opened window N`.
-If the screen is black/garbled, send the serial log — the usual suspects are the
-PCI LFB address, the pitch, or the VBE mode-set. Input/redraw next steps live in
-[INPUT.md](INPUT.md).
+Serial (`-serial stdio`) shows the expected markers:
+`[fb] Bochs VBE 1024x768 x32 LFB=0x... pitch=4096`,
+`[wm] ready (pid 4), framebuffer 1024x768 pitch 4096`, `[term] opened window 1`.
+
+### How it was verified (and how to reproduce headlessly)
+
+The framebuffer can be captured without a display: boot the real kernel with the
+VBE path, drive the QEMU monitor to `screendump` the live framebuffer, and
+convert the PPM to PNG. `tools/screendump.py` automates this and can inject
+keystrokes first (to prove the keyboard pipeline end-to-end):
+
+```sh
+make live-shot     # -> aurora_live.png        (the live desktop + Terminal)
+make verify-gui    # -> aurora_live_typed.png  (types "hello aurora" into it)
+```
+
+These are *real* framebuffer captures (not the host `render_*` previews), so they
+are the on-screen evidence for the gate. Interactively, `make run-vbe`
+(or `make gui` via GRUB) opens the same desktop in a QEMU window.
+
+> **The bug that was hiding behind the gate.** `make run-vbe` originally looked
+> like it "did nothing" (it stayed in text mode) and on some QEMU builds reset in
+> a boot loop. Root cause: `pmm_init` reserved only the kernel image, not the
+> Multiboot structures the loader leaves in RAM just above it (info struct, memory
+> map, **command line**). The first frame allocations overwrote them, so the
+> `vbe` command line was read back as garbage and the framebuffer never came up
+> (and, depending on where a given QEMU places those structures, the corruption
+> could fault even earlier). `pmm_init` now reserves the Multiboot info, mmap,
+> command line and boot-loader name. See `arch/i386/pmm.c`.
+
+If a screen is ever black/garbled on a different setup, send the serial log — the
+usual suspects are the PCI LFB address, the pitch, or the VBE mode-set. Input
+next steps (mouse/cursor/drag) live in [INPUT.md](INPUT.md).
 
 ## 9.2 — Window server (userspace process), PNG-verified core
 

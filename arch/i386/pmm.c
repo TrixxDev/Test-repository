@@ -19,6 +19,19 @@ static inline void bm_set(uint32_t frame)   { frame_bitmap[frame / 32] |=  (1u <
 static inline void bm_clear(uint32_t frame) { frame_bitmap[frame / 32] &= ~(1u << (frame % 32)); }
 static inline int  bm_test(uint32_t frame)  { return frame_bitmap[frame / 32] & (1u << (frame % 32)); }
 
+/* Mark every frame overlapping [start, start+len) as used, so the allocator
+ * never hands out memory the loader is still using (the Multiboot info, its
+ * memory map and the command line all live in RAM above the kernel). */
+static void reserve_range(uint32_t start, uint32_t len)
+{
+    if (len == 0)
+        return;
+    uint32_t first = start / PAGE_SIZE;
+    uint32_t last  = (start + len + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (uint32_t f = first; f < last; f++)
+        bm_set(f);
+}
+
 void pmm_init(const multiboot_info_t *mb)
 {
     /* Start with everything marked used; we free what the map says is free. */
@@ -64,6 +77,19 @@ void pmm_init(const multiboot_info_t *mb)
     uint32_t kernel_last = ((uint32_t)kernel_end + PAGE_SIZE - 1) / PAGE_SIZE;
     for (uint32_t f = 0; f < kernel_last; f++)
         bm_set(f);
+
+    /* Reserve the Multiboot structures themselves. The loader places the info
+     * struct, the memory map, the command line and the boot-loader name in RAM
+     * just above the kernel; without this the first allocations overwrite them
+     * (e.g. the "vbe" command line would be read back as garbage later). */
+    reserve_range((uint32_t)mb, sizeof(*mb));
+    if (mb->flags & MULTIBOOT_FLAG_MMAP)
+        reserve_range(mb->mmap_addr, mb->mmap_length);
+    if (mb->flags & MULTIBOOT_FLAG_CMDLINE)
+        reserve_range(mb->cmdline, strlen((const char *)mb->cmdline) + 1);
+    if (mb->flags & (1 << 9))   /* boot_loader_name valid */
+        reserve_range(mb->boot_loader_name,
+                      strlen((const char *)mb->boot_loader_name) + 1);
 
     /* Count used frames for reporting. */
     used_frames = 0;

@@ -16,12 +16,12 @@ It has moved well past a "teaching kernel" — it is an early Unix-like executio
 environment that is starting to look like a platform of services, and now has the
 first slice of its macOS-like visual stack: a framebuffer, a 2D library with an
 8×16 font, and a **userspace window server** with an event loop that takes
-keyboard input and an interactive Terminal app. It is **not** yet a daily-driver
-OS (no external networking yet — loopback only; the GUI's live multi-process run
-is unconfirmed on hardware; a basic permission model — uid + rwx — but no
-login/groups; no mouse yet).
+keyboard input and an interactive Terminal app — **confirmed running live in
+QEMU** (desktop, Terminal window, and on-screen keyboard echo). It is **not** yet
+a daily-driver OS (no external networking yet — loopback only; a basic permission
+model — uid + rwx — but no login/groups; no mouse yet).
 
-- **Current version:** v0.9.4
+- **Current version:** v0.9.5
 - **Size:** ~6,800 lines of C / assembly (plus a generated 8×16 font header)
   across kernel + drivers + fs + libc + userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
@@ -47,20 +47,21 @@ login/groups; no mouse yet).
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
 | Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`. |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | 🟡 (9.0–9.2) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** + **keyboard pipeline** + interactive Terminal (surfaces, z-order, focus, window IPC; core PNG-verified). Live loop + mouse pending a real boot. |
+| Graphics | ✅ (9.0–9.2) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** + **keyboard pipeline** + interactive Terminal (surfaces, z-order, focus, window IPC). **Live-confirmed in QEMU** (`make verify-gui`). Mouse/cursor (9.3) next. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What it looks like
 
-The first AuroraOS desktop (rendered by the real `kernel/gfx.c` +
-`kernel/desktop.c`; run `make screenshot` to regenerate):
+The live AuroraOS desktop — a **real framebuffer capture from QEMU** (window
+server + Terminal, with `hello aurora` typed into it over the live keyboard
+pipeline; regenerate with `make verify-gui`):
 
-![AuroraOS desktop](aurora_desktop.png)
+![AuroraOS live desktop](aurora_live_typed.png)
 
-The userspace `windowserver` stacking two app windows by z-order — produced by
-the real window-server core (`make screenshot-wm`):
-
-![AuroraOS windows](aurora_windows.png)
+The same scene without input (`make live-shot` → `aurora_live.png`), the host
+preview of the desktop (`make screenshot` → `aurora_desktop.png`), and the
+compositor z-order test (`make screenshot-wm` → `aurora_windows.png`) are also
+in the repo.
 
 ## What you can do today
 
@@ -87,6 +88,8 @@ make          # builds aurora.elf + disk.img (kernel, user programs, FAT32 image
 make run      # text shell in QEMU (qemu -kernel; serial log on stdio)
 make run-vbe  # GUI desktop in QEMU, no GRUB tools (Bochs-VBE fallback)
 make gui      # GUI desktop via GRUB ISO (build + iso + qemu); needs grub-mkrescue
+make live-shot      # boot headless + capture the live framebuffer -> aurora_live.png
+make verify-gui     # like live-shot, but type into the Terminal first (proves input)
 make screenshot     # render the desktop to aurora_desktop.png (no QEMU needed)
 make screenshot-wm  # render the compositor (two windows) to aurora_windows.png
 make debug    # text boot, waits for GDB on :1234
@@ -110,7 +113,8 @@ user/        crt0, libc (libc.h + libc/), wm (windowserver core: wm.h + wm.c),
              echosrv, echocli, save, wserver (windowserver), term (Terminal))
 boot/        grub.cfg (for the `make iso` GRUB boot path)
 tools/       bin2c.py (embed ELF), mkfat32.py (FAT32 image), render_desktop.c +
-             render_wm.c + ppm2png.py (host -> PNG), genfont.py (8×16 font header)
+             render_wm.c + ppm2png.py (host -> PNG), genfont.py (8×16 font header),
+             screendump.py (headless live-framebuffer capture via the QEMU monitor)
 docs/        ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT
 linker.ld    kernel link map (load at 1 MiB)
 Makefile     clang/lld cross-build + user programs + disk image
