@@ -88,13 +88,17 @@ app → window server → compositor → framebuffer
     headlessly with `make verify-gui` (`aurora_live_typed.png` shows the echoed
     input). This unblocked a real bug — the PMM was not reserving the Multiboot
     info/mmap/cmdline, so the framebuffer never activated; see CURRENT_STATUS.md.
-- **9.3+ — pointer, focus, drag — design ready, NOW UNBLOCKED (gate is green).**
-  The mouse/cursor/click-to-focus/drag architecture is specified in
-  [docs/INPUT.md](docs/INPUT.md): PS/2 mouse → IRQ12 → a kernel read source →
-  windowserver reader child → `WM_MOUSE` → cursor + hit-test + focus + drag, all
-  full-recomposite. The gate is green, so the PS/2 mouse driver + IRQ12 routing
-  can now be written. Order: **9.3** cursor → **9.4** click-to-focus → **9.5**
-  window dragging (the headline: grab a window by its title bar and move it) →
+- **9.3 — pointer + cursor + click-to-focus — DONE (v0.9.6), live-confirmed.**
+  Implemented per [docs/INPUT.md](docs/INPUT.md): kernel PS/2 mouse driver
+  (`drivers/mouse.c`) + IRQ12 → `SYS_MOUSE` → a windowserver reader child →
+  `WM_MOUSE` → cursor (drawn on top each recomposite) + hit-test (`wm_window_at`)
+  + click-to-focus (`wm_raise`, focus follows z-order). Verified on screen with
+  `make demo-focus` (`aurora_live_focus.png`: clicking the back Terminal raises it
+  and typing lands in it). Text-mode boot unaffected.
+- **9.4/9.5 — window dragging — NEXT (the headline milestone).** Grab a window by
+  its title bar and move it. `wm_in_titlebar(id,x,y)` already exists; add a small
+  drag state machine in the windowserver (press in a title bar → record window +
+  grab offset; motion while held → `wm_move` + recomposite; release → end). Then
   **9.6** Dock as its own process → **9.7** Launcher/Finder.
 
 Deferred until the desktop feels real (per the agreed priority): client-side
@@ -141,9 +145,10 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**Begin 9.3 — PS/2 mouse + cursor.** The 9.2 live gate is green (`make verify-gui`
-captures the desktop + Terminal + on-screen keyboard echo), so the input
-architecture in [docs/INPUT.md](docs/INPUT.md) can now be implemented for real:
-add the PS/2 aux-device driver + IRQ12 in the kernel (raw packets only), a second
-windowserver reader child that forwards `WM_MOUSE`, and the cursor draw (on top,
-last, every recomposite). Then 9.4 click-to-focus and 9.5 window dragging.
+**Begin 9.4/9.5 — window dragging.** 9.3 (mouse + cursor + click-to-focus) is done
+and live-confirmed. The next, headline milestone is grabbing a window by its title
+bar and moving it. The pieces are in place: `wm_in_titlebar` exists, `wm_move`
+exists, and the windowserver already handles `WM_MOUSE`. Add a drag state machine
+(press-in-titlebar → record grab offset; held motion → `wm_move`; release → end),
+then split the **Dock** into its own process (9.6) and add a **Launcher/Finder**
+(9.7) over the existing VFS/FS-write.

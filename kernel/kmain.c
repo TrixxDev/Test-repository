@@ -23,6 +23,7 @@
 #include "fat32.h"
 #include "ata.h"
 #include "fb.h"
+#include "mouse.h"
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
 
@@ -47,7 +48,7 @@ static void banner(void)
         "  / _ \\| || | '_/ _ \\ '_/ _` | \n"
         " /_/ \\_\\\\_,_|_| \\___/_| \\__,_| \n");
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
-    terminal_writestring("        AuroraOS  v0.9.5  (live GUI + keyboard, QEMU-verified)\n\n");
+    terminal_writestring("        AuroraOS  v0.9.6  (mouse + cursor + click-to-focus)\n\n");
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info)
@@ -68,6 +69,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     kprintf("[boot] interrupts...\n");     isr_install();
     kprintf("[boot] PIT timer...\n");      pit_install(100);
     kprintf("[boot] keyboard...\n");       keyboard_install();
+    kprintf("[boot] PS/2 mouse...\n");     mouse_install();
 
     kprintf("[boot] physical memory...\n");
     pmm_init(mb);

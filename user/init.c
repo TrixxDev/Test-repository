@@ -22,6 +22,19 @@ static int start_uid(const char *path, int uid)
 
 static int start(const char *path) { return start_uid(path, -1); }
 
+/* Like start_uid, but with a full argv (argv[0] is the path). */
+static int start_uid_argv(char **argv, int uid)
+{
+    int pid = fork();
+    if (pid == 0) {
+        if (uid >= 0)
+            setuid(uid);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    return pid;
+}
+
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -35,9 +48,14 @@ int main(int argc, char **argv)
      * text console gets the interactive shell, exactly as before. */
     int shpid = -1;
     if (fb_active()) {
-        printf("[init] graphics mode: window server + Terminal\n");
+        printf("[init] graphics mode: window server + Terminals\n");
         start("/disk/WSERVER.ELF");                 /* root */
-        start_uid("/disk/TERM.ELF", UID_USER);
+        /* Two staggered, overlapping Terminals so the pointer can demonstrate
+         * click-to-focus (click the back window to raise it). */
+        char *t1[] = { "/disk/TERM.ELF", "200", "150", "Terminal", 0 };
+        char *t2[] = { "/disk/TERM.ELF", "470", "330", "Terminal 2", 0 };
+        start_uid_argv(t1, UID_USER);
+        start_uid_argv(t2, UID_USER);
     } else {
         shpid = start_uid("/disk/SH.ELF", UID_USER);
     }

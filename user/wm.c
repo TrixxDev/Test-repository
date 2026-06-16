@@ -83,6 +83,9 @@ void wm_state_init(wm_state_t *st)
     st->count = 0;
     st->next_id = 1;
     st->next_z = 1;
+    st->cursor_x = 0;
+    st->cursor_y = 0;
+    st->cursor_on = 0;          /* the windowserver turns this on; host renderer leaves it off */
 }
 
 int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
@@ -120,6 +123,43 @@ int wm_focus_owner(wm_state_t *st)
     return best;
 }
 
+/* A window's full frame is its content box plus the title bar on top. */
+static int frame_hit(const window_t *w, int x, int y)
+{
+    int cw = w->content->width;
+    int total_h = w->content->height + WM_TITLEBAR_H;
+    return x >= w->x && x < w->x + cw && y >= w->y && y < w->y + total_h;
+}
+
+int wm_window_at(wm_state_t *st, int x, int y)
+{
+    int best = -1, best_z = -1;
+    for (int i = 0; i < WM_MAX_WINDOWS; i++)
+        if (st->used[i] && st->win[i].visible &&
+            st->win[i].z > best_z && frame_hit(&st->win[i], x, y)) {
+            best_z = st->win[i].z;
+            best = st->win[i].id;
+        }
+    return best;
+}
+
+int wm_in_titlebar(wm_state_t *st, int id, int x, int y)
+{
+    int s = slot_of(st, id);
+    if (s < 0)
+        return 0;
+    window_t *w = &st->win[s];
+    return x >= w->x && x < w->x + w->content->width &&
+           y >= w->y && y < w->y + WM_TITLEBAR_H;
+}
+
+void wm_raise(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    if (s >= 0)
+        st->win[s].z = st->next_z++;    /* highest z => focused + drawn last */
+}
+
 void wm_clear(wm_state_t *st, int id, uint32_t color)
 {
     int s = slot_of(st, id);
@@ -150,6 +190,45 @@ void wm_destroy(wm_state_t *st, int id)
     if (s >= 0) { st->used[s] = 0; st->count--; }
 }
 
+/* Arrow cursor, drawn last (on top of everything). '#' = dark outline,
+ * '*' = white fill, anything else = transparent. */
+static const char *const cursor_glyph[] = {
+    "#",
+    "##",
+    "#*#",
+    "#**#",
+    "#***#",
+    "#****#",
+    "#*****#",
+    "#******#",
+    "#*******#",
+    "#********#",
+    "#*****#####",
+    "#**#**#",
+    "#*# #**#",
+    "##  #**#",
+    "#    #**#",
+    "     #**#",
+    "      ###",
+};
+
+static void wm_draw_cursor(gfx_surface_t *screen, int px, int py)
+{
+    uint32_t outline = GFX_RGB(0x11, 0x11, 0x14);
+    uint32_t fill    = GFX_RGB(0xff, 0xff, 0xff);
+    int rows = (int)(sizeof(cursor_glyph) / sizeof(cursor_glyph[0]));
+    for (int r = 0; r < rows; r++) {
+        const char *line = cursor_glyph[r];
+        for (int c = 0; line[c]; c++) {
+            uint32_t color;
+            if (line[c] == '#')      color = outline;
+            else if (line[c] == '*') color = fill;
+            else                     continue;
+            gfx_fill_rect(screen, px + c, py + r, 1, 1, color);
+        }
+    }
+}
+
 void wm_present(wm_state_t *st, gfx_surface_t *screen)
 {
     desktop_render(screen);                   /* wallpaper + menu bar + dock */
@@ -159,4 +238,6 @@ void wm_present(wm_state_t *st, gfx_surface_t *screen)
         if (st->used[i] && st->win[i].visible)
             vis[n++] = &st->win[i];
     wm_composite(screen, vis, n);
+    if (st->cursor_on)                        /* pointer on top of everything */
+        wm_draw_cursor(screen, st->cursor_x, st->cursor_y);
 }

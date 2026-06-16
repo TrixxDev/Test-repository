@@ -4,6 +4,7 @@
 #include "process.h"
 #include "socket.h"
 #include "fb.h"
+#include "mouse.h"
 
 /* Convention: eax = syscall number, ebx/ecx/edx = arguments. The return value
  * is written back into regs->eax (restored to the user's eax by the stub). */
@@ -128,6 +129,15 @@ void syscall_handler(registers_t *regs)
     case SYS_FBACTIVE:
         regs->eax = (uint32_t)fb_is_active();
         break;
+
+    case SYS_MOUSE: {
+        int *out = (int *)regs->ebx;        /* user [dx, dy, buttons] */
+        int dx = 0, dy = 0, btn = 0;
+        mouse_get(&dx, &dy, &btn);          /* blocks until a packet arrives */
+        if (out) { out[0] = dx; out[1] = dy; out[2] = btn; }
+        regs->eax = 0;
+        break;
+    }
 
     default:
         kprintf("\n[syscall] unknown call %u\n", regs->eax);

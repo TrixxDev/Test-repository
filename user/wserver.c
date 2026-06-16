@@ -29,6 +29,24 @@ static void keyboard_helper(int server_pid)
     }
 }
 
+/* Forked helper: blocks on the PS/2 mouse and forwards each pointer event to the
+ * server as a WM_MOUSE message (same single-source event-loop model as keys). */
+static void mouse_helper(int server_pid)
+{
+    int ev[3];                  /* {dx, dy, buttons} */
+    for (;;) {
+        if (mouse_read(ev) != 0)
+            continue;
+        wm_req_t m;
+        memset(&m, 0, sizeof(m));
+        m.op = WM_MOUSE;
+        m.x = ev[0];            /* dx */
+        m.y = ev[1];            /* dy */
+        m.w = ev[2];            /* button bitmask */
+        msgsend(server_pid, &m, sizeof(m));
+    }
+}
+
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -38,12 +56,15 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* Fork the keyboard helper *before* mapping the framebuffer, so the child
-     * doesn't inherit the large framebuffer mapping. */
+    /* Fork the input helpers *before* mapping the framebuffer, so the children
+     * don't inherit the large framebuffer mapping. */
     int server_pid = getpid();
-    int kid = fork();
-    if (kid == 0) {
+    if (fork() == 0) {
         keyboard_helper(server_pid);
+        _exit(0);
+    }
+    if (fork() == 0) {
+        mouse_helper(server_pid);
         _exit(0);
     }
 
@@ -64,11 +85,15 @@ int main(int argc, char **argv)
         return 1;
     }
     wm_state_init(&st);
-    wm_present(&st, &screen);        /* paint the empty desktop right away */
+    st.cursor_on = 1;                /* the windowserver owns the pointer */
+    st.cursor_x = screen.width / 2;
+    st.cursor_y = screen.height / 2;
+    wm_present(&st, &screen);        /* paint the empty desktop + cursor right away */
     printf("[wm] ready (pid %d), framebuffer %ux%u pitch %u\n",
            getpid(), info[0], info[1], info[2]);
 
-    /* Event loop: one source (the mailbox) carries both app requests and keys. */
+    /* Event loop: one source (the mailbox) carries app requests, keys and mouse. */
+    int prev_buttons = 0;
     for (;;) {
         wm_req_t req;
         int from = -1;
@@ -107,6 +132,27 @@ int main(int argc, char **argv)
             int owner = wm_focus_owner(&st);
             if (owner > 0)
                 msgsend(owner, &req, sizeof(req));
+            break;
+        }
+        case WM_MOUSE: {
+            /* Move the cursor (clamped to the screen). On a left-button press,
+             * raise the window under the pointer -> click-to-focus. Each event is
+             * a full recomposite so the cursor and any z-change show at once. */
+            st.cursor_x += req.x;
+            st.cursor_y += req.y;
+            if (st.cursor_x < 0) st.cursor_x = 0;
+            if (st.cursor_y < 0) st.cursor_y = 0;
+            if (st.cursor_x > screen.width - 1)  st.cursor_x = screen.width - 1;
+            if (st.cursor_y > screen.height - 1) st.cursor_y = screen.height - 1;
+
+            int buttons = req.w;
+            if ((buttons & 1) && !(prev_buttons & 1)) {
+                int id = wm_window_at(&st, st.cursor_x, st.cursor_y);
+                if (id > 0)
+                    wm_raise(&st, id);
+            }
+            prev_buttons = buttons;
+            wm_present(&st, &screen);
             break;
         }
         default:

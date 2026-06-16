@@ -148,12 +148,17 @@ screenshot-wm:
 # live framebuffer to a PNG via the QEMU monitor — proves the GUI on actual
 # hardware emulation without needing a display. `verify-gui` types into the
 # Terminal first to also prove the keyboard pipeline.
-.PHONY: live-shot verify-gui
+.PHONY: live-shot verify-gui demo-focus
 live-shot: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live.png
 verify-gui: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_typed.png \
 	    --keys h,e,l,l,o,spc,a,u,r,o,r,a
+# Phase 9.3: move the pointer onto the back window, click to focus/raise it, then
+# type into it -> proves PS/2 mouse + cursor + hit-test + click-to-focus.
+demo-focus: $(KERNEL) $(DISK)
+	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_focus.png \
+	    --mouse "move:-212,-134;click" --keys f,o,c,u,s
 
 clean:
 	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o

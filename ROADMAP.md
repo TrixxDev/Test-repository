@@ -135,11 +135,15 @@
   - [x] живой контур (framebuffer + реальная клавиатура + перерисовка на экране) —
     снят с экрана QEMU: `make live-shot`/`make verify-gui` →
     `aurora_live.png`/`aurora_live_typed.png` (видно `aurora> hello aurora_`)
-- [ ] **9.3+ ввод/курсор — НАЧИНАЕМ** ([`docs/INPUT.md`](docs/INPUT.md)):
-  PS/2 mouse → IRQ12 → kernel read-источник → reader-child windowserver →
-  `WM_MOUSE` → курсор + hit-test + фокус + drag. Гейт 9.2 зелёный — драйвер PS/2 и
-  IRQ12 можно писать. Порядок: 9.3 курсор → 9.4 click-to-focus →
-  9.5 перетаскивание окон → 9.6 Dock как процесс → 9.7 Launcher/Finder
+- [x] **9.3 мышь + курсор + click-to-focus — ПОДТВЕРЖДЕНО в QEMU (v0.9.6)**
+  ([`docs/INPUT.md`](docs/INPUT.md)): драйвер PS/2 (`drivers/mouse.c`) + IRQ12 →
+  сборка 3-байтного пакета → `SYS_MOUSE` → reader-child windowserver → `WM_MOUSE`
+  → курсор (рисуется поверх всего) + hit-test (`wm_window_at`) + click-to-focus
+  (`wm_raise`). Проверка на экране: `make demo-focus` → `aurora_live_focus.png`
+  (клик по заднему окну поднимает его, ввод идёт в него).
+- [ ] **9.4/9.5 перетаскивание окон — СЛЕДУЮЩЕЕ**: захват за title bar (`wm_in_titlebar`
+  уже есть) → drag через `wm_move` → release. Затем 9.6 Dock как процесс →
+  9.7 Launcher/Finder
 - [ ] потом (когда десктоп «живой»): client-side surfaces, shared memory,
   анимации, сеть (virtio-net/TCP)
 

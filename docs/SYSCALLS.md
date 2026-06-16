@@ -33,6 +33,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 25 | `uid_of` | `uid_of(int pid) -> uid/-1` | Owner uid of another process (e.g. so `netd` can enforce privileged ports without trusting the request). |
 | 26 | `fb_map` | `fb_map(uint info[3]) -> vaddr/0` | Map the active framebuffer into the caller and fill `info` = {width, height, pitch}; `0` if no framebuffer. Used by the `windowserver`. |
 | 27 | `fb_active` | `fb_active() -> 1/0` | Whether a graphics framebuffer is up; lets `init` choose the GUI vs the text session. |
+| 28 | `mouse` | `mouse_read(int out[3]) -> 0` | Block for one PS/2 pointer event; fills `out` = {dx, dy, buttons} (dy>0 = down; buttons bit0/1/2 = L/R/M). Used by the `windowserver` mouse helper. |
 
 ## Notes
 

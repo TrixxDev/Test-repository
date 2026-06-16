@@ -76,9 +76,21 @@ static void commit_line(void)
     ilen = 0;
 }
 
+static int parse_int(const char *s)
+{
+    int v = 0, sign = 1;
+    if (*s == '-') { sign = -1; s++; }
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return v * sign;
+}
+
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    /* Optional: argv = {prog, x, y, title}. Lets init stagger several windows. */
+    int wx = 280, wy = 190;
+    const char *title = "Terminal";
+    if (argc > 2) { wx = parse_int(argv[1]); wy = parse_int(argv[2]); }
+    if (argc > 3) title = argv[3];
 
     for (int t = 0; t < 40 && wm <= 0; t++) {
         wm = svc_lookup(WM_SERVICE);
@@ -90,8 +102,8 @@ int main(int argc, char **argv)
     wm_req_t r;
     wm_rep_t rep;
     memset(&r, 0, sizeof(r));
-    r.op = WM_CREATE; r.x = 280; r.y = 190; r.w = W; r.h = H;
-    set_str(&r, "Terminal");
+    r.op = WM_CREATE; r.x = wx; r.y = wy; r.w = W; r.h = H;
+    set_str(&r, title);
     msgsend(wm, &r, sizeof(r));
     int from;
     for (;;) {

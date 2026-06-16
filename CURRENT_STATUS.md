@@ -3,18 +3,19 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.5.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.6.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
 netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
 (framebuffer + 2D library with an 8×16 font + desktop; a userspace, event-driven
 **windowserver** with a keyboard input pipeline + interactive Terminal) are
-implemented and build clean. **Phase 9.2 is now confirmed live in QEMU**: the
-Bochs-VBE framebuffer comes up, the windowserver paints the desktop, the Terminal
-window opens, and typing flows keyboard → windowserver → focused app → on-screen
-redraw — captured to PNG via `make verify-gui` (see `aurora_live.png`). FS write
-and the rendering/window-server core are additionally verified on the host (the
-real `fs/fat32.c` write path + image re-parse; the real
-`kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
+implemented and build clean. **Phases 9.2 and 9.3 are confirmed live in QEMU**:
+the Bochs-VBE framebuffer comes up, the windowserver paints the desktop, Terminal
+windows open, typing flows keyboard → windowserver → focused app → on-screen
+redraw, and the **PS/2 mouse** moves an on-screen cursor + **clicks to focus**
+(click a window to raise it; keys then route to it) — all captured to PNG via
+`make verify-gui` / `make demo-focus`. FS write and the rendering/window-server
+core are additionally verified on the host (the real `fs/fat32.c` write path +
+image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 
 > **v0.9.5 fix.** The live framebuffer was being blocked by a real
 > memory-corruption bug: `pmm_init` reserved only the kernel image, not the
@@ -44,7 +45,8 @@ real `fs/fat32.c` write path + image re-parse; the real
 | 9.0/9.1 | Framebuffer (Multiboot) + 2D library + static desktop (wallpaper + menu bar + Dock) | v0.9.0 | ✅ |
 | 9.0.5 | Live output: 8×16 text/font; Bochs-VBE fallback (`run-vbe`) + GRUB ISO (`iso`) | v0.9.5 | ✅ live-confirmed in QEMU |
 | 9.2 | Event-driven **windowserver** + keyboard pipeline + interactive Terminal; `fb_map`/`fb_active`; frame consistency | v0.9.5 | ✅ live-confirmed in QEMU (`make verify-gui`) |
-| 9.3–9.7 | Mouse + cursor → click-to-focus → window dragging → Dock process → Launcher/Finder (design in docs/INPUT.md) | — | ⏳ NEXT (9.2 gate is green) |
+| 9.3 | **PS/2 mouse + IRQ12** → cursor → hit-test → **click-to-focus** (`SYS_MOUSE`, `wm_window_at`/`wm_raise`) | v0.9.6 | ✅ live-confirmed in QEMU (`make demo-focus`) |
+| 9.4–9.7 | Window dragging → Dock process → Launcher/Finder (design in docs/INPUT.md) | — | ⏳ NEXT (drag first) |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
 
@@ -85,6 +87,14 @@ real `fs/fat32.c` write path + image re-parse; the real
   into the Terminal and captures the echoed text (`aurora_live_typed.png`,
   showing `aurora> hello aurora_`), proving the full keyboard→screen loop. The
   window-server core is also PNG-verified via `make screenshot-wm`.
+- Mouse + cursor + click-to-focus (9.3): the kernel PS/2 mouse driver
+  (`drivers/mouse.c`, IRQ12) buffers raw packets; the windowserver forks a second
+  reader child that forwards `WM_MOUSE`. The cursor (an arrow drawn last, on top)
+  tracks motion; a left-click hit-tests with `wm_window_at` and raises the window
+  with `wm_raise`, moving focus so keys route there. **Confirmed live**: `make
+  demo-focus` clicks the back Terminal, raises it, and types into it
+  (`aurora_live_focus.png`). Text-mode boot is unaffected (mouse enabled but
+  unused; keyboard verified).
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.
@@ -98,7 +108,7 @@ real `fs/fat32.c` write path + image re-parse; the real
 
 - **arch/i386:** boot.S, gdt(+TSS), idt, isr/interrupt, pmm, paging, switch,
   usermode, io.
-- **drivers:** vga, serial, keyboard, pit, ata, console, fb.
+- **drivers:** vga, serial, keyboard, pit, ata, console, fb, mouse.
 - **fs:** vfs, tmpfs, fat32.
 - **lib (kernel):** string, printf (kprintf), kheap.
 - **kernel:** kmain, scheduler, process, pipe, socket, elf, syscall, gfx, desktop.
@@ -109,8 +119,9 @@ real `fs/fat32.c` write path + image re-parse; the real
   genfont.py, screendump.py (headless live-framebuffer capture via QEMU monitor).
 - **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT.
 
-## Syscalls (27)
+## Syscalls (28)
 
 `putc, yield, exit, fork, exec, wait, open, read, write, close, getpid, pipe,
 dup2, sbrk, msgsend, msgrecv, register, lookup, kill, socket, sock_link, poll,
-getuid, setuid, uid_of, fb_map, fb_active`. See [docs/SYSCALLS.md](docs/SYSCALLS.md).
+getuid, setuid, uid_of, fb_map, fb_active, mouse`. See
+[docs/SYSCALLS.md](docs/SYSCALLS.md).

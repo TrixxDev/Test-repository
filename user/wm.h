@@ -42,6 +42,8 @@ typedef struct {
     char          titles[WM_MAX_WINDOWS][48];
     int           used[WM_MAX_WINDOWS];
     int           count, next_id, next_z;
+    int           cursor_x, cursor_y;   /* pointer position (screen pixels)  */
+    int           cursor_on;            /* draw the cursor on present?        */
 } wm_state_t;
 
 void wm_state_init(wm_state_t *st);
@@ -51,6 +53,13 @@ int  wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
                void *pixels, int owner);
 /* Owner pid of the focused (top-most visible) window, or -1 if none. */
 int  wm_focus_owner(wm_state_t *st);
+/* Id of the top-most visible window whose frame (title bar + content) contains
+ * (x, y), or -1 if the click landed on the desktop. */
+int  wm_window_at(wm_state_t *st, int x, int y);
+/* Is (x, y) inside window `id`'s title bar? (for click-to-focus / dragging) */
+int  wm_in_titlebar(wm_state_t *st, int id, int x, int y);
+/* Raise window `id` to the front (highest z) so it gains focus. */
+void wm_raise(wm_state_t *st, int id);
 void wm_draw_rect(wm_state_t *st, int id, int x, int y, int w, int h, uint32_t color);
 void wm_draw_text(wm_state_t *st, int id, int x, int y, const char *s, uint32_t color);
 void wm_clear(wm_state_t *st, int id, uint32_t color);
@@ -72,6 +81,8 @@ enum {
     WM_PRESENT,      /* app -> server: recomposite to the screen               */
     WM_KEY,          /* kbd helper -> server, then server -> focused app: a key
                         (the character is in req.x)                            */
+    WM_MOUSE,        /* mouse helper -> server: a pointer event
+                        (req.x = dx, req.y = dy, req.w = button bitmask)       */
 };
 
 typedef struct {

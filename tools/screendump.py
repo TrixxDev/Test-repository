@@ -3,16 +3,20 @@
 
 This makes the GUI verifiable without a display. It boots the real kernel with
 the Bochs-VBE framebuffer path (`-append vbe`), waits for the window server to
-come up, optionally injects keystrokes through the QEMU monitor, then asks the
-monitor to `screendump` the actual framebuffer and converts the PPM to PNG.
+come up, optionally injects keyboard / mouse input, then asks the QEMU monitor
+to `screendump` the actual framebuffer and converts the PPM to PNG.
 
 Usage:
     screendump.py <kernel.elf> <disk.img> <out.png>
-                  [--keys h,e,l,l,o,spc,w,o,r,l,d] [--delay 6] [--serial FILE]
+                  [--keys h,e,l,l,o,spc,w,o,r,l,d]
+                  [--mouse "move:-200,150;click;move:120,0"]
+                  [--delay 6] [--serial FILE]
 
-Key names are QEMU monitor keynames (letters/digits as-is; `spc`, `ret`, etc.).
+Keyboard key names are QEMU monitor keynames (letters/digits as-is; `spc`, `ret`).
+Mouse steps (`;`-separated): `move:DX,DY` (relative), `click` (left), `down`, `up`.
 """
 import argparse
+import json
 import os
 import socket
 import subprocess
@@ -23,7 +27,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def mon_connect(path, tries=50):
+def connect(path, tries=50):
     for _ in range(tries):
         try:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -31,19 +35,93 @@ def mon_connect(path, tries=50):
             return s
         except OSError:
             time.sleep(0.1)
-    raise RuntimeError("could not connect to QEMU monitor at " + path)
+    raise RuntimeError("could not connect to socket " + path)
+
+
+def drain(s):
+    try:
+        s.setblocking(False)
+        while s.recv(65536):
+            pass
+    except BlockingIOError:
+        pass
+    finally:
+        s.setblocking(True)
 
 
 def mon_cmd(s, cmd, settle=0.25):
     s.sendall((cmd + "\n").encode())
     time.sleep(settle)
-    try:
-        s.setblocking(False)
-        s.recv(65536)
-    except BlockingIOError:
-        pass
-    finally:
-        s.setblocking(True)
+    drain(s)
+
+
+def qmp_open(path):
+    s = connect(path)
+    time.sleep(0.2)
+    drain(s)                                   # server greeting
+    s.sendall(b'{"execute":"qmp_capabilities"}\n')
+    time.sleep(0.2)
+    drain(s)
+    return s
+
+
+def qmp(s, execute, arguments=None):
+    obj = {"execute": execute}
+    if arguments is not None:
+        obj["arguments"] = arguments
+    s.sendall((json.dumps(obj) + "\n").encode())
+    time.sleep(0.05)
+    drain(s)
+
+
+def send_events(s, events):
+    qmp(s, "input-send-event", {"events": events})
+
+
+def mouse_move(s, dx, dy, step=16):
+    """Send a relative move in small chunks so PS/2 packets don't overflow."""
+    def chunks(v):
+        out = []
+        while abs(v) > step:
+            out.append(step if v > 0 else -step)
+            v -= step if v > 0 else -step
+        if v:
+            out.append(v)
+        return out or [0]
+    cx, cy = chunks(dx), chunks(dy)
+    for i in range(max(len(cx), len(cy))):
+        ex = cx[i] if i < len(cx) else 0
+        ey = cy[i] if i < len(cy) else 0
+        evs = []
+        if ex:
+            evs.append({"type": "rel", "data": {"axis": "x", "value": ex}})
+        if ey:
+            evs.append({"type": "rel", "data": {"axis": "y", "value": ey}})
+        if evs:
+            send_events(s, evs)
+        time.sleep(0.03)
+
+
+def mouse_btn(s, down):
+    send_events(s, [{"type": "btn", "data": {"button": "left", "down": down}}])
+    time.sleep(0.05)
+
+
+def do_mouse(qmp_sock, script):
+    for step in [s.strip() for s in script.split(";") if s.strip()]:
+        if step.startswith("move:"):
+            dx, dy = step[5:].split(",")
+            mouse_move(qmp_sock, int(dx), int(dy))
+        elif step == "click":
+            mouse_btn(qmp_sock, True)
+            mouse_btn(qmp_sock, False)
+        elif step == "down":
+            mouse_btn(qmp_sock, True)
+        elif step == "up":
+            mouse_btn(qmp_sock, False)
+        else:
+            sys.stderr.write("ignoring unknown mouse step: %r\n" % step)
+        time.sleep(0.1)
 
 
 def main():
@@ -52,12 +130,14 @@ def main():
     ap.add_argument("disk")
     ap.add_argument("out")
     ap.add_argument("--keys", default="", help="comma-separated QEMU keynames")
+    ap.add_argument("--mouse", default="", help="';'-separated mouse steps")
     ap.add_argument("--delay", type=float, default=6.0, help="boot settle seconds")
     ap.add_argument("--serial", default="", help="write the serial log here too")
     args = ap.parse_args()
 
     tmp = tempfile.mkdtemp(prefix="aurora-shot-")
-    sock = os.path.join(tmp, "mon.sock")
+    mon = os.path.join(tmp, "mon.sock")
+    qmps = os.path.join(tmp, "qmp.sock")
     serial = args.serial or os.path.join(tmp, "serial.log")
     ppm = os.path.join(tmp, "screen.ppm")
 
@@ -66,31 +146,33 @@ def main():
         "-drive", "file=%s,format=raw,if=ide" % args.disk,
         "-vga", "std", "-append", "vbe", "-display", "none",
         "-serial", "file:" + serial,
-        "-monitor", "unix:%s,server,nowait" % sock,
+        "-monitor", "unix:%s,server,nowait" % mon,
+        "-qmp", "unix:%s,server,nowait" % qmps,
         "-no-reboot", "-no-shutdown",
     ]
     proc = subprocess.Popen(qemu, stderr=subprocess.DEVNULL)
+    s = None
     try:
         time.sleep(args.delay)
-        s = mon_connect(sock)
+        s = connect(mon)
         time.sleep(0.3)
-        try:
-            s.setblocking(False); s.recv(65536)
-        except BlockingIOError:
-            pass
-        finally:
-            s.setblocking(True)
-        if args.keys:
+        drain(s)
+        if args.mouse:                          # position/click first ...
+            q = qmp_open(qmps)
+            do_mouse(q, args.mouse)
+            q.close()
+            time.sleep(0.4)
+        if args.keys:                           # ... then type into the focused window
             for k in [k for k in args.keys.split(",") if k]:
                 mon_cmd(s, "sendkey " + k)
-            time.sleep(0.5)
-        mon_cmd(s, "screendump " + ppm, settle=1.0)
-        s.close()
+            time.sleep(0.4)
+        mon_cmd(s, "screendump " + ppm, settle=1.2)
     finally:
         try:
-            s2 = mon_connect(sock, tries=5)
-            mon_cmd(s2, "quit", settle=0.2)
-            s2.close()
+            if s is None:
+                s = connect(mon, tries=5)
+            mon_cmd(s, "quit", settle=0.2)
+            s.close()
         except Exception:
             pass
         proc.terminate()
@@ -108,7 +190,6 @@ def main():
 
     subprocess.check_call(
         [sys.executable, os.path.join(HERE, "ppm2png.py"), ppm, args.out])
-    # Surface the key serial markers so the caller sees the live evidence.
     if os.path.exists(serial):
         for line in open(serial):
             if any(m in line for m in ("[fb]", "[wm]", "[term]")):

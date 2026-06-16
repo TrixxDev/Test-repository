@@ -1,11 +1,11 @@
-# AuroraOS Input & Pointer — Phase 9.3+ (design)
+# AuroraOS Input & Pointer — Phase 9.3+
 
-This is the **architecture** for mouse/cursor/focus/drag, prepared ahead of
-implementation. Per the agreed rule, the PS/2 mouse driver and its IRQ routing
-are **not** written until the live GUI loop (9.2) is confirmed on a real QEMU
-screen — building hardware/IRQ code blind would be wasted if the framebuffer
-behaves differently than assumed. This doc fixes the interfaces so the
-implementation is turnkey once 9.2 is green.
+**Status: 9.3 (mouse + cursor + click-to-focus) is implemented and verified live
+in QEMU (v0.9.6).** The PS/2 mouse driver + IRQ12, the cursor, hit-testing and
+click-to-focus all work on the real framebuffer; regenerate the proof with
+`make demo-focus` (→ `aurora_live_focus.png`: the back window is clicked,
+raised, and typed into). This doc is the design + the as-built reference; window
+**dragging** (9.4/9.5) is the next step and is described at the end.
 
 ## Data flow (mirrors the keyboard pipeline)
 
@@ -25,14 +25,18 @@ The keyboard already works this way (a forked reader child does `read(0)` and
 forwards `WM_KEY`). The mouse adds a second reader child that forwards
 `WM_MOUSE`. The windowserver event loop stays single-source (one mailbox).
 
-## Kernel side (smallest possible, written only after 9.2 is green)
+## Kernel side (as built — `drivers/mouse.c`)
 
-- **PS/2 mouse driver:** enable the aux device on the 8042 controller, handle
-  **IRQ12**, assemble the 3-byte packet (flags, dx, dy). Expose events to
-  userspace the same way the keyboard is exposed — the simplest fit is a tiny
-  blocking read source the windowserver's reader child consumes (e.g. a
-  `mouse`-flavoured read, analogous to `read(0)` for the keyboard). No new policy
-  in the kernel; it only delivers raw packets.
+- **PS/2 mouse driver:** `mouse_install()` enables the aux device on the 8042
+  (`0xA8`), turns on IRQ12 + the aux clock in the controller config byte, and
+  sets the mouse to defaults + data reporting (`0xF6`, `0xF4`). The **IRQ12**
+  handler (vector 44, already in the IDT) assembles the 3-byte packet
+  (flags, dx, dy), sign-extends dx/dy, **inverts Y** to screen orientation, and
+  pushes `(dx, dy, buttons)` into a ring buffer — exactly mirroring the keyboard
+  driver. `mouse_get()` is the blocking reader.
+- Userspace reads one event via the **`SYS_MOUSE` (28)** syscall
+  (`mouse_read(int out[3])` → `{dx, dy, buttons}`, blocking). No cursor/focus
+  policy in the kernel; it only delivers raw packets.
 - That is the **entire** kernel addition. Cursor, focus, drag and z-order changes
   are all userspace, in the windowserver.
 
@@ -53,20 +57,24 @@ typedef struct {            /* carried in the existing wm_req_t-style message */
 (One mailbox still carries `WM_KEY`, `WM_MOUSE` and the app draw requests; the
 server branches on `op`.)
 
-## Windowserver side (all userspace, all PNG-testable before going live)
+## Windowserver side (all userspace)
 
-- **9.3 — Cursor.** Keep a cursor position `(cx, cy)`; each `WM_MOUSE` adds
-  `dx,dy` clamped to the screen. The compositor draws a small arrow at `(cx,cy)`
-  **last** (on top of everything) in every full recomposite. Movement triggers a
-  recomposite.
-- **9.4 — Click-to-focus.** On left-button press, hit-test the windows
-  top-to-bottom for the one containing `(cx,cy)`; raise it (give it the highest
-  `z`) and make it the focused window (so `WM_KEY` routes to it). `wm.c` already
-  has `wm_focus_owner`; add `wm_window_at(x,y)` and `wm_raise(id)`.
-- **9.5 — Window dragging.** If the press lands in a window's title bar, enter a
-  drag: subsequent motion sets that window's `(x, y)` (via the existing
-  `wm_move`) and recomposites; button release ends the drag. This is the headline
-  milestone — grab a window by its title bar and move it.
+- **9.3 — Cursor. DONE.** `wm_state_t` keeps `(cursor_x, cursor_y)` + `cursor_on`;
+  each `WM_MOUSE` adds `dx,dy` clamped to the screen. `wm_present` draws a small
+  arrow at the cursor **last** (on top of everything) in every full recomposite.
+  Movement triggers a recomposite. (The host PNG renderer leaves `cursor_on = 0`,
+  so its output is unchanged.)
+- **9.3 — Click-to-focus. DONE.** On a left-button press edge, `wm_window_at(x,y)`
+  hit-tests the windows top-to-bottom; `wm_raise(id)` gives the hit window the
+  highest `z`, which makes it the focused window (so `WM_KEY` routes to it via the
+  existing `wm_focus_owner`). Verified: clicking the back Terminal raises it and
+  subsequent typing lands in it.
+- **9.4/9.5 — Window dragging. NEXT.** `wm_in_titlebar(id,x,y)` already exists; the
+  windowserver needs a small drag state machine: on a press inside a title bar,
+  remember the window + the cursor-to-window offset; while the button stays down,
+  each motion sets that window's `(x, y)` (via the existing `wm_move`) and
+  recomposites; release ends the drag. This is the headline milestone — grab a
+  window by its title bar and move it.
 - **9.6 — Dock as its own process.** Split the Dock out of `desktop.c` into a
   `dock` app that owns a strip window and launches apps via IPC.
 - **9.7 — Launcher / Finder** (`Aurora Files`) as real windowed apps over the VFS
@@ -88,7 +96,7 @@ Dock + menus, not from render throughput.
 ## Order
 
 ```
-9.2 (confirm live)  →  9.3 cursor  →  9.4 click-to-focus  →  9.5 drag
-                    →  9.6 Dock process  →  9.7 Launcher/Finder
+9.2 (live ✅) → 9.3 cursor + click-to-focus (✅) → 9.4/9.5 window dragging (next)
+             → 9.6 Dock process → 9.7 Launcher/Finder
 later: client-side surfaces · shared memory · animations · networking
 ```
