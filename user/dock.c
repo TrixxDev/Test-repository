@@ -33,7 +33,7 @@ static const struct {
 } slots[ICONS] = {
     { 'T', GFX_RGB(0xff, 0x5f, 0x57), "/disk/TERM.ELF"  },  /* Terminal */
     { 'F', GFX_RGB(0xfe, 0xbc, 0x2e), "/disk/FILES.ELF" },  /* Aurora Files (Finder) */
-    { 'E', GFX_RGB(0x28, 0xc8, 0x40), 0                },  /* Editor   */
+    { 'E', GFX_RGB(0x28, 0xc8, 0x40), "/disk/WMSTRESS.ELF" },  /* diagnostics: WS stress self-test */
     { 'N', GFX_RGB(0x33, 0x99, 0xff), 0               },  /* Net      */
     { 'S', GFX_RGB(0xa8, 0x6f, 0xff), 0               },  /* Settings */
 };

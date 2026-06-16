@@ -134,6 +134,13 @@ app → window server → compositor → framebuffer
   pipeline → `WM_KEY`. Verified with `make demo-view` (the Finder opens `ABOUT.TXT`
   in the Viewer, then PgDn scrolls it). This closes the **Dock → Finder → file →
   Viewer** chain — the GUI now works with user *data*, not just windows.
+- **9.9 — Stabilization audit → v1.0.0 — DONE.** A memory/process/IPC sweep before
+  building more on top: fixed the window content-buffer leak (heap proven flat
+  across stress rounds), the free-on-full-table leak, added dead-owner window
+  reaping and a `WM_DESTROY` ownership check; verified zombie-free process reaping,
+  graceful window-table limit, mailbox-overflow drop, and Finder close/relaunch.
+  Tooling: `user/wmstress.c` + `make stress`. Full write-up:
+  [docs/STABILITY.md](docs/STABILITY.md).
 
 Deferred until the desktop feels real (per the agreed priority): client-side
 shared-memory surfaces, animations, and the network stack. The current
@@ -179,26 +186,23 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**Architecture audit before the 10.0 milestone.** The full user-facing chain is
-now live (Dock → Finder → file → Viewer; Terminal; window drag/close). Before
-building more on top, sweep for the leaks and limits that will bite once the
-desktop is used in earnest:
+The stabilization audit is **done** (v1.0.0, see
+[docs/STABILITY.md](docs/STABILITY.md)): window/process/IPC leaks fixed and
+verified, limits graceful, Finder close/relaunch clean. The foundation is solid,
+so it is safe to build on top again.
 
-- **Window leaks:** does closing an app free its `wm_state` slot and content
-  surface? (The server `malloc`s each window's pixels; `wm_destroy` frees the slot
-  but the buffer is never `free`d — fix or document.) Confirm `WM_MAX_WINDOWS`
-  behaviour when full.
-- **Process leaks:** apps are spawned double-fork → reparented to init; confirm
-  init actually reaps them (no zombies) over many open/close cycles. Check
-  `MAX_PROCS` headroom with Dock + Finder + several Terminals/Viewers.
-- **IPC / dangling endpoints:** when a window owner dies, does the server ever
-  `msgsend` to a dead pid? (`find_proc` returns NULL → `-1`, so safe, but audit
-  the focus/pointer paths.) Confirm mailboxes drain and nothing wedges at
-  `MBOX_LIMIT`.
-- **Teardown:** closing the Dock or Finder shouldn't break the session; graceful
-  shutdown should still reap everything.
+**Begin 10.0 — Desktop Environment.** Consolidate the existing pieces (window
+server + Dock + Finder + Viewer + Terminal) into a coherent desktop and add the
+first "environment" polish, each as the same `app → IPC → windowserver` clients:
 
-Write the findings up (and a stress demo if useful), fix the cheap ones, then
-declare **10.0 — Desktop Environment**: window server + Dock + Finder + Viewer +
-Terminal, consolidated, with a system menu/settings. Networking (8B: virtio-net →
-TCP) comes *after* the 10.0 milestone, per the agreed desktop-first priority.
+- **Window controls:** minimize / maximize (the yellow/green title-bar lights are
+  drawn but inert — wire them, reusing the close-button hit-test pattern).
+- **A real Aurora menu / system menu** in the menu bar (currently static labels).
+- **Settings** app (wallpaper, clock) over the VFS, and a clipboard for copy/paste
+  between Terminal and Viewer.
+- Optional: client-side **shared-memory surfaces** to replace server-side draw
+  commands (a performance/architecture upgrade once several apps exist).
+
+Networking (**8B**: virtio-net → ARP → IPv4 → UDP → TCP → DNS) comes *after* the
+10.0 desktop milestone, per the agreed desktop-first priority. Then Phase 10.1
+(Aurora Assistant as a userspace `aurorad`).

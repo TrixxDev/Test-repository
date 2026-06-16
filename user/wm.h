@@ -89,6 +89,11 @@ int  wm_owner_of(wm_state_t *st, int id);
 /* The top-most window owned by `owner` (pid), or -1; lets the server map an
  * app's WM_PRESENT back to the screen rectangle it needs to refresh. */
 int  wm_window_of_owner(wm_state_t *st, int owner);
+/* The content pixel buffer of window `id` (the one the windowserver malloc'd),
+ * or NULL; the server frees it on destroy so closing a window leaks nothing. */
+void *wm_content_ptr(wm_state_t *st, int id);
+/* Number of live windows (for leak/limit diagnostics). */
+int  wm_window_count(wm_state_t *st);
 /* On-screen bounding box of window `id` including its drop shadow. Returns 1 and
  * fills *bx..*bh, or 0 if `id` is unknown. The windowserver uses this as the
  * damage rectangle so a redraw only touches that window's pixels. */
@@ -137,6 +142,7 @@ enum {
     WM_DRAW_ROUND_RECT, /* app -> server: rounded rect (req.flags = radius)    */
     WM_POINTER,      /* server -> app: pointer over the app's window
                         (req.x,req.y = content-local; req.w = button bitmask)  */
+    WM_STAT,         /* app -> server: log live-window count + heap top (debug) */
 };
 
 typedef struct {

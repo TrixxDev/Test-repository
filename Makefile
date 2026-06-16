@@ -32,7 +32,7 @@ USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/cat.elf user/grep.elf user/orphan.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
               user/wserver.elf user/term.elf user/dock.elf user/files.elf \
-              user/viewer.elf
+              user/viewer.elf user/wmstress.elf
 LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o
 # Portable graphics/compositor code, built for userspace and linked into wserver.
 WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
@@ -91,7 +91,7 @@ $(DISK): $(USER_PROGS) user/poem.txt user/about.txt tools/mkfat32.py
 	    NETD.ELF user/netd.elf ECHOSRV.ELF user/echosrv.elf ECHOCLI.ELF user/echocli.elf \
 	    SAVE.ELF user/save.elf WSERVER.ELF user/wserver.elf TERM.ELF user/term.elf \
 	    DOCK.ELF user/dock.elf FILES.ELF user/files.elf VIEWER.ELF user/viewer.elf \
-	    ABOUT.TXT user/about.txt POEM.TXT user/poem.txt
+	    ABOUT.TXT user/about.txt POEM.TXT user/poem.txt WMSTRESS.ELF user/wmstress.elf
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -173,7 +173,7 @@ screenshot-wm:
 # live framebuffer to a PNG via the QEMU monitor — proves the GUI on actual
 # hardware emulation without needing a display. `verify-gui` types into the
 # Terminal first to also prove the keyboard pipeline.
-.PHONY: live-shot verify-gui demo-focus demo-drag demo-close demo-dock demo-files demo-view
+.PHONY: live-shot verify-gui demo-focus demo-drag demo-close demo-dock demo-files demo-view stress
 live-shot: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live.png
 verify-gui: $(KERNEL) $(DISK)
@@ -212,6 +212,14 @@ demo-view: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_view.png \
 	    --mouse "move:72,-324;click;wait:2;move:90,194;click;click;wait:2" \
 	    --keys pgdn
+# Stabilization audit: click the Dock's diagnostics icon (E) to run the window
+# server stress / leak self-test; the serial log shows the heap top (brk) staying
+# flat across 50 create/destroy cycles and a graceful window-table limit.
+stress: $(KERNEL) $(DISK)
+	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_stress.png \
+	    --mouse "move:0,-324;click;wait:6" --serial aurora_stress.log
+	@echo "--- window-server stress / leak self-test (serial) ---"
+	@grep -E "wmstress|wm\] stat" aurora_stress.log || echo "(no stress output captured)"
 
 clean:
 	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o

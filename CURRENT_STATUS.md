@@ -3,7 +3,14 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.11.** Phases 0–7 are implemented and verified by booting
+**Current version: v1.0.0** — the first stabilized release. A full GUI stack
+(window server, Dock, Finder, Viewer, Terminal) over a Unix-like kernel, hardened
+by a memory/process/IPC **stabilization audit** (see
+[docs/STABILITY.md](docs/STABILITY.md)): the window content-buffer leak is fixed
+(heap proven flat across stress rounds), apps are reaped with no zombies, the
+window table fails gracefully when full, dead apps' windows are reaped, and the
+Finder can be closed and relaunched cleanly. Phases 0–7 are implemented and
+verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
 netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
 (framebuffer + 2D library with an 8×16 font + desktop; a userspace, event-driven
@@ -65,8 +72,8 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 | 9.6 | **Dock as a separate process** (`user/dock.c`): borderless `WM_F_DOCK` window, color-key transparency, `WM_POINTER` forwarding → hover + **click-to-launch** apps | v0.9.9 | ✅ live-confirmed in QEMU (`make demo-dock`) |
 | 9.7 | **Finder** (`user/files.c`, `Aurora Files`): lists `/disk` via the `readdir` syscall, click-to-select, click-again-to-open (enter dir / exec `.ELF`) | v0.9.10 | ✅ live-confirmed in QEMU (`make demo-files`) |
 | 9.8 | **Text Viewer** (`user/viewer.c`): `open`/`read`/`close` + 8×16 font, arrow/PgUp/PgDn scroll (keyboard now decodes extended scancodes) | v0.9.11 | ✅ live-confirmed in QEMU (`make demo-view`) |
-| — | **Architecture audit** before 10.0 (window/process/IPC leaks, limits, teardown) | — | ⏳ NEXT |
-| 10.0 | **Desktop Environment milestone** (consolidate window server + Dock + Finder + Viewer + Terminal; system menu, settings) | — | ⏳ after audit |
+| 9.9 | **Stabilization audit**: fix window-buffer leak (heap proven flat), free-on-full, dead-owner window reaping, destroy ownership check; verify zombies/limits/IPC | v1.0.0 | ✅ `make stress` + [docs/STABILITY.md](docs/STABILITY.md) |
+| 10.0 | **Desktop Environment milestone** (consolidate window server + Dock + Finder + Viewer + Terminal; system menu, settings, window min/max) | — | ⏳ NEXT |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after the desktop milestone |
 | 10.1 | Aurora Assistant (userspace `aurorad`) + more desktop apps | — | ⏳ later |
 
@@ -151,6 +158,13 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
   codes (`include/keys.h`) that flow through the existing char pipeline →
   `WM_KEY`. **Confirmed live**: `make demo-view` opens the Finder, double-clicks
   `ABOUT.TXT`, and the Viewer shows it scrolled by PgDn (`aurora_live_view.png`).
+- Stabilization (v1.0.0): `make stress` (`user/wmstress.c`, launched from the
+  Dock's diagnostics icon) hammers the window server — 2×50 create/destroy cycles
+  leave the server heap top (`brk`) **identical** between rounds (no leak), and a
+  24-window burst fills the table to `WM_MAX_WINDOWS` with the overflow failing
+  gracefully (no crash). Closing the Finder logs `[init] reaped adopted child`
+  (no zombie) and it relaunches cleanly from the Dock. See
+  [docs/STABILITY.md](docs/STABILITY.md).
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.
@@ -171,11 +185,11 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 - **user:** crt0, libc (libc.h + string/printf/malloc/net), wm (compositor core),
   init, logger, netd, sh, cat, grep, hello, orphan, echosrv, echocli, save,
   wserver (windowserver), term (Terminal app), dock (Dock app),
-  files (Finder / Aurora Files), viewer (Text Viewer).
+  files (Finder / Aurora Files), viewer (Text Viewer), wmstress (WS self-test).
 - **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py,
   genfont.py, screendump.py (headless live-framebuffer capture via QEMU monitor),
   verify_drag.py (pixel-asserts window drag + close).
-- **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT.
+- **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT, STABILITY.
 
 ## Syscalls (29)
 

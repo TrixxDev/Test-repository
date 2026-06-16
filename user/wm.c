@@ -264,6 +264,17 @@ int wm_window_of_owner(wm_state_t *st, int owner)
     return best;
 }
 
+void *wm_content_ptr(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    return s < 0 ? (void *)0 : st->surf[s].pixels;
+}
+
+int wm_window_count(wm_state_t *st)
+{
+    return st->count;
+}
+
 int wm_window_bounds(wm_state_t *st, int id, int *bx, int *by, int *bw, int *bh)
 {
     int s = slot_of(st, id);

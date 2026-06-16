@@ -12,6 +12,7 @@
 static wm_state_t   st;
 static gfx_surface_t screen;    /* the live framebuffer (slow VRAM) */
 static gfx_surface_t back;      /* off-screen scene, no cursor (fast RAM)  */
+static int           dock_win = -1;   /* the borderless Dock window, if any */
 
 /* Drag state: set when the user presses the left button inside a title bar, and
  * cleared on release. While active, each pointer motion re-places the window so
@@ -73,6 +74,45 @@ static void flush_window(int id)
     int x, y, w, h;
     if (wm_window_bounds(&st, id, &x, &y, &w, &h))
         flush(x, y, w, h);
+}
+
+/* Destroy a window and free the content buffer the server malloc'd for it, so
+ * opening and closing windows leaks no memory. */
+static void destroy_window(int id)
+{
+    void *px = wm_content_ptr(&st, id);
+    wm_destroy(&st, id);
+    if (px)
+        free(px);
+    if (id == dock_win)
+        dock_win = -1;
+}
+
+/* Remove every window owned by `pid` (used when an app dies). Returns 1 if any
+ * were removed, so the caller knows to recomposite. */
+static int reap_owner(int pid)
+{
+    int reaped = 0, id;
+    while ((id = wm_window_of_owner(&st, pid)) > 0) {
+        destroy_window(id);
+        reaped = 1;
+    }
+    return reaped;
+}
+
+/* Deliver `msg` to an app. If the send fails *because the app is gone* (not just
+ * a momentarily full mailbox — distinguished with uid_of), reap its windows so a
+ * crashed/closed Dock/Finder/Terminal never leaves a ghost on screen. Returns 1
+ * if a reap happened (caller should recomposite + flush). */
+static int deliver(int owner, const void *msg, int len)
+{
+    if (owner <= 0)
+        return 0;
+    if (msgsend(owner, msg, len) == 0)
+        return 0;                       /* delivered */
+    if (uid_of(owner) >= 0)
+        return 0;                       /* alive: mailbox full, message dropped */
+    return reap_owner(owner);           /* dead: clean up its windows */
 }
 
 /* Forked helper: blocks on the console keyboard and forwards each key to the
@@ -170,7 +210,6 @@ int main(int argc, char **argv)
 
     /* Event loop: one source (the mailbox) carries app requests, keys and mouse. */
     int prev_buttons = 0;
-    int dock_win = -1;                 /* the borderless Dock window, if any */
     drag_state_t drag = { 0, 0, 0, 0 };
     for (;;) {
         wm_req_t req;
@@ -187,8 +226,10 @@ int main(int argc, char **argv)
                 x = (screen.width  - req.w) / 2;
                 y =  screen.height - req.h - 16;
             }
-            void *px = malloc((size_t)req.w * req.h * 4);
+            void *px = (req.w > 0 && req.h > 0) ? malloc((size_t)req.w * req.h * 4) : 0;
             int id = px ? wm_create(&st, x, y, req.w, req.h, req.str, px, from, !dock) : -1;
+            if (id <= 0 && px)
+                free(px);               /* slot full / bad size: don't leak the buffer */
             if (id > 0 && dock) {
                 wm_set_top(&st, id);    /* the Dock floats above ordinary windows */
                 dock_win = id;
@@ -218,9 +259,11 @@ int main(int argc, char **argv)
             break;
         }
         case WM_DESTROY: {
+            if (wm_owner_of(&st, req.win) != from)
+                break;                   /* an app may only destroy its own window */
             int ox, oy, ow, oh;
             int had = wm_window_bounds(&st, req.win, &ox, &oy, &ow, &oh);
-            wm_destroy(&st, req.win);
+            destroy_window(req.win);     /* frees the content buffer too */
             compose();
             if (had)
                 flush(ox, oy, ow, oh);   /* reveal whatever was behind it */
@@ -239,12 +282,20 @@ int main(int argc, char **argv)
         }
         case WM_KEY: {
             /* Deliver the key to the focused window's app (full repaint is the
-             * app's job via DRAW_* + PRESENT). */
+             * app's job via DRAW_* + PRESENT). If that app turns out to be dead,
+             * deliver() reaps its window(s) and we recomposite. */
             int owner = wm_focus_owner(&st);
-            if (owner > 0)
-                msgsend(owner, &req, sizeof(req));
+            if (deliver(owner, &req, sizeof(req))) {
+                compose();
+                flush(0, 0, screen.width, screen.height);
+            }
             break;
         }
+        case WM_STAT:
+            /* Diagnostics: live-window count + heap top, for leak/stress checks. */
+            printf("[wm] stat: live=%d brk=0x%x\n",
+                   wm_window_count(&st), (unsigned)(uintptr_t)sbrk(0));
+            break;
         case WM_MOUSE: {
             /* Move the cursor, then run the pointer state machine. The scene only
              * needs recompositing when it actually changes (raise, close, drag);
@@ -291,7 +342,7 @@ int main(int argc, char **argv)
                         int bx, by, bw, bh;
                         wm_window_bounds(&st, id, &bx, &by, &bw, &bh);
                         int owner = wm_owner_of(&st, id);
-                        wm_destroy(&st, id);
+                        destroy_window(id);         /* frees the content buffer too */
                         ADD_DMG(bx, by, bw, bh);
                         if (owner > 0) {            /* tell the app to exit */
                             wm_req_t bye;
@@ -345,7 +396,9 @@ int main(int argc, char **argv)
 
             /* Forward the pointer to the app under it (in content-local coords),
              * unless a window is being dragged (the cursor is captured then).
-             * The Dock uses this for hover + click; ordinary apps may ignore it. */
+             * The Dock uses this for hover + click; ordinary apps may ignore it.
+             * If that app is dead, deliver() reaps its window (e.g. a killed Dock
+             * vanishes the next time the cursor passes over where it was). */
             if (hit > 0 && !drag.active) {
                 int ox, oy;
                 if (wm_content_origin(&st, hit, &ox, &oy)) {
@@ -356,7 +409,10 @@ int main(int argc, char **argv)
                     pe.x   = st.cursor_x - ox;
                     pe.y   = st.cursor_y - oy;
                     pe.w   = buttons;
-                    msgsend(wm_owner_of(&st, hit), &pe, sizeof(pe));
+                    if (deliver(wm_owner_of(&st, hit), &pe, sizeof(pe))) {
+                        compose();
+                        flush(0, 0, screen.width, screen.height);
+                    }
                 }
             }
             break;

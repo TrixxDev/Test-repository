@@ -174,8 +174,12 @@
   `KEY_*` (`include/keys.h`). Замыкает цепочку Dock → Finder → файл → Viewer.
   Проверка: `make demo-view` → `aurora_live_view.png` (Finder → двойной клик по
   `ABOUT.TXT` → Viewer показывает текст, прокрученный PgDn).
-- [ ] **ревизия архитектуры перед 10.0**: утечки окон/процессов/IPC, лимиты
-  (число окон/процессов), поведение при закрытии Finder/Dock.
+- [x] **9.9 стабилизация + стресс-тест → AuroraOS v1.0.0** (см.
+  [`docs/STABILITY.md`](docs/STABILITY.md)): исправлена утечка буфера окна (heap
+  доказанно плоский между раундами стресса), free при полном столе, reap окон
+  мёртвых владельцев, проверка владельца в `WM_DESTROY`; подтверждены reap
+  процессов (нет zombie), корректный лимит окон, дроп при переполнении mailbox,
+  закрытие/перезапуск Finder. Проверка: `make stress` + `tools/verify_drag.py`.
 - [ ] потом (когда десктоп «живой»): client-side surfaces, shared memory,
   анимации, сеть (virtio-net/TCP)
 
