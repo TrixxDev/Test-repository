@@ -24,6 +24,11 @@
 #define WM_CURSOR_W    12
 #define WM_CURSOR_H    18
 
+/* Color-key used for 1-bit transparency on borderless windows (e.g. the Dock's
+ * rounded panel): content pixels equal to this are not blitted, so the desktop
+ * shows through the panel's corners. Pick an unlikely magenta. */
+#define WM_COLOR_KEY   0xFF00FFu
+
 /* A window = an app-owned content surface + on-screen placement + z-order. */
 typedef struct {
     int            id;
@@ -31,6 +36,7 @@ typedef struct {
     int            z;           /* higher = closer to the front */
     int            visible;
     int            owner;       /* pid of the app that owns the window (for input) */
+    int            decorated;   /* 1 = title bar + shadow chrome; 0 = borderless (Dock) */
     const char    *title;
     gfx_surface_t *content;     /* the app's content surface (w x h, packed) */
 } window_t;
@@ -54,9 +60,18 @@ typedef struct {
 
 void wm_state_init(wm_state_t *st);
 /* Register a window owned by `owner` (pid); `pixels` is a caller-owned w*h*4
- * content buffer. Returns the window id. */
+ * content buffer. `decorated` = 1 for a normal window (title bar + shadow), 0
+ * for a borderless window (the Dock draws its own chrome). Returns the id. */
 int  wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
-               void *pixels, int owner);
+               void *pixels, int owner, int decorated);
+/* 1 if window `id` has chrome (title bar/shadow); 0 if borderless / unknown. */
+int  wm_is_decorated(wm_state_t *st, int id);
+/* Top-left of window `id`'s *content* on screen (chrome accounted for). Returns
+ * 1 and fills *ox,*oy, or 0 if unknown — used to map a pointer to app-local. */
+int  wm_content_origin(wm_state_t *st, int id, int *ox, int *oy);
+/* Force window `id` to the very front and keep it there (the Dock floats above
+ * ordinary windows; it is excluded from keyboard focus, see wm_focus_owner). */
+void wm_set_top(wm_state_t *st, int id);
 /* Owner pid of the focused (top-most visible) window, or -1 if none. */
 int  wm_focus_owner(wm_state_t *st);
 /* Id of the top-most visible window whose frame (title bar + content) contains
@@ -81,6 +96,7 @@ int  wm_window_bounds(wm_state_t *st, int id, int *bx, int *by, int *bw, int *bh
 /* Raise window `id` to the front (highest z) so it gains focus. */
 void wm_raise(wm_state_t *st, int id);
 void wm_draw_rect(wm_state_t *st, int id, int x, int y, int w, int h, uint32_t color);
+void wm_draw_round_rect(wm_state_t *st, int id, int x, int y, int w, int h, int r, uint32_t color);
 void wm_draw_text(wm_state_t *st, int id, int x, int y, const char *s, uint32_t color);
 void wm_clear(wm_state_t *st, int id, uint32_t color);
 void wm_move(wm_state_t *st, int id, int x, int y);
@@ -103,8 +119,12 @@ void wm_present(wm_state_t *st, gfx_surface_t *screen);
 
 #define WM_SERVICE "wm"
 
+/* WM_CREATE flags (req.flags). */
+#define WM_F_DOCK  1     /* borderless, pinned bottom-center, always on top,
+                          * excluded from keyboard focus, receives WM_POINTER  */
+
 enum {
-    WM_CREATE = 1,   /* app -> server: new window (w,h,title); reply = id      */
+    WM_CREATE = 1,   /* app -> server: new window (w,h,title,flags); reply = id */
     WM_DESTROY,      /* app -> server: destroy a window                        */
     WM_MOVE,         /* app -> server: move a window to (x,y)                  */
     WM_DRAW_RECT,    /* app -> server: fill a rect in the window's surface     */
@@ -114,6 +134,9 @@ enum {
                         (the character is in req.x)                            */
     WM_MOUSE,        /* mouse helper -> server: a pointer event
                         (req.x = dx, req.y = dy, req.w = button bitmask)       */
+    WM_DRAW_ROUND_RECT, /* app -> server: rounded rect (req.flags = radius)    */
+    WM_POINTER,      /* server -> app: pointer over the app's window
+                        (req.x,req.y = content-local; req.w = button bitmask)  */
 };
 
 typedef struct {
@@ -121,6 +144,7 @@ typedef struct {
     int      win;
     int      x, y, w, h;
     uint32_t color;
+    int      flags;        /* WM_CREATE: window flags; DRAW_ROUND_RECT: radius */
     char     str[48];      /* window title (CREATE) or text (DRAW_TEXT) */
 } wm_req_t;
 

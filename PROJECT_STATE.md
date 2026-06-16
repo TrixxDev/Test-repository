@@ -18,14 +18,15 @@ first slice of its macOS-like visual stack: a framebuffer, a 2D library with an
 8×16 font, and a **userspace window server** with an event loop that takes
 keyboard **and mouse** input and interactive Terminal apps — **confirmed running
 live in QEMU** (desktop, windows, on-screen keyboard echo, a moving cursor,
-click-to-focus, **title-bar window dragging** and a **close button**), with a
-**double-buffered, damage-driven compositor** that repaints only the rectangles
-that change rather than the whole screen on every event. It is **not** yet a
-daily-driver OS (no external networking yet — loopback only; a basic permission
-model — uid + rwx — but no login/groups; the Dock is still drawn by the desktop,
-not its own process — that's next).
+click-to-focus, **title-bar window dragging**, a **close button**, and a **Dock
+that is its own process** — a borderless GUI client that highlights icons on hover
+and launches apps on click), with a **double-buffered, damage-driven compositor**
+that repaints only the rectangles that change rather than the whole screen on every
+event. It is **not** yet a daily-driver OS (no external networking yet — loopback
+only; a basic permission model — uid + rwx — but no login/groups; no file manager
+yet — the Finder is next).
 
-- **Current version:** v0.9.8
+- **Current version:** v0.9.9
 - **Size:** ~6,800 lines of C / assembly (plus a generated 8×16 font header)
   across kernel + drivers + fs + libc + userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
@@ -49,9 +50,9 @@ not its own process — that's next).
 | Executables | ✅ | ELF32 loader (PT_LOAD), `argc`/`argv` setup, crt0. |
 | IPC | ✅ | Pipes (`pipe`/`dup2`), message passing (`msgsend`/`msgrecv`), named service registry. |
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
-| Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`. |
+| Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`, `save`, `wserver`, `term`, `dock`. |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | ✅ (9.0–9.5) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** + **keyboard & mouse pipelines** + interactive Terminals (surfaces, z-order, focus, window IPC, **cursor + click-to-focus + title-bar dragging + close button**). **Live-confirmed in QEMU** (`make verify-gui`, `make demo-focus`, `make demo-drag`, `make demo-close`). Dock-as-a-process (9.6) next. |
+| Graphics | ✅ (9.0–9.6) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** (damage-driven compositor) + **keyboard & mouse pipelines** + interactive Terminals + a **standalone Dock process** (surfaces, z-order, focus, window IPC, **cursor + click-to-focus + title-bar dragging + close button + pointer forwarding + Dock click-to-launch**). **Live-confirmed in QEMU** (`make verify-gui`, `make demo-focus`, `make demo-drag`, `make demo-close`, `make demo-dock`). Finder (9.7) next. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What it looks like
@@ -97,6 +98,9 @@ make gui      # GUI desktop via GRUB ISO (build + iso + qemu); needs grub-mkresc
 make live-shot      # boot headless + capture the live framebuffer -> aurora_live.png
 make verify-gui     # like live-shot, but type into the Terminal first (proves keyboard)
 make demo-focus     # move the mouse, click the back window to focus it, then type
+make demo-drag      # grab the front Terminal by its title bar and drag it
+make demo-close     # click the front Terminal's red close button (window exits)
+make demo-dock      # click the Dock's Terminal icon -> the Dock launches a Terminal
 make screenshot     # render the desktop to aurora_desktop.png (no QEMU needed)
 make screenshot-wm  # render the compositor (two windows) to aurora_windows.png
 make debug    # text boot, waits for GDB on :1234
@@ -117,7 +121,8 @@ kernel/      kmain, scheduler, process, pipe, socket, elf, syscall, gfx, desktop
 include/     kio.h, multiboot.h, syscall_abi.h (shared ABI), syscall.h, net.h (netd protocol)
 user/        crt0, libc (libc.h + libc/), wm (windowserver core: wm.h + wm.c),
              programs (init, logger, netd, sh, cat, grep, hello, orphan,
-             echosrv, echocli, save, wserver (windowserver), term (Terminal))
+             echosrv, echocli, save, wserver (windowserver), term (Terminal),
+             dock (Dock — borderless GUI client, click-to-launch))
 boot/        grub.cfg (for the `make iso` GRUB boot path)
 tools/       bin2c.py (embed ELF), mkfat32.py (FAT32 image), render_desktop.c +
              render_wm.c + ppm2png.py (host -> PNG), genfont.py (8×16 font header),

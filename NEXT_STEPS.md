@@ -104,7 +104,18 @@ app → window server → compositor → framebuffer
   (`wm_in_close_button`, drawn with a dark "×") destroys the window (`wm_destroy`)
   and tells its owner to exit via `WM_DESTROY`. Verified on the live framebuffer
   with `make demo-drag` / `make demo-close` (+ pixel asserts in
-  `tools/verify_drag.py`). Next: **9.6** Dock as its own process → **9.7**
+  `tools/verify_drag.py`).
+- **9.5.1 — damage-driven compositor — DONE (v0.9.8).** The scene composites into
+  an off-screen back buffer (`wm_compose`); only changed rectangles are pushed to
+  the framebuffer. A pointer move no longer repaints the whole screen; output is
+  pixel-identical to a full repaint.
+- **9.6 — Dock as its own process — DONE (v0.9.9), live-confirmed.** The Dock
+  (`user/dock.c`) left `desktop.c` and became the first standalone GUI client: a
+  borderless `WM_F_DOCK` window the server pins bottom-center, keeps always on top,
+  and excludes from keyboard focus, with color-key transparency for the rounded
+  panel. The server forwards pointer events to the window under the cursor
+  (`WM_POINTER`); the Dock highlights the hovered icon and launches apps on click
+  (double-`fork`+`exec`). Verified with `make demo-dock`. Next: **9.7**
   Launcher/Finder.
 
 Deferred until the desktop feels real (per the agreed priority): client-side
@@ -151,10 +162,11 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**Begin 9.6 — split the Dock into its own process.** 9.4/9.5 (window dragging +
-close button) are done and live-confirmed, so the desktop now has the core direct
-manipulation gestures. The next milestone is moving the Dock out of `kernel/desktop.c`
-into a real `dock` userspace app that owns a strip window and launches apps via IPC
-(e.g. clicking the Terminal icon asks init/a launcher to `spawn` a new Terminal).
-After that, a **Launcher/Finder** (9.7) as a windowed app over the existing
-VFS/FS-write. Both follow the same `app → IPC → windowserver` rule.
+**Begin 9.7 — Finder / Aurora Files.** 9.6 (the Dock as its own process) is done
+and live-confirmed: the Dock left `kernel/desktop.c`, became a borderless
+`WM_F_DOCK` window, and launches apps on click via the new `WM_POINTER` pointer
+forwarding. The next milestone is a **Launcher/Finder** as a windowed app over the
+existing VFS/FS-write: list a directory, scroll, and open a directory or launch an
+ELF on (double-)click — reusing the same `WM_POINTER` plumbing for row selection.
+Add it to the Dock's `F` icon (`/disk/FILES.ELF`). Bitmap UI only — no PNG icons,
+no network. It follows the same `app → IPC → windowserver` rule.

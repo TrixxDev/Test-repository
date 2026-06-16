@@ -31,7 +31,7 @@ EMBEDDED   := kernel/embedded_user.c
 USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/cat.elf user/grep.elf user/orphan.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
-              user/wserver.elf user/term.elf
+              user/wserver.elf user/term.elf user/dock.elf
 LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o
 # Portable graphics/compositor code, built for userspace and linked into wserver.
 WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
@@ -60,7 +60,9 @@ user/crt0.o: user/crt0.S
 user/libc/%.o: user/libc/%.c user/libc.h
 	$(CC) $(UCFLAGS) -c $< -o $@
 
-user/%.elf: user/%.c user/libc.h user/crt0.o $(LIBC_OBJ) user/user.ld
+# Depend on wm.h too: several apps (term, dock) share the window IPC struct, and
+# a change to it must rebuild every client or the message sizes drift out of sync.
+user/%.elf: user/%.c user/libc.h user/wm.h user/crt0.o $(LIBC_OBJ) user/user.ld
 	$(CC) $(UCFLAGS) -c user/$*.c -o user/$*.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/$*.o $(LIBC_OBJ) -o $@
 
@@ -87,7 +89,7 @@ $(DISK): $(USER_PROGS) user/poem.txt tools/mkfat32.py
 	    CAT.ELF user/cat.elf GREP.ELF user/grep.elf ORPHAN.ELF user/orphan.elf \
 	    NETD.ELF user/netd.elf ECHOSRV.ELF user/echosrv.elf ECHOCLI.ELF user/echocli.elf \
 	    SAVE.ELF user/save.elf WSERVER.ELF user/wserver.elf TERM.ELF user/term.elf \
-	    POEM.TXT user/poem.txt
+	    DOCK.ELF user/dock.elf POEM.TXT user/poem.txt
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -169,7 +171,7 @@ screenshot-wm:
 # live framebuffer to a PNG via the QEMU monitor — proves the GUI on actual
 # hardware emulation without needing a display. `verify-gui` types into the
 # Terminal first to also prove the keyboard pipeline.
-.PHONY: live-shot verify-gui demo-focus demo-drag demo-close
+.PHONY: live-shot verify-gui demo-focus demo-drag demo-close demo-dock
 live-shot: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live.png
 verify-gui: $(KERNEL) $(DISK)
@@ -190,6 +192,11 @@ demo-drag: $(KERNEL) $(DISK)
 demo-close: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_close.png \
 	    --mouse "move:26,40;click"
+# Phase 9.6: move onto the Dock's first icon (Terminal) and click it -> the Dock
+# (a separate process) launches a new Terminal ([dock] ready + a new window).
+demo-dock: $(KERNEL) $(DISK)
+	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_dock.png \
+	    --mouse "move:144,-324;click"
 
 clean:
 	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o

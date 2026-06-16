@@ -170,6 +170,7 @@ int main(int argc, char **argv)
 
     /* Event loop: one source (the mailbox) carries app requests, keys and mouse. */
     int prev_buttons = 0;
+    int dock_win = -1;                 /* the borderless Dock window, if any */
     drag_state_t drag = { 0, 0, 0, 0 };
     for (;;) {
         wm_req_t req;
@@ -180,14 +181,27 @@ int main(int argc, char **argv)
 
         switch (req.op) {
         case WM_CREATE: {
+            int dock = (req.flags & WM_F_DOCK) != 0;
+            int x = req.x, y = req.y;
+            if (dock) {                 /* pin the Dock to the bottom-center */
+                x = (screen.width  - req.w) / 2;
+                y =  screen.height - req.h - 16;
+            }
             void *px = malloc((size_t)req.w * req.h * 4);
-            int id = px ? wm_create(&st, req.x, req.y, req.w, req.h, req.str, px, from) : -1;
+            int id = px ? wm_create(&st, x, y, req.w, req.h, req.str, px, from, !dock) : -1;
+            if (id > 0 && dock) {
+                wm_set_top(&st, id);    /* the Dock floats above ordinary windows */
+                dock_win = id;
+            }
             wm_rep_t rep = { id > 0 ? 0 : -1, id };
             msgsend(from, &rep, sizeof(rep));
             break;
         }
         case WM_DRAW_RECT:
             wm_draw_rect(&st, req.win, req.x, req.y, req.w, req.h, req.color);
+            break;
+        case WM_DRAW_ROUND_RECT:
+            wm_draw_round_rect(&st, req.win, req.x, req.y, req.w, req.h, req.flags, req.color);
             break;
         case WM_DRAW_TEXT:
             wm_draw_text(&st, req.win, req.x, req.y, req.str, req.color);
@@ -264,9 +278,14 @@ int main(int argc, char **argv)
                 scene_changed = 1;                                           \
             } while (0)
 
-            if (press) {
-                int id = wm_window_at(&st, st.cursor_x, st.cursor_y);
-                if (id > 0) {
+            /* Topmost window under the pointer (may be the borderless Dock). */
+            int hit = wm_window_at(&st, st.cursor_x, st.cursor_y);
+
+            /* Chrome interactions (raise / drag / close) apply only to ordinary
+             * decorated windows; the Dock just receives the pointer event below. */
+            if (press && hit > 0 && wm_is_decorated(&st, hit)) {
+                int id = hit;
+                {
                     wm_raise(&st, id);              /* click-to-focus first */
                     if (wm_in_close_button(&st, id, st.cursor_x, st.cursor_y)) {
                         int bx, by, bw, bh;
@@ -323,6 +342,23 @@ int main(int argc, char **argv)
                 flush(dmg_x, dmg_y, dmg_w, dmg_h);
             flush(st.cursor_x, st.cursor_y, WM_CURSOR_W, WM_CURSOR_H);
             #undef ADD_DMG
+
+            /* Forward the pointer to the app under it (in content-local coords),
+             * unless a window is being dragged (the cursor is captured then).
+             * The Dock uses this for hover + click; ordinary apps may ignore it. */
+            if (hit > 0 && !drag.active) {
+                int ox, oy;
+                if (wm_content_origin(&st, hit, &ox, &oy)) {
+                    wm_req_t pe;
+                    memset(&pe, 0, sizeof(pe));
+                    pe.op  = WM_POINTER;
+                    pe.win = hit;
+                    pe.x   = st.cursor_x - ox;
+                    pe.y   = st.cursor_y - oy;
+                    pe.w   = buttons;
+                    msgsend(wm_owner_of(&st, hit), &pe, sizeof(pe));
+                }
+            }
             break;
         }
         default:

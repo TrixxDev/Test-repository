@@ -6,11 +6,43 @@
 
 /* ---- compositor primitives ---- */
 
+/* Blit a content surface but skip color-key pixels (1-bit transparency), so a
+ * borderless window (the Dock) can present a rounded panel over the desktop.
+ * Writes straight to the surface (clipped per row) — as cheap as gfx_blit; a
+ * per-pixel gfx_fill_rect here was slow enough to lag the compositor. */
+static void blit_keyed(gfx_surface_t *screen, int x, int y,
+                       const uint32_t *src, int sw, int sh)
+{
+    for (int yy = 0; yy < sh; yy++) {
+        int py = y + yy;
+        if (py < 0 || py >= screen->height)
+            continue;
+        const uint32_t *srow = &src[yy * sw];
+        uint32_t *drow = (uint32_t *)(screen->pixels + (uint32_t)py * screen->pitch);
+        for (int xx = 0; xx < sw; xx++) {
+            int px = x + xx;
+            if (px < 0 || px >= screen->width)
+                continue;
+            uint32_t c = srow[xx];
+            if (c != WM_COLOR_KEY)
+                drow[px] = c;
+        }
+    }
+}
+
 void wm_draw_window(gfx_surface_t *screen, const window_t *win)
 {
     int cw = win->content->width;
     int ch = win->content->height;
     int x = win->x, y = win->y;
+
+    /* Borderless (Dock): no chrome — just the content, color-keyed so its
+     * rounded corners let the desktop show through. */
+    if (!win->decorated) {
+        blit_keyed(screen, x, y, (const uint32_t *)win->content->pixels, cw, ch);
+        return;
+    }
+
     int total_h = ch + WM_TITLEBAR_H;
 
     uint32_t title_bg = GFX_RGB(0xec, 0xec, 0xf0);
@@ -95,7 +127,7 @@ void wm_state_init(wm_state_t *st)
 }
 
 int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
-              void *pixels, int owner)
+              void *pixels, int owner, int decorated)
 {
     for (int i = 0; i < WM_MAX_WINDOWS; i++) {
         if (st->used[i])
@@ -111,6 +143,7 @@ int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
         st->win[i].z = st->next_z++;
         st->win[i].visible = 1;
         st->win[i].owner = owner;
+        st->win[i].decorated = decorated;
         st->win[i].title = st->titles[i];
         st->win[i].content = &st->surf[i];
         return st->win[i].id;
@@ -121,19 +154,23 @@ int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
 int wm_focus_owner(wm_state_t *st)
 {
     int best = -1, best_z = -1;
+    /* Only decorated windows take keyboard focus — the Dock floats on top but
+     * must never steal keys from the Terminal underneath it. */
     for (int i = 0; i < WM_MAX_WINDOWS; i++)
-        if (st->used[i] && st->win[i].visible && st->win[i].z > best_z) {
+        if (st->used[i] && st->win[i].visible && st->win[i].decorated &&
+            st->win[i].z > best_z) {
             best_z = st->win[i].z;
             best = st->win[i].owner;
         }
     return best;
 }
 
-/* A window's full frame is its content box plus the title bar on top. */
+/* A decorated window's frame is its content box plus the title bar on top; a
+ * borderless window is just its content box. */
 static int frame_hit(const window_t *w, int x, int y)
 {
     int cw = w->content->width;
-    int total_h = w->content->height + WM_TITLEBAR_H;
+    int total_h = w->content->height + (w->decorated ? WM_TITLEBAR_H : 0);
     return x >= w->x && x < w->x + cw && y >= w->y && y < w->y + total_h;
 }
 
@@ -152,7 +189,7 @@ int wm_window_at(wm_state_t *st, int x, int y)
 int wm_in_titlebar(wm_state_t *st, int id, int x, int y)
 {
     int s = slot_of(st, id);
-    if (s < 0)
+    if (s < 0 || !st->win[s].decorated)
         return 0;
     window_t *w = &st->win[s];
     return x >= w->x && x < w->x + w->content->width &&
@@ -164,11 +201,38 @@ int wm_in_titlebar(wm_state_t *st, int id, int x, int y)
 int wm_in_close_button(wm_state_t *st, int id, int x, int y)
 {
     int s = slot_of(st, id);
-    if (s < 0)
+    if (s < 0 || !st->win[s].decorated)
         return 0;
     int cx = st->win[s].x + 16, cy = st->win[s].y + 14;
     int dx = x - cx, dy = y - cy;
     return dx * dx + dy * dy <= 9 * 9;
+}
+
+int wm_is_decorated(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    return s < 0 ? 0 : st->win[s].decorated;
+}
+
+/* Screen position of a window's content (below the title bar if decorated). */
+int wm_content_origin(wm_state_t *st, int id, int *ox, int *oy)
+{
+    int s = slot_of(st, id);
+    if (s < 0)
+        return 0;
+    if (ox) *ox = st->win[s].x;
+    if (oy) *oy = st->win[s].y + (st->win[s].decorated ? WM_TITLEBAR_H : 0);
+    return 1;
+}
+
+/* Keep the Dock above everything: a z so large that wm_raise (next_z++) never
+ * catches up within a session. */
+#define WM_TOP_Z 0x40000000
+void wm_set_top(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    if (s >= 0)
+        st->win[s].z = WM_TOP_Z;
 }
 
 int wm_window_x(wm_state_t *st, int id)
@@ -205,15 +269,21 @@ int wm_window_bounds(wm_state_t *st, int id, int *bx, int *by, int *bw, int *bh)
     int s = slot_of(st, id);
     if (s < 0)
         return 0;
-    /* The window spans content + title bar; wm_draw_window adds a hard drop
-     * shadow offset by (+4, +6), so the on-screen footprint is that much wider
-     * and taller. (Keep this in sync with WIN_RADIUS/shadow in wm_draw_window.) */
+    /* A decorated window spans content + title bar; wm_draw_window adds a hard
+     * drop shadow offset by (+4, +6), so the footprint is that much wider/taller.
+     * A borderless window is exactly its content box. (Keep in sync with the
+     * shadow in wm_draw_window.) */
     int cw = st->win[s].content->width;
-    int total_h = st->win[s].content->height + WM_TITLEBAR_H;
+    int ch = st->win[s].content->height;
     *bx = st->win[s].x;
     *by = st->win[s].y;
-    *bw = cw + 4;
-    *bh = total_h + 6;
+    if (st->win[s].decorated) {
+        *bw = cw + 4;
+        *bh = ch + WM_TITLEBAR_H + 6;
+    } else {
+        *bw = cw;
+        *bh = ch;
+    }
     return 1;
 }
 
@@ -234,6 +304,12 @@ void wm_draw_rect(wm_state_t *st, int id, int x, int y, int w, int h, uint32_t c
 {
     int s = slot_of(st, id);
     if (s >= 0) gfx_fill_rect(&st->surf[s], x, y, w, h, color);
+}
+
+void wm_draw_round_rect(wm_state_t *st, int id, int x, int y, int w, int h, int r, uint32_t color)
+{
+    int s = slot_of(st, id);
+    if (s >= 0) gfx_fill_round_rect(&st->surf[s], x, y, w, h, r, color);
 }
 
 void wm_draw_text(wm_state_t *st, int id, int x, int y, const char *str, uint32_t color)

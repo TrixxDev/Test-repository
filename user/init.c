@@ -48,8 +48,10 @@ int main(int argc, char **argv)
      * text console gets the interactive shell, exactly as before. */
     int shpid = -1;
     if (fb_active()) {
-        printf("[init] graphics mode: window server + Terminals\n");
+        printf("[init] graphics mode: window server + Dock + Terminals\n");
         start("/disk/WSERVER.ELF");                 /* root */
+        /* The Dock is its own GUI client now (9.6), not part of the desktop. */
+        start_uid("/disk/DOCK.ELF", UID_USER);
         /* Two staggered, overlapping Terminals so the pointer can demonstrate
          * click-to-focus (click the back window to raise it). */
         char *t1[] = { "/disk/TERM.ELF", "200", "150", "Terminal", 0 };

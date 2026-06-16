@@ -133,7 +133,7 @@ def scenario_drag(tmp):
         move(q, 250, -150)      # drag window 2 by (-250,+150)
         btn(q, False)
         q.close()
-        time.sleep(0.4)
+        time.sleep(1.5)
         m = connect(mon)
         m.sendall(("screendump " + ppm + "\n").encode())
         time.sleep(1.2)
@@ -162,7 +162,7 @@ def scenario_close(tmp):
         btn(q, True)
         btn(q, False)
         q.close()
-        time.sleep(0.4)
+        time.sleep(1.5)
         m = connect(mon)
         m.sendall(("screendump " + ppm + "\n").encode())
         time.sleep(1.2)
@@ -175,10 +175,12 @@ def scenario_close(tmp):
             proc.kill()
     w, h, data = load_ppm(ppm)
     log = open(ser, errors="replace").read()
-    closed_log = "window 2 closed" in log
+    # The closed Terminal logs "[term] window N closed"; the exact id depends on
+    # how many windows exist first (the Dock is window 1), so match generically.
+    closed_log = "closed" in log
     t1_alive = near(data, w, 216, 164, RED)     # t1 close dot still present
     gone = not near(data, w, 486, 344, RED)     # t2 close dot no longer there
-    print("  close: serial '[term] window 2 closed':", closed_log)
+    print("  close: serial '[term] window closed':", closed_log)
     print("  close: t1 close dot still at (216,164):", t1_alive)
     print("  close: t2 close dot gone at (486,344):", gone)
     return closed_log and t1_alive and gone

@@ -1,14 +1,18 @@
 # AuroraOS Input & Pointer — Phase 9.3+
 
-**Status: 9.3 (mouse + cursor + click-to-focus) and 9.4/9.5 (window dragging +
-close button) are implemented and verified live in QEMU (v0.9.7).** The PS/2 mouse
-driver + IRQ12, the cursor, hit-testing, click-to-focus, title-bar dragging and the
-close button all work on the real framebuffer; regenerate the proofs with
-`make demo-focus` (→ `aurora_live_focus.png`: the back window is clicked, raised,
-and typed into), `make demo-drag` (→ `aurora_live_drag.png`: the front Terminal is
-grabbed by its title bar and moved) and `make demo-close` (→ `aurora_live_close.png`:
-its red button is clicked and the window disappears). `tools/verify_drag.py`
-pixel-asserts the last two. This doc is the design + the as-built reference.
+**Status: 9.3 (mouse + cursor + click-to-focus), 9.4/9.5 (window dragging +
+close button) and 9.6 (the Dock as a separate process) are implemented and
+verified live in QEMU (v0.9.9).** The PS/2 mouse driver + IRQ12, the cursor,
+hit-testing, click-to-focus, title-bar dragging and the close button all work on
+the real framebuffer; the windowserver also **forwards pointer events to the app
+under the cursor** (`WM_POINTER`), which the Dock uses for hover + click-to-launch.
+Regenerate the proofs with `make demo-focus` (→ `aurora_live_focus.png`: the back
+window is clicked, raised, and typed into), `make demo-drag` (→ `aurora_live_drag.png`:
+the front Terminal is grabbed by its title bar and moved), `make demo-close`
+(→ `aurora_live_close.png`: its red button is clicked and the window disappears)
+and `make demo-dock` (→ `aurora_live_dock.png`: a Dock icon is clicked and a new
+Terminal launches). `tools/verify_drag.py` pixel-asserts drag + close. This doc is
+the design + the as-built reference.
 
 ## Data flow (mirrors the keyboard pipeline)
 
@@ -86,10 +90,22 @@ server branches on `op`.)
   small dark "×") destroys the window (`wm_destroy`) and sends its `owner` a
   `WM_DESTROY` message; the app (e.g. `user/term.c`) treats that as "quit" and
   exits, so init reaps it. Drawn/handled entirely in userspace.
-- **9.6 — Dock as its own process. NEXT.** Split the Dock out of `desktop.c` into a
-  `dock` app that owns a strip window and launches apps via IPC.
+- **9.6 — Dock as its own process. DONE.** The Dock (`user/dock.c`) is no longer
+  drawn by `desktop.c`; it is an ordinary userspace app and the first standalone
+  GUI client of the window server. It asks for a **borderless** window with the
+  `WM_F_DOCK` flag, which the server pins to the bottom-center, keeps always on top
+  (a fixed high z), and excludes from keyboard focus (`wm_focus_owner` skips
+  non-decorated windows). It draws a rounded panel of icons using a new
+  `WM_DRAW_ROUND_RECT` request, with the panel's corners left at `WM_COLOR_KEY` so
+  the desktop shows through (1-bit transparency in the compositor's `blit_keyed`).
+  To make it interactive, the server **forwards pointer events** to the window
+  under the cursor as `WM_POINTER` (content-local `x,y` + button mask), unless a
+  drag is in progress; the Dock highlights the hovered icon and, on a left-click,
+  launches the app (`fork` + double-`fork` + `exec`, so the new app reparents to
+  init for reaping). Proof: `make demo-dock`.
 - **9.7 — Launcher / Finder** (`Aurora Files`) as real windowed apps over the VFS
-  (FS write already exists).
+  (FS write already exists). **NEXT.** It will reuse the same `WM_POINTER` plumbing
+  the Dock introduced (click a file row → open/launch).
 
 Note: the cursor/hit-test/focus/drag logic is pure and can be exercised with the
 off-screen renderer (drive `wm_*` + synthetic mouse events) *if* useful — but the
@@ -108,6 +124,6 @@ Dock + menus, not from render throughput.
 
 ```
 9.2 (live ✅) → 9.3 cursor + click-to-focus (✅) → 9.4/9.5 window dragging + close (✅)
-             → 9.6 Dock process (next) → 9.7 Launcher/Finder
+             → 9.6 Dock process (✅) → 9.7 Launcher/Finder (next)
 later: client-side surfaces · shared memory · animations · networking
 ```
