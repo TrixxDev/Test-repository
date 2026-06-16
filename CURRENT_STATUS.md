@@ -3,25 +3,27 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.10.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.11.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
 netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
 (framebuffer + 2D library with an 8×16 font + desktop; a userspace, event-driven
 **windowserver** with a keyboard input pipeline + interactive Terminal) are
-implemented and build clean. **Phases 9.2–9.7 are confirmed live in QEMU**:
+implemented and build clean. **Phases 9.2–9.8 are confirmed live in QEMU**:
 the Bochs-VBE framebuffer comes up, the windowserver paints the desktop, Terminal
 windows open, typing flows keyboard → windowserver → focused app → on-screen
 redraw, the **PS/2 mouse** moves an on-screen cursor + **clicks to focus**
 (click a window to raise it; keys then route to it), a window can be
 **dragged by its title bar** and **closed with the red title-bar button**, the
 **Dock is its own process** — a borderless, always-on-top GUI client that draws
-its icons, highlights on hover, and **launches apps on click** — and the
-**Finder (`Aurora Files`) browses the filesystem**: it lists `/disk` via the new
-`readdir` syscall (the VFS, used through ordinary syscalls like the shell — no
-special privileges), selects a row on click, and on a second click **opens** it
-(a directory is entered, an `.ELF` is exec'd). All captured to PNG via
-`make verify-gui` / `make demo-focus` / `make demo-drag` / `make demo-close` /
-`make demo-dock` / `make demo-files` (drag + close pixel-asserted by
+its icons, highlights on hover, and **launches apps on click** — the
+**Finder (`Aurora Files`) browses the filesystem** (lists `/disk` via the
+`readdir` syscall — the VFS used through ordinary syscalls like the shell, no
+special privileges; click selects, a second click opens: enter a directory / exec
+an `.ELF`) — and the **Text Viewer renders file contents** (`open`/`read`/`close`
++ the 8×16 font, scrolled with the arrow keys / PgUp/PgDn, now that the keyboard
+driver decodes extended scancodes). All captured to PNG via `make verify-gui` /
+`make demo-focus` / `make demo-drag` / `make demo-close` / `make demo-dock` /
+`make demo-files` / `make demo-view` (drag + close pixel-asserted by
 `tools/verify_drag.py`). The compositor is **double-buffered and damage-driven
 (v0.9.8)** — events repaint only the rectangles that changed instead of the whole
 screen (a pointer move no longer recomposites the desktop), output verified
@@ -62,9 +64,11 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 | 9.5.1 | **Damage-driven compositor**: off-screen back buffer (`wm_compose`) + per-event dirty-rect blits (`wm_window_bounds`); pointer moves no longer repaint the whole screen | v0.9.8 | ✅ live-confirmed in QEMU (pixel-identical to full repaint) |
 | 9.6 | **Dock as a separate process** (`user/dock.c`): borderless `WM_F_DOCK` window, color-key transparency, `WM_POINTER` forwarding → hover + **click-to-launch** apps | v0.9.9 | ✅ live-confirmed in QEMU (`make demo-dock`) |
 | 9.7 | **Finder** (`user/files.c`, `Aurora Files`): lists `/disk` via the `readdir` syscall, click-to-select, click-again-to-open (enter dir / exec `.ELF`) | v0.9.10 | ✅ live-confirmed in QEMU (`make demo-files`) |
-| 9.8 | Text Viewer (`Viewer.app`) — open `POEM.TXT` from the Finder | — | ⏳ NEXT |
-| 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
-| 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
+| 9.8 | **Text Viewer** (`user/viewer.c`): `open`/`read`/`close` + 8×16 font, arrow/PgUp/PgDn scroll (keyboard now decodes extended scancodes) | v0.9.11 | ✅ live-confirmed in QEMU (`make demo-view`) |
+| — | **Architecture audit** before 10.0 (window/process/IPC leaks, limits, teardown) | — | ⏳ NEXT |
+| 10.0 | **Desktop Environment milestone** (consolidate window server + Dock + Finder + Viewer + Terminal; system menu, settings) | — | ⏳ after audit |
+| 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after the desktop milestone |
+| 10.1 | Aurora Assistant (userspace `aurorad`) + more desktop apps | — | ⏳ later |
 
 ## Verified behaviors
 
@@ -139,6 +143,14 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
   detached (double-`fork`+`exec`, reparented to init). **Confirmed live**: `make
   demo-files` opens the Finder from the Dock's Files icon, lists `/disk`, and
   double-clicks `TERM.ELF` to launch a Terminal (`aurora_live_files.png`).
+- Text Viewer (9.8): `user/viewer.c` is launched by the Finder for non-`.ELF`
+  files; it `open`/`read`/`close`s the file (capped at 64 KiB), splits it into
+  lines (LF/CRLF) and renders them with the 8×16 font, scrolling with the arrow
+  keys / PgUp/PgDn / j-k-space. This needed the keyboard driver to decode the
+  `0xE0` extended scancodes (arrows, PgUp/PgDn, Home/End) into shared `KEY_*`
+  codes (`include/keys.h`) that flow through the existing char pipeline →
+  `WM_KEY`. **Confirmed live**: `make demo-view` opens the Finder, double-clicks
+  `ABOUT.TXT`, and the Viewer shows it scrolled by PgDn (`aurora_live_view.png`).
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.
@@ -159,7 +171,7 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 - **user:** crt0, libc (libc.h + string/printf/malloc/net), wm (compositor core),
   init, logger, netd, sh, cat, grep, hello, orphan, echosrv, echocli, save,
   wserver (windowserver), term (Terminal app), dock (Dock app),
-  files (Finder / Aurora Files).
+  files (Finder / Aurora Files), viewer (Text Viewer).
 - **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py,
   genfont.py, screendump.py (headless live-framebuffer capture via QEMU monitor),
   verify_drag.py (pixel-asserts window drag + close).

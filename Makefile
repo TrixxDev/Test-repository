@@ -31,7 +31,8 @@ EMBEDDED   := kernel/embedded_user.c
 USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/cat.elf user/grep.elf user/orphan.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
-              user/wserver.elf user/term.elf user/dock.elf user/files.elf
+              user/wserver.elf user/term.elf user/dock.elf user/files.elf \
+              user/viewer.elf
 LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o
 # Portable graphics/compositor code, built for userspace and linked into wserver.
 WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
@@ -83,13 +84,14 @@ $(EMBEDDED): user/init.elf tools/bin2c.py
 	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
 
 # --- FAT32 disk image containing the user programs + a sample text file ---
-$(DISK): $(USER_PROGS) user/poem.txt tools/mkfat32.py
+$(DISK): $(USER_PROGS) user/poem.txt user/about.txt tools/mkfat32.py
 	python3 tools/mkfat32.py $(DISK) INIT.ELF user/init.elf LOGGER.ELF user/logger.elf \
 	    SH.ELF user/sh.elf HELLO.ELF user/hello.elf \
 	    CAT.ELF user/cat.elf GREP.ELF user/grep.elf ORPHAN.ELF user/orphan.elf \
 	    NETD.ELF user/netd.elf ECHOSRV.ELF user/echosrv.elf ECHOCLI.ELF user/echocli.elf \
 	    SAVE.ELF user/save.elf WSERVER.ELF user/wserver.elf TERM.ELF user/term.elf \
-	    DOCK.ELF user/dock.elf FILES.ELF user/files.elf POEM.TXT user/poem.txt
+	    DOCK.ELF user/dock.elf FILES.ELF user/files.elf VIEWER.ELF user/viewer.elf \
+	    ABOUT.TXT user/about.txt POEM.TXT user/poem.txt
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -171,7 +173,7 @@ screenshot-wm:
 # live framebuffer to a PNG via the QEMU monitor — proves the GUI on actual
 # hardware emulation without needing a display. `verify-gui` types into the
 # Terminal first to also prove the keyboard pipeline.
-.PHONY: live-shot verify-gui demo-focus demo-drag demo-close demo-dock demo-files
+.PHONY: live-shot verify-gui demo-focus demo-drag demo-close demo-dock demo-files demo-view
 live-shot: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live.png
 verify-gui: $(KERNEL) $(DISK)
@@ -203,6 +205,13 @@ demo-dock: $(KERNEL) $(DISK)
 demo-files: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_files.png \
 	    --mouse "move:72,-324;click;wait:2;move:90,274;click;click;wait:2"
+# Phase 9.8: open the Finder from the Dock, double-click ABOUT.TXT -> the Finder
+# hands it to the Viewer, which open/read/renders the text; then PgDn scrolls it.
+# Proves the full Dock -> Finder -> file -> Viewer chain and arrow/PgDn input.
+demo-view: $(KERNEL) $(DISK)
+	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_view.png \
+	    --mouse "move:72,-324;click;wait:2;move:90,194;click;click;wait:2" \
+	    --keys pgdn
 
 clean:
 	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o

@@ -166,7 +166,16 @@
   повторный клик по строке — открытие (каталог → вход, `.ELF` → exec, прочее →
   Viewer в 9.8). Цепочка Dock → Finder → приложение. Проверка: `make demo-files`
   → `aurora_live_files.png` (открыт Finder, двойной клик по `TERM.ELF` запускает
-  Terminal). Затем 9.8 Text Viewer.
+  Terminal).
+- [x] **9.8 Text Viewer — ПОДТВЕРЖДЕНО в QEMU (v0.9.11)**: `user/viewer.c`
+  открывает текстовый файл (`open`/`read`/`close`, лимит 64 KiB), рисует его
+  шрифтом 8×16 и прокручивает стрелками/PgUp-PgDn/j-k. Для этого драйвер
+  клавиатуры научился декодировать расширенные (`0xE0`) скан-коды в общие коды
+  `KEY_*` (`include/keys.h`). Замыкает цепочку Dock → Finder → файл → Viewer.
+  Проверка: `make demo-view` → `aurora_live_view.png` (Finder → двойной клик по
+  `ABOUT.TXT` → Viewer показывает текст, прокрученный PgDn).
+- [ ] **ревизия архитектуры перед 10.0**: утечки окон/процессов/IPC, лимиты
+  (число окон/процессов), поведение при закрытии Finder/Dock.
 - [ ] потом (когда десктоп «живой»): client-side surfaces, shared memory,
   анимации, сеть (virtio-net/TCP)
 

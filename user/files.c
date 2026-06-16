@@ -14,7 +14,7 @@
 #include "wm.h"
 
 #define W        380
-#define H        380
+#define H        420
 #define HEADER_H 26
 #define ROW_H    20
 #define LIST_Y   HEADER_H

@@ -4,6 +4,7 @@
 #include "isr.h"
 #include "io.h"
 #include "kio.h"
+#include "keys.h"
 #include "scheduler.h"
 
 #define KBD_DATA_PORT 0x60
@@ -27,6 +28,23 @@ static const char keymap_shift[128] = {
 };
 
 static int shift_down;
+static int extended;        /* set by the 0xE0 prefix; next byte is an ext. key */
+
+/* Map an extended (0xE0-prefixed) make code to a KEY_* code, or 0 if unhandled. */
+static char extended_key(uint8_t sc)
+{
+    switch (sc) {
+    case 0x48: return KEY_UP;
+    case 0x50: return KEY_DOWN;
+    case 0x4B: return KEY_LEFT;
+    case 0x4D: return KEY_RIGHT;
+    case 0x49: return KEY_PGUP;
+    case 0x51: return KEY_PGDN;
+    case 0x47: return KEY_HOME;
+    case 0x4F: return KEY_END;
+    default:   return 0;
+    }
+}
 
 static char     kbuf[KBUF_SIZE];
 static volatile int khead, ktail;
@@ -54,12 +72,27 @@ static void on_key(registers_t *regs)
         return;
     uint8_t scancode = inb(KBD_DATA_PORT);
 
-    if (scancode & 0x80) {
-        uint8_t released = scancode & 0x7F;
-        if (released == 0x2A || released == 0x36)
-            shift_down = 0;
+    if (scancode == 0xE0) {     /* prefix: the next byte is an extended key */
+        extended = 1;
         return;
     }
+
+    if (scancode & 0x80) {      /* a key was released */
+        uint8_t released = scancode & 0x7F;
+        if (!extended && (released == 0x2A || released == 0x36))
+            shift_down = 0;
+        extended = 0;           /* consume the extended release too */
+        return;
+    }
+
+    if (extended) {             /* an extended make: arrows, PgUp/PgDn, Home/End */
+        extended = 0;
+        char k = extended_key(scancode);
+        if (k)
+            kbuf_push(k);       /* no echo for control keys */
+        return;
+    }
+
     if (scancode == 0x2A || scancode == 0x36) {
         shift_down = 1;
         return;

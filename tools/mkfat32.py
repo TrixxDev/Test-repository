@@ -75,9 +75,18 @@ def main():
 
     set_fat(0, 0x0FFFFFF8)
     set_fat(1, FAT_EOC)
-    set_fat(ROOT_CLUS, FAT_EOC)
 
-    next_cluster = 3
+    # The root directory may need more than one cluster (32 bytes/entry). Reserve
+    # and chain enough clusters for every entry; the kernel walks the chain via
+    # fat_next, and consecutive clusters are contiguous on disk so a flat write
+    # over them stays correct. Files are placed after the root-dir clusters.
+    entries_per_clus = clus_bytes // 32
+    root_clusters = max(1, (len(files) + entries_per_clus - 1) // entries_per_clus)
+    for i in range(root_clusters):
+        c = ROOT_CLUS + i
+        set_fat(c, FAT_EOC if i == root_clusters - 1 else c + 1)
+
+    next_cluster = ROOT_CLUS + root_clusters
     placements = []     # (name, first_cluster, data)
     for name, data in files:
         nclus = max(1, (len(data) + clus_bytes - 1) // clus_bytes)

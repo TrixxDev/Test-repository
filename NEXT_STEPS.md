@@ -124,7 +124,16 @@ app → window server → compositor → framebuffer
   the Viewer in 9.8). It reuses the Dock's `WM_POINTER` plumbing for row hits and
   the double-`fork`+`exec` spawn pattern. Verified with `make demo-files` (opens
   from the Dock's Files icon, lists `/disk`, double-clicks `TERM.ELF` to launch a
-  Terminal). Next: **9.8** Text Viewer.
+  Terminal).
+- **9.8 — Text Viewer — DONE (v0.9.11), live-confirmed.** `user/viewer.c` is the
+  app the Finder hands non-`.ELF` files to: it `open`/`read`/`close`s the file
+  (capped at `VIEWER_MAX_FILE` = 64 KiB), splits it into lines (LF/CRLF) and draws
+  them with the 8×16 font, scrolling with the arrow keys / PgUp/PgDn / j-k-space.
+  This required the keyboard driver to decode `0xE0` **extended scancodes** into
+  shared `KEY_*` codes (`include/keys.h`) that flow through the existing char
+  pipeline → `WM_KEY`. Verified with `make demo-view` (the Finder opens `ABOUT.TXT`
+  in the Viewer, then PgDn scrolls it). This closes the **Dock → Finder → file →
+  Viewer** chain — the GUI now works with user *data*, not just windows.
 
 Deferred until the desktop feels real (per the agreed priority): client-side
 shared-memory surfaces, animations, and the network stack. The current
@@ -170,13 +179,26 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**Begin 9.8 — Text Viewer (`Viewer.app`).** 9.7 (the Finder, `Aurora Files`) is
-done and live-confirmed: it lists `/disk` via the new `readdir` syscall and opens
-entries on click (enter a directory / exec an `.ELF`). The Finder already routes
-non-`.ELF` files to `/disk/VIEWER.ELF <path>`, so the next milestone is that
-Viewer: a windowed app that `open`/`read`s a text file (e.g. `POEM.TXT`) and
-renders it with the 8×16 font, scrollable with the arrow keys (`WM_KEY`). That
-completes the **Dock → Finder → Viewer** chain. Bitmap UI only — no rich text, no
-network. After it: **9.9** an App Launcher, then the **10.0** Desktop Environment
-milestone (system menu, settings). It follows the same `app → IPC → windowserver`
-rule, reusing `WM_KEY`/`WM_POINTER` and the `readdir`/`open`/`read` syscalls.
+**Architecture audit before the 10.0 milestone.** The full user-facing chain is
+now live (Dock → Finder → file → Viewer; Terminal; window drag/close). Before
+building more on top, sweep for the leaks and limits that will bite once the
+desktop is used in earnest:
+
+- **Window leaks:** does closing an app free its `wm_state` slot and content
+  surface? (The server `malloc`s each window's pixels; `wm_destroy` frees the slot
+  but the buffer is never `free`d — fix or document.) Confirm `WM_MAX_WINDOWS`
+  behaviour when full.
+- **Process leaks:** apps are spawned double-fork → reparented to init; confirm
+  init actually reaps them (no zombies) over many open/close cycles. Check
+  `MAX_PROCS` headroom with Dock + Finder + several Terminals/Viewers.
+- **IPC / dangling endpoints:** when a window owner dies, does the server ever
+  `msgsend` to a dead pid? (`find_proc` returns NULL → `-1`, so safe, but audit
+  the focus/pointer paths.) Confirm mailboxes drain and nothing wedges at
+  `MBOX_LIMIT`.
+- **Teardown:** closing the Dock or Finder shouldn't break the session; graceful
+  shutdown should still reap everything.
+
+Write the findings up (and a stress demo if useful), fix the cheap ones, then
+declare **10.0 — Desktop Environment**: window server + Dock + Finder + Viewer +
+Terminal, consolidated, with a system menu/settings. Networking (8B: virtio-net →
+TCP) comes *after* the 10.0 milestone, per the agreed desktop-first priority.
