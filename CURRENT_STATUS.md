@@ -3,7 +3,7 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.7.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.8.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
 netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
 (framebuffer + 2D library with an 8×16 font + desktop; a userspace, event-driven
@@ -15,9 +15,12 @@ redraw, the **PS/2 mouse** moves an on-screen cursor + **clicks to focus**
 (click a window to raise it; keys then route to it), and a window can be
 **dragged by its title bar** and **closed with the red title-bar button** — all
 captured to PNG via `make verify-gui` / `make demo-focus` / `make demo-drag` /
-`make demo-close` (and pixel-asserted by `tools/verify_drag.py`). FS write and the
-rendering/window-server core are additionally verified on the host (the real
-`fs/fat32.c` write path + image re-parse; the real
+`make demo-close` (and pixel-asserted by `tools/verify_drag.py`). The compositor
+is now **double-buffered and damage-driven (v0.9.8)** — events repaint only the
+rectangles that changed instead of the whole screen (a pointer move no longer
+recomposites the desktop), output verified pixel-identical to the old full
+repaint. FS write and the rendering/window-server core are additionally verified
+on the host (the real `fs/fat32.c` write path + image re-parse; the real
 `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 
 > **v0.9.5 fix.** The live framebuffer was being blocked by a real
@@ -50,6 +53,7 @@ rendering/window-server core are additionally verified on the host (the real
 | 9.2 | Event-driven **windowserver** + keyboard pipeline + interactive Terminal; `fb_map`/`fb_active`; frame consistency | v0.9.5 | ✅ live-confirmed in QEMU (`make verify-gui`) |
 | 9.3 | **PS/2 mouse + IRQ12** → cursor → hit-test → **click-to-focus** (`SYS_MOUSE`, `wm_window_at`/`wm_raise`) | v0.9.6 | ✅ live-confirmed in QEMU (`make demo-focus`) |
 | 9.4/9.5 | **Window dragging** (title-bar grab → `wm_move_clamped`) + **close button** (`wm_in_close_button` → `wm_destroy` → app exits) | v0.9.7 | ✅ live-confirmed in QEMU (`make demo-drag`/`make demo-close`) |
+| 9.5.1 | **Damage-driven compositor**: off-screen back buffer (`wm_compose`) + per-event dirty-rect blits (`wm_window_bounds`); pointer moves no longer repaint the whole screen | v0.9.8 | ✅ live-confirmed in QEMU (pixel-identical to full repaint) |
 | 9.6/9.7 | Dock process → Launcher/Finder (design in docs/INPUT.md) | — | ⏳ NEXT |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |

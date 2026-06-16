@@ -189,6 +189,34 @@ int wm_owner_of(wm_state_t *st, int id)
     return s < 0 ? -1 : st->win[s].owner;
 }
 
+int wm_window_of_owner(wm_state_t *st, int owner)
+{
+    int best = -1, best_z = -1;
+    for (int i = 0; i < WM_MAX_WINDOWS; i++)
+        if (st->used[i] && st->win[i].owner == owner && st->win[i].z > best_z) {
+            best_z = st->win[i].z;
+            best = st->win[i].id;
+        }
+    return best;
+}
+
+int wm_window_bounds(wm_state_t *st, int id, int *bx, int *by, int *bw, int *bh)
+{
+    int s = slot_of(st, id);
+    if (s < 0)
+        return 0;
+    /* The window spans content + title bar; wm_draw_window adds a hard drop
+     * shadow offset by (+4, +6), so the on-screen footprint is that much wider
+     * and taller. (Keep this in sync with WIN_RADIUS/shadow in wm_draw_window.) */
+    int cw = st->win[s].content->width;
+    int total_h = st->win[s].content->height + WM_TITLEBAR_H;
+    *bx = st->win[s].x;
+    *by = st->win[s].y;
+    *bw = cw + 4;
+    *bh = total_h + 6;
+    return 1;
+}
+
 void wm_raise(wm_state_t *st, int id)
 {
     int s = slot_of(st, id);
@@ -265,7 +293,7 @@ static const char *const cursor_glyph[] = {
     "      ###",
 };
 
-static void wm_draw_cursor(gfx_surface_t *screen, int px, int py)
+void wm_draw_cursor(gfx_surface_t *screen, int px, int py)
 {
     uint32_t outline = GFX_RGB(0x11, 0x11, 0x14);
     uint32_t fill    = GFX_RGB(0xff, 0xff, 0xff);
@@ -282,7 +310,7 @@ static void wm_draw_cursor(gfx_surface_t *screen, int px, int py)
     }
 }
 
-void wm_present(wm_state_t *st, gfx_surface_t *screen)
+void wm_compose(wm_state_t *st, gfx_surface_t *screen)
 {
     desktop_render(screen);                   /* wallpaper + menu bar + dock */
     window_t *vis[WM_MAX_WINDOWS];
@@ -290,7 +318,12 @@ void wm_present(wm_state_t *st, gfx_surface_t *screen)
     for (int i = 0; i < WM_MAX_WINDOWS; i++)
         if (st->used[i] && st->win[i].visible)
             vis[n++] = &st->win[i];
-    wm_composite(screen, vis, n);
+    wm_composite(screen, vis, n);             /* windows, back-to-front; no cursor */
+}
+
+void wm_present(wm_state_t *st, gfx_surface_t *screen)
+{
+    wm_compose(st, screen);
     if (st->cursor_on)                        /* pointer on top of everything */
         wm_draw_cursor(screen, st->cursor_x, st->cursor_y);
 }

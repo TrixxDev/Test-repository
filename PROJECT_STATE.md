@@ -18,12 +18,14 @@ first slice of its macOS-like visual stack: a framebuffer, a 2D library with an
 8×16 font, and a **userspace window server** with an event loop that takes
 keyboard **and mouse** input and interactive Terminal apps — **confirmed running
 live in QEMU** (desktop, windows, on-screen keyboard echo, a moving cursor,
-click-to-focus, **title-bar window dragging** and a **close button**). It is
-**not** yet a daily-driver OS (no external networking yet — loopback only; a basic
-permission model — uid + rwx — but no login/groups; the Dock is still drawn by the
-desktop, not its own process — that's next).
+click-to-focus, **title-bar window dragging** and a **close button**), with a
+**double-buffered, damage-driven compositor** that repaints only the rectangles
+that change rather than the whole screen on every event. It is **not** yet a
+daily-driver OS (no external networking yet — loopback only; a basic permission
+model — uid + rwx — but no login/groups; the Dock is still drawn by the desktop,
+not its own process — that's next).
 
-- **Current version:** v0.9.7
+- **Current version:** v0.9.8
 - **Size:** ~6,800 lines of C / assembly (plus a generated 8×16 font header)
   across kernel + drivers + fs + libc + userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by

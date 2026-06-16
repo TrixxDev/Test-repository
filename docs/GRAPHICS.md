@@ -177,8 +177,27 @@ Two invariants, deliberately simple at this stage:
 
 - **Frame consistency:** only the windowserver writes the framebuffer. The kernel
   no longer paints the desktop itself; the windowserver owns the screen.
-- **Single repaint model:** every `PRESENT` is a full recomposite (desktop +
-  all windows by z-order). No incremental/dirty-rect rendering yet.
+- **Double-buffered, damage-driven compositing (v0.9.8):** the scene (desktop +
+  windows, *without* the cursor) is composited into an off-screen **back buffer**
+  in RAM via `wm_compose`, and only the **changed rectangles** are copied to the
+  framebuffer (slow VRAM), with the cursor overlaid on top during the copy. So:
+  - a plain pointer move never recomposites the scene — it just restores the few
+    pixels under the old cursor (from the back buffer) and redraws the arrow at
+    the new spot (≈ two 12×18 blits instead of a 3 MB full-screen repaint);
+  - a window draw (`PRESENT`), move, raise, drag or close recomposites the back
+    buffer once and pushes only that window's footprint — for a drag, the union
+    of the old and new footprints — to the framebuffer.
+
+  `wm_window_bounds` gives a window's on-screen footprint (content + title bar +
+  drop shadow) as the damage rectangle; `wm_window_of_owner` maps an app's
+  `PRESENT` back to the rectangle it needs refreshed. The damage-driven output is
+  **pixel-identical** to a full recomposite (verified: 0 differing pixels against
+  the old full-repaint frame) — only the amount of VRAM touched per event drops.
+  `wm_present` (full scene + cursor in one pass) is kept for the host PNG renderer.
+
+  Still simple by design: the back buffer is recomposited whole on a scene change
+  (RAM, cache-friendly, cheap) rather than incrementally per window; per-window
+  back-buffer caching is a possible later upgrade.
 
 **Keyboard pipeline** (closing the loop keyboard → windowserver → app → screen):
 the windowserver forks a small helper child that blocks on the console

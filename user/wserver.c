@@ -10,7 +10,8 @@
 #include "wm.h"
 
 static wm_state_t   st;
-static gfx_surface_t screen;
+static gfx_surface_t screen;    /* the live framebuffer (slow VRAM) */
+static gfx_surface_t back;      /* off-screen scene, no cursor (fast RAM)  */
 
 /* Drag state: set when the user presses the left button inside a title bar, and
  * cleared on release. While active, each pointer motion re-places the window so
@@ -20,6 +21,59 @@ typedef struct {
     int window_id;
     int offset_x, offset_y;     /* cursor-to-window-origin offset at grab time */
 } drag_state_t;
+
+/* ---- damage-driven presentation -------------------------------------------
+ *
+ * The old code recomposited the entire desktop straight into the framebuffer on
+ * every event, so a single mouse step repainted ~3 MB of VRAM (slow + flicker).
+ * Instead we composite the scene once into an off-screen back buffer (RAM) and
+ * copy only the changed rectangles to the framebuffer, overlaying the cursor as
+ * we go. Pure pointer motion never touches the scene at all — it just restores
+ * the few pixels under the old cursor and redraws it at the new spot.
+ */
+
+/* Rebuild the off-screen scene (desktop + windows, no cursor). Call only when
+ * the scene actually changes (window drawn/moved/created/destroyed/raised). */
+static void compose(void)
+{
+    wm_compose(&st, &back);
+}
+
+static int cursor_visible(void)
+{
+    return st.cursor_on;
+}
+
+/* Copy rectangle (rx,ry,rw,rh) from the back buffer to the framebuffer, then
+ * overlay the cursor if it intersects the rectangle. Clipped to the screen. */
+static void flush(int rx, int ry, int rw, int rh)
+{
+    if (rx < 0) { rw += rx; rx = 0; }
+    if (ry < 0) { rh += ry; ry = 0; }
+    if (rx + rw > screen.width)  rw = screen.width  - rx;
+    if (ry + rh > screen.height) rh = screen.height - ry;
+    if (rw <= 0 || rh <= 0)
+        return;
+
+    for (int y = 0; y < rh; y++) {
+        uint8_t *dst = screen.pixels + (uint32_t)(ry + y) * screen.pitch + (uint32_t)rx * 4;
+        uint8_t *src = back.pixels   + (uint32_t)(ry + y) * back.pitch   + (uint32_t)rx * 4;
+        memcpy(dst, src, (size_t)rw * 4);
+    }
+
+    if (cursor_visible() &&
+        st.cursor_x < rx + rw && st.cursor_x + WM_CURSOR_W > rx &&
+        st.cursor_y < ry + rh && st.cursor_y + WM_CURSOR_H > ry)
+        wm_draw_cursor(&screen, st.cursor_x, st.cursor_y);
+}
+
+/* Refresh just window `id`'s footprint (content + title bar + shadow). */
+static void flush_window(int id)
+{
+    int x, y, w, h;
+    if (wm_window_bounds(&st, id, &x, &y, &w, &h))
+        flush(x, y, w, h);
+}
 
 /* Forked helper: blocks on the console keyboard and forwards each key to the
  * window server as a WM_KEY message, so the server's single event loop waits on
@@ -89,6 +143,18 @@ int main(int argc, char **argv)
     screen.pitch  = (int)info[2];
     screen.bpp    = 32;
 
+    /* Off-screen scene buffer (packed, same dimensions as the framebuffer). The
+     * compositor renders here; only changed rectangles are copied to VRAM. */
+    back.width  = screen.width;
+    back.height = screen.height;
+    back.pitch  = screen.width * 4;
+    back.bpp    = 32;
+    back.pixels = malloc((size_t)back.pitch * back.height);
+    if (!back.pixels) {
+        printf("[wm] back buffer alloc failed\n");
+        return 1;
+    }
+
     if (svc_register(WM_SERVICE) != 0) {
         fprintf(2, "windowserver: failed to register\n");
         return 1;
@@ -97,7 +163,8 @@ int main(int argc, char **argv)
     st.cursor_on = 1;                /* the windowserver owns the pointer */
     st.cursor_x = screen.width / 2;
     st.cursor_y = screen.height / 2;
-    wm_present(&st, &screen);        /* paint the empty desktop + cursor right away */
+    compose();                       /* build the empty desktop in the back buffer */
+    flush(0, 0, screen.width, screen.height);   /* push it (with cursor) once */
     printf("[wm] ready (pid %d), framebuffer %ux%u pitch %u\n",
            getpid(), info[0], info[1], info[2]);
 
@@ -125,17 +192,37 @@ int main(int argc, char **argv)
         case WM_DRAW_TEXT:
             wm_draw_text(&st, req.win, req.x, req.y, req.str, req.color);
             break;
-        case WM_MOVE:
+        case WM_MOVE: {
+            /* Damage = where the window was plus where it lands. */
+            int ox, oy, ow, oh;
+            int had = wm_window_bounds(&st, req.win, &ox, &oy, &ow, &oh);
             wm_move(&st, req.win, req.x, req.y);
-            wm_present(&st, &screen);
+            compose();
+            if (had)
+                flush(ox, oy, ow, oh);
+            flush_window(req.win);
             break;
-        case WM_DESTROY:
+        }
+        case WM_DESTROY: {
+            int ox, oy, ow, oh;
+            int had = wm_window_bounds(&st, req.win, &ox, &oy, &ow, &oh);
             wm_destroy(&st, req.win);
-            wm_present(&st, &screen);
+            compose();
+            if (had)
+                flush(ox, oy, ow, oh);   /* reveal whatever was behind it */
             break;
-        case WM_PRESENT:
-            wm_present(&st, &screen);
+        }
+        case WM_PRESENT: {
+            /* The app just finished redrawing its surface; refresh only that
+             * window's footprint instead of the whole screen. */
+            int id = wm_window_of_owner(&st, from);
+            compose();
+            if (id > 0)
+                flush_window(id);
+            else
+                flush(0, 0, screen.width, screen.height);
             break;
+        }
         case WM_KEY: {
             /* Deliver the key to the focused window's app (full repaint is the
              * app's job via DRAW_* + PRESENT). */
@@ -145,11 +232,11 @@ int main(int argc, char **argv)
             break;
         }
         case WM_MOUSE: {
-            /* Move the cursor (clamped to the screen), then run the pointer state
-             * machine: press in a title bar starts a drag (or closes the window if
-             * on the close button); motion while held moves the window; release
-             * ends the drag. Each event is a full recomposite so the cursor, any
-             * z-change and the moved window show at once. */
+            /* Move the cursor, then run the pointer state machine. The scene only
+             * needs recompositing when it actually changes (raise, close, drag);
+             * a plain move just restores the pixels under the old cursor and
+             * redraws the pointer at its new spot — no full repaint. */
+            int old_cx = st.cursor_x, old_cy = st.cursor_y;
             st.cursor_x += req.x;
             st.cursor_y += req.y;
             if (st.cursor_x < 0) st.cursor_x = 0;
@@ -161,13 +248,32 @@ int main(int argc, char **argv)
             int press   =  (buttons & 1) && !(prev_buttons & 1);
             int release = !(buttons & 1) &&  (prev_buttons & 1);
 
+            int scene_changed = 0;
+            /* Bounding box of any scene damage (window raised/closed/moved). */
+            int dmg_x = 0, dmg_y = 0, dmg_w = 0, dmg_h = 0;
+            #define ADD_DMG(x, y, w, h) do {                                  \
+                if (!scene_changed) { dmg_x = (x); dmg_y = (y);               \
+                    dmg_w = (w); dmg_h = (h); }                               \
+                else {                                                        \
+                    int x0 = dmg_x < (x) ? dmg_x : (x);                       \
+                    int y0 = dmg_y < (y) ? dmg_y : (y);                       \
+                    int x1 = dmg_x + dmg_w > (x) + (w) ? dmg_x + dmg_w : (x) + (w); \
+                    int y1 = dmg_y + dmg_h > (y) + (h) ? dmg_y + dmg_h : (y) + (h); \
+                    dmg_x = x0; dmg_y = y0; dmg_w = x1 - x0; dmg_h = y1 - y0; \
+                }                                                             \
+                scene_changed = 1;                                           \
+            } while (0)
+
             if (press) {
                 int id = wm_window_at(&st, st.cursor_x, st.cursor_y);
                 if (id > 0) {
                     wm_raise(&st, id);              /* click-to-focus first */
                     if (wm_in_close_button(&st, id, st.cursor_x, st.cursor_y)) {
+                        int bx, by, bw, bh;
+                        wm_window_bounds(&st, id, &bx, &by, &bw, &bh);
                         int owner = wm_owner_of(&st, id);
                         wm_destroy(&st, id);
+                        ADD_DMG(bx, by, bw, bh);
                         if (owner > 0) {            /* tell the app to exit */
                             wm_req_t bye;
                             memset(&bye, 0, sizeof(bye));
@@ -175,26 +281,48 @@ int main(int argc, char **argv)
                             bye.win = id;
                             msgsend(owner, &bye, sizeof(bye));
                         }
-                    } else if (wm_in_titlebar(&st, id, st.cursor_x, st.cursor_y)) {
-                        drag.active   = 1;
-                        drag.window_id = id;
-                        drag.offset_x = st.cursor_x - wm_window_x(&st, id);
-                        drag.offset_y = st.cursor_y - wm_window_y(&st, id);
+                    } else {
+                        int bx, by, bw, bh;        /* raise damaged this window */
+                        if (wm_window_bounds(&st, id, &bx, &by, &bw, &bh))
+                            ADD_DMG(bx, by, bw, bh);
+                        if (wm_in_titlebar(&st, id, st.cursor_x, st.cursor_y)) {
+                            drag.active   = 1;
+                            drag.window_id = id;
+                            drag.offset_x = st.cursor_x - wm_window_x(&st, id);
+                            drag.offset_y = st.cursor_y - wm_window_y(&st, id);
+                        }
                     }
                 }
             }
 
-            if (drag.active && (buttons & 1))
+            if (drag.active && (buttons & 1)) {
+                int ox, oy, ow, oh;                /* old footprint */
+                int had = wm_window_bounds(&st, drag.window_id, &ox, &oy, &ow, &oh);
                 wm_move_clamped(&st, drag.window_id,
                                 st.cursor_x - drag.offset_x,
                                 st.cursor_y - drag.offset_y,
                                 screen.width, screen.height);
+                if (had)
+                    ADD_DMG(ox, oy, ow, oh);
+                int nx, ny, nw, nh;                /* new footprint */
+                if (wm_window_bounds(&st, drag.window_id, &nx, &ny, &nw, &nh))
+                    ADD_DMG(nx, ny, nw, nh);
+            }
 
             if (release)
                 drag.active = 0;
 
             prev_buttons = buttons;
-            wm_present(&st, &screen);
+
+            if (scene_changed)
+                compose();
+            /* Erase the old cursor, push any scene damage, draw the new cursor.
+             * Each flush re-overlays the pointer where it intersects. */
+            flush(old_cx, old_cy, WM_CURSOR_W, WM_CURSOR_H);
+            if (scene_changed)
+                flush(dmg_x, dmg_y, dmg_w, dmg_h);
+            flush(st.cursor_x, st.cursor_y, WM_CURSOR_W, WM_CURSOR_H);
+            #undef ADD_DMG
             break;
         }
         default:

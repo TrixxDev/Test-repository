@@ -19,6 +19,11 @@
 #define WM_MENUBAR_H   28    /* must match desktop.c MENUBAR_H (drag y-clamp) */
 #define WM_MAX_WINDOWS 16
 
+/* Bounding box of the arrow cursor glyph (see cursor_glyph[] in wm.c). Used by
+ * the windowserver to damage only the pixels the pointer covers. */
+#define WM_CURSOR_W    12
+#define WM_CURSOR_H    18
+
 /* A window = an app-owned content surface + on-screen placement + z-order. */
 typedef struct {
     int            id;
@@ -66,6 +71,13 @@ int  wm_window_x(wm_state_t *st, int id);
 int  wm_window_y(wm_state_t *st, int id);
 /* Owner pid of window `id`, or -1 (so the server can notify it on close). */
 int  wm_owner_of(wm_state_t *st, int id);
+/* The top-most window owned by `owner` (pid), or -1; lets the server map an
+ * app's WM_PRESENT back to the screen rectangle it needs to refresh. */
+int  wm_window_of_owner(wm_state_t *st, int owner);
+/* On-screen bounding box of window `id` including its drop shadow. Returns 1 and
+ * fills *bx..*bh, or 0 if `id` is unknown. The windowserver uses this as the
+ * damage rectangle so a redraw only touches that window's pixels. */
+int  wm_window_bounds(wm_state_t *st, int id, int *bx, int *by, int *bw, int *bh);
 /* Raise window `id` to the front (highest z) so it gains focus. */
 void wm_raise(wm_state_t *st, int id);
 void wm_draw_rect(wm_state_t *st, int id, int x, int y, int w, int h, uint32_t color);
@@ -76,7 +88,15 @@ void wm_move(wm_state_t *st, int id, int x, int y);
  * title bar never slides under the menu bar. */
 void wm_move_clamped(wm_state_t *st, int id, int x, int y, int screen_w, int screen_h);
 void wm_destroy(wm_state_t *st, int id);
-/* Paint the desktop, then all visible windows by z-order, onto `screen`. */
+/* Paint the desktop, then all visible windows by z-order, onto `screen` — the
+ * scene *without* the pointer. The windowserver composites into an off-screen
+ * back buffer with this, then blits only the changed rectangles to the
+ * framebuffer (and overlays the cursor itself). */
+void wm_compose(wm_state_t *st, gfx_surface_t *screen);
+/* Draw the arrow cursor at (px, py) on top of `screen`. */
+void wm_draw_cursor(gfx_surface_t *screen, int px, int py);
+/* Convenience: wm_compose + the cursor on top. Used by the host PNG renderer
+ * (a single full frame); the live server uses wm_compose + damage blits. */
 void wm_present(wm_state_t *st, gfx_surface_t *screen);
 
 /* ---- window IPC protocol (spoken by the windowserver daemon) ---- */
