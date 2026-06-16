@@ -12,6 +12,7 @@ INCLUDES := -Iinclude -Iarch/i386 -Idrivers -Ilib -Ikernel -Ifs
 
 CFLAGS  := --target=$(TARGET) -m32 -ffreestanding -nostdlib \
            -fno-pic -fno-pie -fno-stack-protector \
+           -mno-sse -mno-mmx -mno-sse2 \
            -std=gnu11 -O2 -g -Wall -Wextra $(INCLUDES)
 
 ASFLAGS := --target=$(TARGET) -m32 -ffreestanding $(INCLUDES)
@@ -20,6 +21,9 @@ LDFLAGS := -m elf_i386 -no-pie -T linker.ld
 
 KERNEL  := aurora.elf
 DISK    := disk.img
+
+# Default GUI display backend (override: make gui GUI_DISPLAY='-display gtk,grab-on-hover=on')
+GUI_DISPLAY ?= -display sdl
 
 # User programs are built separately. The shell is embedded into the kernel
 # image as a fallback; all programs are written to the FAT32 disk.
@@ -47,6 +51,7 @@ $(KERNEL): $(OBJ) linker.ld
 
 # --- user programs (crt0 provides _start and calls main) ---
 UCFLAGS := --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
+           -mno-sse -mno-mmx -mno-sse2 \
            -O2 -Iinclude -Iuser -Ikernel
 
 user/crt0.o: user/crt0.S
@@ -103,7 +108,8 @@ debug: $(KERNEL) $(DISK)
 # Boot into graphics: bring up the desktop via the Bochs/std-VGA VBE fallback
 # (needs no extra tooling). `vbe` on the cmdline opts into the framebuffer path.
 run-vbe: $(KERNEL) $(DISK)
-	qemu-system-i386 -kernel $(KERNEL) -serial stdio -m 64M \
+	@echo "Hover inside the QEMU window to capture the mouse (Ctrl+Alt+G to toggle grab)."
+	qemu-system-i386 $(GUI_DISPLAY) -kernel $(KERNEL) -serial stdio -m 64M \
 	    -drive file=$(DISK),format=raw,if=ide -vga std -append vbe
 
 # Build a GRUB rescue ISO (preferred "real boot": GRUB sets the Multiboot
@@ -121,9 +127,24 @@ iso: $(KERNEL) $(DISK)
 # QEMU with the desktop. This is the "real boot" path (needs grub-mkrescue +
 # xorriso + mtools). No GRUB tools? `make run-vbe` shows the same desktop using
 # only QEMU (Bochs-VBE fallback).
+# Put disk.img on primary master (index=0) and the ISO on the secondary CD
+# drive (index=2). `-cdrom` before `-drive` can steal the master slot and the
+# kernel then sees "no ATA disk", so wserver never starts (blank screen).
 gui: iso
-	qemu-system-i386 -cdrom aurora.iso -m 1024 -vga std -serial stdio \
-	    -drive file=$(DISK),format=raw,if=ide
+	@echo "Hover inside the QEMU window to capture the mouse (Ctrl+Alt+G to toggle grab)."
+	qemu-system-i386 $(GUI_DISPLAY) -m 1024 -vga std -serial stdio \
+	    -drive file=$(DISK),format=raw,if=ide,index=0,media=disk \
+	    -drive file=aurora.iso,format=raw,if=ide,index=2,media=cdrom \
+	    -boot order=d
+
+# WSLg workaround: VNC server on localhost:5901 (no WSLg window needed).
+.PHONY: gui-vnc
+gui-vnc: iso
+	@echo "Connect a VNC viewer to localhost:5901"
+	qemu-system-i386 -display vnc=:1 -m 1024 -vga std -serial stdio \
+	    -drive file=$(DISK),format=raw,if=ide,index=0,media=disk \
+	    -drive file=aurora.iso,format=raw,if=ide,index=2,media=cdrom \
+	    -boot order=d
 
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
@@ -148,7 +169,7 @@ screenshot-wm:
 # live framebuffer to a PNG via the QEMU monitor — proves the GUI on actual
 # hardware emulation without needing a display. `verify-gui` types into the
 # Terminal first to also prove the keyboard pipeline.
-.PHONY: live-shot verify-gui demo-focus
+.PHONY: live-shot verify-gui demo-focus demo-drag demo-close
 live-shot: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live.png
 verify-gui: $(KERNEL) $(DISK)
@@ -158,7 +179,17 @@ verify-gui: $(KERNEL) $(DISK)
 # type into it -> proves PS/2 mouse + cursor + hit-test + click-to-focus.
 demo-focus: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_focus.png \
-	    --mouse "move:-212,-134;click" --keys f,o,c,u,s
+	    --mouse "move:212,134;click" --keys f,o,c,u,s
+# Phase 9.4/9.5: grab the front Terminal by its title bar, drag it, and release
+# -> proves the window-drag state machine on a live framebuffer.
+demo-drag: $(KERNEL) $(DISK)
+	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_drag.png \
+	    --mouse "move:-188,40;down;move:250,-150;up"
+# Phase 9.5: click the front Terminal's red close button -> the window is
+# destroyed and its app exits ([term] window N closed on the serial log).
+demo-close: $(KERNEL) $(DISK)
+	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_close.png \
+	    --mouse "move:26,40;click"
 
 clean:
 	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o

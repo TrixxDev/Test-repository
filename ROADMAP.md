@@ -141,9 +141,14 @@
   → курсор (рисуется поверх всего) + hit-test (`wm_window_at`) + click-to-focus
   (`wm_raise`). Проверка на экране: `make demo-focus` → `aurora_live_focus.png`
   (клик по заднему окну поднимает его, ввод идёт в него).
-- [ ] **9.4/9.5 перетаскивание окон — СЛЕДУЮЩЕЕ**: захват за title bar (`wm_in_titlebar`
-  уже есть) → drag через `wm_move` → release. Затем 9.6 Dock как процесс →
-  9.7 Launcher/Finder
+- [x] **9.4/9.5 перетаскивание окон + кнопка закрытия — ПОДТВЕРЖДЕНО в QEMU (v0.9.7)**:
+  drag-машина состояния в `WM_MOUSE` (`user/wserver.c`): нажатие в title bar
+  (`wm_in_titlebar`) → запоминаем окно + смещение курсора → движение при зажатой
+  кнопке → `wm_move_clamped` (с ограничением, чтобы окно не ушло за экран/под меню-бар)
+  → отпускание завершает drag. Нажатие на красную кнопку (`wm_in_close_button`, с «×»)
+  → `wm_destroy` + `WM_DESTROY` владельцу (приложение выходит). Проверка на экране:
+  `make demo-drag`/`make demo-close` (+ пиксельные проверки в `tools/verify_drag.py`).
+  Затем 9.6 Dock как процесс → 9.7 Launcher/Finder
 - [ ] потом (когда десктоп «живой»): client-side surfaces, shared memory,
   анимации, сеть (virtio-net/TCP)
 

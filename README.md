@@ -4,13 +4,14 @@
 загружаемое в QEMU. Долгосрочная цель — десктоп-ОС в духе macOS со своей
 «изюминкой» (варианты обсуждаются в [ROADMAP.md](ROADMAP.md)).
 
-Это **версия 0.9.4** — ОС с сервисной моделью, сокетами loopback, базовой
+Это **версия 0.9.7** — ОС с сервисной моделью, сокетами loopback, базовой
 безопасностью, записью на диск (FAT32 read/write) и **графическим стеком**:
 линейный фреймбуфер (Multiboot или Bochs-VBE), 2D-библиотека с **текстом
 (8×16)**, рабочий стол и **event-driven userspace-`windowserver`** (как
-logger/netd) с **клавиатурным контуром** и интерактивным **Terminal**
-(keyboard → windowserver → окно → перерисовка). Живой вывод: `make run-vbe`
-или `make gui`. Конечная цель — desktop-ОС в духе macOS. Ядро запускает
+logger/netd) с **клавиатурным и мышиным контурами**, интерактивным **Terminal**,
+**курсором + click-to-focus**, **перетаскиванием окон за заголовок** и **кнопкой
+закрытия** (keyboard/mouse → windowserver → окно → перерисовка). Живой вывод:
+`make run-vbe` или `make gui`. Конечная цель — desktop-ОС в духе macOS. Ядро запускает
 **init (PID 1)**, который поднимает **logger**, **netd** и **shell**. Есть
 **message-passing IPC**, **реестр сервисов** с правами, **сокеты `AF_LOOPBACK`**
 через `netd`, **uid + rwx на VFS**, привилегированные порты, **запись файлов на
@@ -172,19 +173,23 @@ attack surface мал:
   одной командой; нужны `grub-mkrescue`/`xorriso`/`mtools`).
 - **Документация** — [`docs/GRAPHICS.md`](docs/GRAPHICS.md).
 
-**Window Server (v0.9.4 / Этап 9.2) — event-driven userspace-процесс, не в ядре**
+**Window Server (Этапы 9.2–9.5) — event-driven userspace-процесс, не в ядре**
 - **`windowserver`** (`user/wserver.c`) — демон (`wm`), единый event loop;
   **единственный писатель в framebuffer**; полный recomposite на каждый
   `PRESENT`; протокол окон (`WM_CREATE/DESTROY/MOVE/DRAW_RECT/DRAW_TEXT/PRESENT`).
   Ядро добавляет `fb_map` + `fb_active`.
-- **Клавиатурный контур** — forked reader (`read(0)`) → `WM_KEY` → фокусное окно →
-  приложение перерисовывает: `keyboard → windowserver → app → screen`.
+- **Клавиатурный и мышиный контуры** — forked-reader'ы (`read(0)` и `SYS_MOUSE`) →
+  `WM_KEY`/`WM_MOUSE` → фокусное окно → перерисовка: `input → windowserver → app → screen`.
 - **Surface-модель + хром** (`user/wm.c`) — у каждого окна свой буфер; title bar,
-  traffic-lights, тень; композитинг по `z`.
-- **Terminal** (`user/term.c`) — интерактивный: эхо-печатает ввод, перерисовка на
-  каждое нажатие. `init` в графике запускает windowserver + Terminal (без shell).
-- **Превью ядра-логики** — `make screenshot-wm` → `aurora_windows.png` реальным
-  кодом `wm_state`. Живой контур (клавиатура→экран) — после первого кадра в QEMU.
+  traffic-lights (с «×» на красной — это закрытие), тень; композитинг по `z`.
+- **Курсор + click-to-focus + drag + close (9.3–9.5)** — стрелка рисуется поверх
+  всего; клик поднимает окно (`wm_raise`); зажатие на заголовке тащит окно
+  (`wm_move_clamped`, с ограничением по экрану/меню-бару); клик по красной кнопке
+  (`wm_in_close_button`) уничтожает окно и шлёт владельцу `WM_DESTROY`.
+- **Terminal** (`user/term.c`) — интерактивный: эхо-печатает ввод, выходит по
+  `WM_DESTROY`. `init` в графике запускает windowserver + два Terminal (без shell).
+- **Проверки на экране** — `make screenshot-wm` (логика `wm_state`), `make demo-focus`,
+  `make demo-drag`, `make demo-close`; `tools/verify_drag.py` — пиксельные ассерты.
 
 ## Стек сборки
 

@@ -14,3 +14,26 @@ isodir/
 # Local previews / screenshots
 .preview_*.png
 *.ppm
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Debug and log files
+*.log
+*.gdb
+qemu_*.log
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup files
+*.bak
+*.backup

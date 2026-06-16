@@ -3,19 +3,22 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.6.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.7.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
 netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
 (framebuffer + 2D library with an 8×16 font + desktop; a userspace, event-driven
 **windowserver** with a keyboard input pipeline + interactive Terminal) are
-implemented and build clean. **Phases 9.2 and 9.3 are confirmed live in QEMU**:
+implemented and build clean. **Phases 9.2–9.5 are confirmed live in QEMU**:
 the Bochs-VBE framebuffer comes up, the windowserver paints the desktop, Terminal
 windows open, typing flows keyboard → windowserver → focused app → on-screen
-redraw, and the **PS/2 mouse** moves an on-screen cursor + **clicks to focus**
-(click a window to raise it; keys then route to it) — all captured to PNG via
-`make verify-gui` / `make demo-focus`. FS write and the rendering/window-server
-core are additionally verified on the host (the real `fs/fat32.c` write path +
-image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
+redraw, the **PS/2 mouse** moves an on-screen cursor + **clicks to focus**
+(click a window to raise it; keys then route to it), and a window can be
+**dragged by its title bar** and **closed with the red title-bar button** — all
+captured to PNG via `make verify-gui` / `make demo-focus` / `make demo-drag` /
+`make demo-close` (and pixel-asserted by `tools/verify_drag.py`). FS write and the
+rendering/window-server core are additionally verified on the host (the real
+`fs/fat32.c` write path + image re-parse; the real
+`kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 
 > **v0.9.5 fix.** The live framebuffer was being blocked by a real
 > memory-corruption bug: `pmm_init` reserved only the kernel image, not the
@@ -46,7 +49,8 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 | 9.0.5 | Live output: 8×16 text/font; Bochs-VBE fallback (`run-vbe`) + GRUB ISO (`iso`) | v0.9.5 | ✅ live-confirmed in QEMU |
 | 9.2 | Event-driven **windowserver** + keyboard pipeline + interactive Terminal; `fb_map`/`fb_active`; frame consistency | v0.9.5 | ✅ live-confirmed in QEMU (`make verify-gui`) |
 | 9.3 | **PS/2 mouse + IRQ12** → cursor → hit-test → **click-to-focus** (`SYS_MOUSE`, `wm_window_at`/`wm_raise`) | v0.9.6 | ✅ live-confirmed in QEMU (`make demo-focus`) |
-| 9.4–9.7 | Window dragging → Dock process → Launcher/Finder (design in docs/INPUT.md) | — | ⏳ NEXT (drag first) |
+| 9.4/9.5 | **Window dragging** (title-bar grab → `wm_move_clamped`) + **close button** (`wm_in_close_button` → `wm_destroy` → app exits) | v0.9.7 | ✅ live-confirmed in QEMU (`make demo-drag`/`make demo-close`) |
+| 9.6/9.7 | Dock process → Launcher/Finder (design in docs/INPUT.md) | — | ⏳ NEXT |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
 
@@ -95,6 +99,17 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
   demo-focus` clicks the back Terminal, raises it, and types into it
   (`aurora_live_focus.png`). Text-mode boot is unaffected (mouse enabled but
   unused; keyboard verified).
+- Window dragging + close button (9.4/9.5): the windowserver runs a small drag
+  state machine in its `WM_MOUSE` handler. A left-press inside a title bar records
+  the window + the cursor-to-origin offset; while the button is held each motion
+  re-places the window via `wm_move_clamped` (clamped so a graspable strip always
+  stays on-screen and the title bar never slides under the menu bar); release ends
+  the drag. A press on the red title-bar button (`wm_in_close_button`) destroys the
+  window (`wm_destroy`) and sends its owner a `WM_DESTROY` message so the app exits
+  cleanly. **Confirmed live**: `make demo-drag` grabs the front Terminal's title
+  bar and moves it (`aurora_live_drag.png`); `make demo-close` clicks its red button
+  and the window disappears while its app logs `[term] window 2 closed`
+  (`aurora_live_close.png`). `tools/verify_drag.py` pixel-asserts both.
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.
@@ -116,7 +131,8 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
   init, logger, netd, sh, cat, grep, hello, orphan, echosrv, echocli, save,
   wserver (windowserver), term (Terminal app).
 - **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py,
-  genfont.py, screendump.py (headless live-framebuffer capture via QEMU monitor).
+  genfont.py, screendump.py (headless live-framebuffer capture via QEMU monitor),
+  verify_drag.py (pixel-asserts window drag + close).
 - **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT.
 
 ## Syscalls (28)

@@ -7,6 +7,7 @@
 #include "scheduler.h"
 
 #define KBD_DATA_PORT 0x60
+#define KBD_STATUS    0x64
 #define KBUF_SIZE 256
 
 static const char keymap[128] = {
@@ -47,6 +48,10 @@ static void kbuf_push(char c)
 static void on_key(registers_t *regs)
 {
     (void)regs;
+    /* Ignore aux-port (mouse) bytes if IRQ1 fires for them — reading here would
+     * desync the PS/2 mouse packet stream. */
+    if (inb(KBD_STATUS) & 0x20)
+        return;
     uint8_t scancode = inb(KBD_DATA_PORT);
 
     if (scancode & 0x80) {

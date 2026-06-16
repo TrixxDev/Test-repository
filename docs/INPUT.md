@@ -1,11 +1,14 @@
 # AuroraOS Input & Pointer — Phase 9.3+
 
-**Status: 9.3 (mouse + cursor + click-to-focus) is implemented and verified live
-in QEMU (v0.9.6).** The PS/2 mouse driver + IRQ12, the cursor, hit-testing and
-click-to-focus all work on the real framebuffer; regenerate the proof with
-`make demo-focus` (→ `aurora_live_focus.png`: the back window is clicked,
-raised, and typed into). This doc is the design + the as-built reference; window
-**dragging** (9.4/9.5) is the next step and is described at the end.
+**Status: 9.3 (mouse + cursor + click-to-focus) and 9.4/9.5 (window dragging +
+close button) are implemented and verified live in QEMU (v0.9.7).** The PS/2 mouse
+driver + IRQ12, the cursor, hit-testing, click-to-focus, title-bar dragging and the
+close button all work on the real framebuffer; regenerate the proofs with
+`make demo-focus` (→ `aurora_live_focus.png`: the back window is clicked, raised,
+and typed into), `make demo-drag` (→ `aurora_live_drag.png`: the front Terminal is
+grabbed by its title bar and moved) and `make demo-close` (→ `aurora_live_close.png`:
+its red button is clicked and the window disappears). `tools/verify_drag.py`
+pixel-asserts the last two. This doc is the design + the as-built reference.
 
 ## Data flow (mirrors the keyboard pipeline)
 
@@ -31,12 +34,11 @@ forwards `WM_KEY`). The mouse adds a second reader child that forwards
   (`0xA8`), turns on IRQ12 + the aux clock in the controller config byte, and
   sets the mouse to defaults + data reporting (`0xF6`, `0xF4`). The **IRQ12**
   handler (vector 44, already in the IDT) assembles the 3-byte packet
-  (flags, dx, dy), sign-extends dx/dy, **inverts Y** to screen orientation, and
-  pushes `(dx, dy, buttons)` into a ring buffer — exactly mirroring the keyboard
-  driver. `mouse_get()` is the blocking reader.
+  (flags, dx, dy), sign-extends dx/dy, and pushes raw PS/2 deltas into a ring
+  buffer. `mouse_get()` maps them to screen coords (`-dx`, `dy`; dy > 0 = down).
 - Userspace reads one event via the **`SYS_MOUSE` (28)** syscall
-  (`mouse_read(int out[3])` → `{dx, dy, buttons}`, blocking). No cursor/focus
-  policy in the kernel; it only delivers raw packets.
+  (`mouse_read(int out[3])` → `{dx, dy, buttons}`, blocking). The windowserver
+  adds deltas directly to `(cursor_x, cursor_y)`.
 - That is the **entire** kernel addition. Cursor, focus, drag and z-order changes
   are all userspace, in the windowserver.
 
@@ -69,13 +71,22 @@ server branches on `op`.)
   highest `z`, which makes it the focused window (so `WM_KEY` routes to it via the
   existing `wm_focus_owner`). Verified: clicking the back Terminal raises it and
   subsequent typing lands in it.
-- **9.4/9.5 — Window dragging. NEXT.** `wm_in_titlebar(id,x,y)` already exists; the
-  windowserver needs a small drag state machine: on a press inside a title bar,
-  remember the window + the cursor-to-window offset; while the button stays down,
-  each motion sets that window's `(x, y)` (via the existing `wm_move`) and
-  recomposites; release ends the drag. This is the headline milestone — grab a
-  window by its title bar and move it.
-- **9.6 — Dock as its own process.** Split the Dock out of `desktop.c` into a
+- **9.4/9.5 — Window dragging. DONE.** The windowserver's `WM_MOUSE` handler runs a
+  small drag state machine (`drag_state_t { active, window_id, offset_x, offset_y }`
+  in `user/wserver.c`):
+  - **press** inside a title bar (`wm_in_titlebar`) records the window and the
+    cursor-to-origin offset (`offset = cursor - wm_window_x/y`), after the usual
+    `wm_raise` for click-to-focus;
+  - **motion** while the button is held re-places the window via `wm_move_clamped`
+    (keeps `cursor - offset` under the grabbed point), clamped so a 40px graspable
+    strip always stays on-screen and the title bar never slides above `WM_MENUBAR_H`;
+  - **release** clears `drag.active`.
+- **9.5 — Close button. DONE.** A **press** on the red title-bar light
+  (`wm_in_close_button`, the left traffic light at `(x+16, y+14)`, drawn with a
+  small dark "×") destroys the window (`wm_destroy`) and sends its `owner` a
+  `WM_DESTROY` message; the app (e.g. `user/term.c`) treats that as "quit" and
+  exits, so init reaps it. Drawn/handled entirely in userspace.
+- **9.6 — Dock as its own process. NEXT.** Split the Dock out of `desktop.c` into a
   `dock` app that owns a strip window and launches apps via IPC.
 - **9.7 — Launcher / Finder** (`Aurora Files`) as real windowed apps over the VFS
   (FS write already exists).
@@ -96,7 +107,7 @@ Dock + menus, not from render throughput.
 ## Order
 
 ```
-9.2 (live ✅) → 9.3 cursor + click-to-focus (✅) → 9.4/9.5 window dragging (next)
-             → 9.6 Dock process → 9.7 Launcher/Finder
+9.2 (live ✅) → 9.3 cursor + click-to-focus (✅) → 9.4/9.5 window dragging + close (✅)
+             → 9.6 Dock process (next) → 9.7 Launcher/Finder
 later: client-side surfaces · shared memory · animations · networking
 ```

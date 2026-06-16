@@ -9,6 +9,7 @@
 #include "console.h"
 #include "pipe.h"
 #include "socket.h"
+#include "uaccess.h"
 
 #define MAX_PROCS    32
 #define USTACK_TOP   0xC0000000u
@@ -146,13 +147,20 @@ static vfs_node_t *create_file(const char *path, int uid)
 
 int sys_open(const char *path, int flags)
 {
+    char kpath[256];
+    int path_len = copy_str_from_user(kpath, path, sizeof(kpath));
+    if (path_len < 0) {
+        kprintf("[syscall] sys_open: invalid user path pointer 0x%x\n", (uint32_t)path);
+        return -1;
+    }
+    
     int uid = process_current()->uid;
-    vfs_node_t *node = vfs_resolve(path);
+    vfs_node_t *node = vfs_resolve(kpath);
 
     if (!node) {
         if (!(flags & O_CREAT))
             return -1;
-        node = create_file(path, uid);
+        node = create_file(kpath, uid);
         if (!node)
             return -1;
     }
@@ -188,6 +196,12 @@ int sys_write(int fd, const void *buf, uint32_t len)
     if (fd < 0 || fd >= MAX_FDS || !p->fds[fd])
         return -1;
     file_t *f = p->fds[fd];
+
+    /* Validate user buffer pointer before copying */
+    if (!is_user_addr((uint32_t)buf, len)) {
+        kprintf("[syscall] sys_write: invalid user buffer 0x%x (len=%u)\n", (uint32_t)buf, len);
+        return -1;
+    }
     int n = vfs_write(f->node, f->offset, len, (const uint8_t *)buf);
     if (n > 0)
         f->offset += (uint32_t)n;

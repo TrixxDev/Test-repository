@@ -16,6 +16,7 @@
 #include "gfx.h"
 
 #define WM_TITLEBAR_H  28
+#define WM_MENUBAR_H   28    /* must match desktop.c MENUBAR_H (drag y-clamp) */
 #define WM_MAX_WINDOWS 16
 
 /* A window = an app-owned content surface + on-screen placement + z-order. */
@@ -58,12 +59,22 @@ int  wm_focus_owner(wm_state_t *st);
 int  wm_window_at(wm_state_t *st, int x, int y);
 /* Is (x, y) inside window `id`'s title bar? (for click-to-focus / dragging) */
 int  wm_in_titlebar(wm_state_t *st, int id, int x, int y);
+/* Is (x, y) on window `id`'s close button (the red traffic light)? */
+int  wm_in_close_button(wm_state_t *st, int id, int x, int y);
+/* Top-left of window `id` (title bar included); for computing a drag offset. */
+int  wm_window_x(wm_state_t *st, int id);
+int  wm_window_y(wm_state_t *st, int id);
+/* Owner pid of window `id`, or -1 (so the server can notify it on close). */
+int  wm_owner_of(wm_state_t *st, int id);
 /* Raise window `id` to the front (highest z) so it gains focus. */
 void wm_raise(wm_state_t *st, int id);
 void wm_draw_rect(wm_state_t *st, int id, int x, int y, int w, int h, uint32_t color);
 void wm_draw_text(wm_state_t *st, int id, int x, int y, const char *s, uint32_t color);
 void wm_clear(wm_state_t *st, int id, uint32_t color);
 void wm_move(wm_state_t *st, int id, int x, int y);
+/* Like wm_move, but clamp so a graspable strip always stays on-screen and the
+ * title bar never slides under the menu bar. */
+void wm_move_clamped(wm_state_t *st, int id, int x, int y, int screen_w, int screen_h);
 void wm_destroy(wm_state_t *st, int id);
 /* Paint the desktop, then all visible windows by z-order, onto `screen`. */
 void wm_present(wm_state_t *st, gfx_surface_t *screen);

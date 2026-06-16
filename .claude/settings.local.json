@@ -1,0 +1,8 @@
+{
+  "spinnerTipsEnabled": true,
+  "permissions": {
+    "allow": [
+      "PowerShell(Write-Output \"=== Does the dir exist? ===\"; Test-Path \"C:\\\\Users\\\\stylo\\\\.local\\\\bin\"; Write-Output \"=== Contents \\(if any\\) ===\"; if \\(Test-Path \"C:\\\\Users\\\\stylo\\\\.local\\\\bin\"\\) { Get-ChildItem \"C:\\\\Users\\\\stylo\\\\.local\\\\bin\" | Select-Object Name }; Write-Output \"=== User PATH entries ===\"; [Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\) -split ';' | Where-Object { $_ -ne '' })"
+    ]
+  }
+}

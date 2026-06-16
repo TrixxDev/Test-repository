@@ -116,11 +116,18 @@ int main(int argc, char **argv)
     repaint();
     printf("[term] opened window %d\n", win);
 
-    /* Event loop: keys arrive (forwarded by the window server) as WM_KEY. */
+    /* Event loop: keys arrive (forwarded by the window server) as WM_KEY; a
+     * WM_DESTROY means the user clicked the close button, so the app exits. */
     for (;;) {
         wm_req_t k;
         int n = msgrecv(&k, sizeof(k), &from);
-        if (n < (int)sizeof(k) || k.op != WM_KEY)
+        if (n < (int)sizeof(k))
+            continue;
+        if (k.op == WM_DESTROY) {
+            printf("[term] window %d closed\n", win);
+            return 0;
+        }
+        if (k.op != WM_KEY)
             continue;
         int c = k.x;
         if (c == '\n' || c == '\r')      commit_line();

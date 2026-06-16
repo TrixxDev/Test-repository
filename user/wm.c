@@ -25,10 +25,16 @@ void wm_draw_window(gfx_surface_t *screen, const window_t *win)
     gfx_fill_rect(screen, x, y + WM_TITLEBAR_H - WIN_RADIUS, cw, WIN_RADIUS, title_bg);
     gfx_fill_rect(screen, x, y + WM_TITLEBAR_H - 1, cw, 1, GFX_RGB(0xd2, 0xd2, 0xd8));
 
-    /* Traffic-light buttons. */
+    /* Traffic-light buttons; the red one (left) is the close button — mark it
+     * with a small dark "x" so its action reads at a glance. */
     gfx_fill_circle(screen, x + 16, y + 14, 6, GFX_RGB(0xff, 0x5f, 0x57));
     gfx_fill_circle(screen, x + 34, y + 14, 6, GFX_RGB(0xfe, 0xbc, 0x2e));
     gfx_fill_circle(screen, x + 52, y + 14, 6, GFX_RGB(0x28, 0xc8, 0x40));
+    uint32_t xmark = GFX_RGB(0x7a, 0x12, 0x10);
+    for (int d = -2; d <= 2; d++) {
+        gfx_fill_rect(screen, x + 16 + d, y + 14 + d, 1, 1, xmark);   /* "\" */
+        gfx_fill_rect(screen, x + 16 + d, y + 14 - d, 1, 1, xmark);   /* "/" */
+    }
 
     /* Centered title. */
     if (win->title) {
@@ -153,6 +159,36 @@ int wm_in_titlebar(wm_state_t *st, int id, int x, int y)
            y >= w->y && y < w->y + WM_TITLEBAR_H;
 }
 
+/* The close button is the red traffic light at (x+16, y+14), radius 6; accept a
+ * slightly larger hit radius so it is comfortable to click. */
+int wm_in_close_button(wm_state_t *st, int id, int x, int y)
+{
+    int s = slot_of(st, id);
+    if (s < 0)
+        return 0;
+    int cx = st->win[s].x + 16, cy = st->win[s].y + 14;
+    int dx = x - cx, dy = y - cy;
+    return dx * dx + dy * dy <= 9 * 9;
+}
+
+int wm_window_x(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    return s < 0 ? 0 : st->win[s].x;
+}
+
+int wm_window_y(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    return s < 0 ? 0 : st->win[s].y;
+}
+
+int wm_owner_of(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    return s < 0 ? -1 : st->win[s].owner;
+}
+
 void wm_raise(wm_state_t *st, int id)
 {
     int s = slot_of(st, id);
@@ -182,6 +218,23 @@ void wm_move(wm_state_t *st, int id, int x, int y)
 {
     int s = slot_of(st, id);
     if (s >= 0) { st->win[s].x = x; st->win[s].y = y; }
+}
+
+void wm_move_clamped(wm_state_t *st, int id, int x, int y, int screen_w, int screen_h)
+{
+    int s = slot_of(st, id);
+    if (s < 0)
+        return;
+    int cw = st->win[s].content->width;
+    int margin = 40;                /* min graspable strip kept on-screen */
+
+    if (x > screen_w - margin)      x = screen_w - margin;
+    if (x < margin - cw)            x = margin - cw;     /* keep some right edge */
+    if (y < WM_MENUBAR_H)           y = WM_MENUBAR_H;    /* never under the menu bar */
+    if (y > screen_h - margin)      y = screen_h - margin;
+
+    st->win[s].x = x;
+    st->win[s].y = y;
 }
 
 void wm_destroy(wm_state_t *st, int id)

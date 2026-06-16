@@ -95,11 +95,17 @@ app → window server → compositor → framebuffer
   + click-to-focus (`wm_raise`, focus follows z-order). Verified on screen with
   `make demo-focus` (`aurora_live_focus.png`: clicking the back Terminal raises it
   and typing lands in it). Text-mode boot unaffected.
-- **9.4/9.5 — window dragging — NEXT (the headline milestone).** Grab a window by
-  its title bar and move it. `wm_in_titlebar(id,x,y)` already exists; add a small
-  drag state machine in the windowserver (press in a title bar → record window +
-  grab offset; motion while held → `wm_move` + recomposite; release → end). Then
-  **9.6** Dock as its own process → **9.7** Launcher/Finder.
+- **9.4/9.5 — window dragging + close button — DONE (v0.9.7), live-confirmed.**
+  The windowserver's `WM_MOUSE` handler runs a drag state machine
+  (`drag_state_t` in `user/wserver.c`): press in a title bar records the window +
+  cursor-to-origin offset, motion while held re-places it via `wm_move_clamped`
+  (clamped so a graspable strip stays on-screen and the title bar never goes under
+  the menu bar), release ends the drag. A press on the red title-bar button
+  (`wm_in_close_button`, drawn with a dark "×") destroys the window (`wm_destroy`)
+  and tells its owner to exit via `WM_DESTROY`. Verified on the live framebuffer
+  with `make demo-drag` / `make demo-close` (+ pixel asserts in
+  `tools/verify_drag.py`). Next: **9.6** Dock as its own process → **9.7**
+  Launcher/Finder.
 
 Deferred until the desktop feels real (per the agreed priority): client-side
 shared-memory surfaces, animations, and the network stack. The current
@@ -145,10 +151,10 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**Begin 9.4/9.5 — window dragging.** 9.3 (mouse + cursor + click-to-focus) is done
-and live-confirmed. The next, headline milestone is grabbing a window by its title
-bar and moving it. The pieces are in place: `wm_in_titlebar` exists, `wm_move`
-exists, and the windowserver already handles `WM_MOUSE`. Add a drag state machine
-(press-in-titlebar → record grab offset; held motion → `wm_move`; release → end),
-then split the **Dock** into its own process (9.6) and add a **Launcher/Finder**
-(9.7) over the existing VFS/FS-write.
+**Begin 9.6 — split the Dock into its own process.** 9.4/9.5 (window dragging +
+close button) are done and live-confirmed, so the desktop now has the core direct
+manipulation gestures. The next milestone is moving the Dock out of `kernel/desktop.c`
+into a real `dock` userspace app that owns a strip window and launches apps via IPC
+(e.g. clicking the Terminal icon asks init/a launcher to `spawn` a new Terminal).
+After that, a **Launcher/Finder** (9.7) as a windowed app over the existing
+VFS/FS-write. Both follow the same `app → IPC → windowserver` rule.

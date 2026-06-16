@@ -48,7 +48,7 @@ static void banner(void)
         "  / _ \\| || | '_/ _ \\ '_/ _` | \n"
         " /_/ \\_\\\\_,_|_| \\___/_| \\__,_| \n");
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
-    terminal_writestring("        AuroraOS  v0.9.6  (mouse + cursor + click-to-focus)\n\n");
+    terminal_writestring("        AuroraOS  v0.9.7  (window dragging + close button)\n\n");
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info)

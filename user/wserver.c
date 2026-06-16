@@ -12,6 +12,15 @@
 static wm_state_t   st;
 static gfx_surface_t screen;
 
+/* Drag state: set when the user presses the left button inside a title bar, and
+ * cleared on release. While active, each pointer motion re-places the window so
+ * that the grabbed point stays under the cursor (offset bookkeeping). */
+typedef struct {
+    int active;
+    int window_id;
+    int offset_x, offset_y;     /* cursor-to-window-origin offset at grab time */
+} drag_state_t;
+
 /* Forked helper: blocks on the console keyboard and forwards each key to the
  * window server as a WM_KEY message, so the server's single event loop waits on
  * one source (its mailbox). */
@@ -94,6 +103,7 @@ int main(int argc, char **argv)
 
     /* Event loop: one source (the mailbox) carries app requests, keys and mouse. */
     int prev_buttons = 0;
+    drag_state_t drag = { 0, 0, 0, 0 };
     for (;;) {
         wm_req_t req;
         int from = -1;
@@ -135,9 +145,11 @@ int main(int argc, char **argv)
             break;
         }
         case WM_MOUSE: {
-            /* Move the cursor (clamped to the screen). On a left-button press,
-             * raise the window under the pointer -> click-to-focus. Each event is
-             * a full recomposite so the cursor and any z-change show at once. */
+            /* Move the cursor (clamped to the screen), then run the pointer state
+             * machine: press in a title bar starts a drag (or closes the window if
+             * on the close button); motion while held moves the window; release
+             * ends the drag. Each event is a full recomposite so the cursor, any
+             * z-change and the moved window show at once. */
             st.cursor_x += req.x;
             st.cursor_y += req.y;
             if (st.cursor_x < 0) st.cursor_x = 0;
@@ -146,11 +158,41 @@ int main(int argc, char **argv)
             if (st.cursor_y > screen.height - 1) st.cursor_y = screen.height - 1;
 
             int buttons = req.w;
-            if ((buttons & 1) && !(prev_buttons & 1)) {
+            int press   =  (buttons & 1) && !(prev_buttons & 1);
+            int release = !(buttons & 1) &&  (prev_buttons & 1);
+
+            if (press) {
                 int id = wm_window_at(&st, st.cursor_x, st.cursor_y);
-                if (id > 0)
-                    wm_raise(&st, id);
+                if (id > 0) {
+                    wm_raise(&st, id);              /* click-to-focus first */
+                    if (wm_in_close_button(&st, id, st.cursor_x, st.cursor_y)) {
+                        int owner = wm_owner_of(&st, id);
+                        wm_destroy(&st, id);
+                        if (owner > 0) {            /* tell the app to exit */
+                            wm_req_t bye;
+                            memset(&bye, 0, sizeof(bye));
+                            bye.op = WM_DESTROY;
+                            bye.win = id;
+                            msgsend(owner, &bye, sizeof(bye));
+                        }
+                    } else if (wm_in_titlebar(&st, id, st.cursor_x, st.cursor_y)) {
+                        drag.active   = 1;
+                        drag.window_id = id;
+                        drag.offset_x = st.cursor_x - wm_window_x(&st, id);
+                        drag.offset_y = st.cursor_y - wm_window_y(&st, id);
+                    }
+                }
             }
+
+            if (drag.active && (buttons & 1))
+                wm_move_clamped(&st, drag.window_id,
+                                st.cursor_x - drag.offset_x,
+                                st.cursor_y - drag.offset_y,
+                                screen.width, screen.height);
+
+            if (release)
+                drag.active = 0;
+
             prev_buttons = buttons;
             wm_present(&st, &screen);
             break;
