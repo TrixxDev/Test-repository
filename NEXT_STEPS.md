@@ -115,8 +115,16 @@ app → window server → compositor → framebuffer
   and excludes from keyboard focus, with color-key transparency for the rounded
   panel. The server forwards pointer events to the window under the cursor
   (`WM_POINTER`); the Dock highlights the hovered icon and launches apps on click
-  (double-`fork`+`exec`). Verified with `make demo-dock`. Next: **9.7**
-  Launcher/Finder.
+  (double-`fork`+`exec`). Verified with `make demo-dock`.
+- **9.7 — Finder (`Aurora Files`) — DONE (v0.9.10), live-confirmed.** The first GUI
+  app that reads the filesystem. A new `readdir(path, index, struct dirent*)`
+  syscall exposes the VFS to user space (permission-checked like `open`, no special
+  rights); `user/files.c` lists `/disk`, selects a row on click, and opens it on a
+  second click (enter a directory / `..` up / exec an `.ELF` / hand other files to
+  the Viewer in 9.8). It reuses the Dock's `WM_POINTER` plumbing for row hits and
+  the double-`fork`+`exec` spawn pattern. Verified with `make demo-files` (opens
+  from the Dock's Files icon, lists `/disk`, double-clicks `TERM.ELF` to launch a
+  Terminal). Next: **9.8** Text Viewer.
 
 Deferred until the desktop feels real (per the agreed priority): client-side
 shared-memory surfaces, animations, and the network stack. The current
@@ -162,11 +170,13 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**Begin 9.7 — Finder / Aurora Files.** 9.6 (the Dock as its own process) is done
-and live-confirmed: the Dock left `kernel/desktop.c`, became a borderless
-`WM_F_DOCK` window, and launches apps on click via the new `WM_POINTER` pointer
-forwarding. The next milestone is a **Launcher/Finder** as a windowed app over the
-existing VFS/FS-write: list a directory, scroll, and open a directory or launch an
-ELF on (double-)click — reusing the same `WM_POINTER` plumbing for row selection.
-Add it to the Dock's `F` icon (`/disk/FILES.ELF`). Bitmap UI only — no PNG icons,
-no network. It follows the same `app → IPC → windowserver` rule.
+**Begin 9.8 — Text Viewer (`Viewer.app`).** 9.7 (the Finder, `Aurora Files`) is
+done and live-confirmed: it lists `/disk` via the new `readdir` syscall and opens
+entries on click (enter a directory / exec an `.ELF`). The Finder already routes
+non-`.ELF` files to `/disk/VIEWER.ELF <path>`, so the next milestone is that
+Viewer: a windowed app that `open`/`read`s a text file (e.g. `POEM.TXT`) and
+renders it with the 8×16 font, scrollable with the arrow keys (`WM_KEY`). That
+completes the **Dock → Finder → Viewer** chain. Bitmap UI only — no rich text, no
+network. After it: **9.9** an App Launcher, then the **10.0** Desktop Environment
+milestone (system menu, settings). It follows the same `app → IPC → windowserver`
+rule, reusing `WM_KEY`/`WM_POINTER` and the `readdir`/`open`/`read` syscalls.

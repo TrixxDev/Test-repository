@@ -3,27 +3,31 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v0.9.9.** Phases 0–7 are implemented and verified by booting
+**Current version: v0.9.10.** Phases 0–7 are implemented and verified by booting
 in QEMU (interactive parts driven via PS/2 input). Phase 8A (loopback sockets +
 netd + poll), Phase 8A.5 (security), FS write (FAT32 read/write) and graphics
 (framebuffer + 2D library with an 8×16 font + desktop; a userspace, event-driven
 **windowserver** with a keyboard input pipeline + interactive Terminal) are
-implemented and build clean. **Phases 9.2–9.6 are confirmed live in QEMU**:
+implemented and build clean. **Phases 9.2–9.7 are confirmed live in QEMU**:
 the Bochs-VBE framebuffer comes up, the windowserver paints the desktop, Terminal
 windows open, typing flows keyboard → windowserver → focused app → on-screen
 redraw, the **PS/2 mouse** moves an on-screen cursor + **clicks to focus**
 (click a window to raise it; keys then route to it), a window can be
-**dragged by its title bar** and **closed with the red title-bar button**, and the
+**dragged by its title bar** and **closed with the red title-bar button**, the
 **Dock is its own process** — a borderless, always-on-top GUI client that draws
-its icons, highlights on hover, and **launches apps on click** — all captured to
-PNG via `make verify-gui` / `make demo-focus` / `make demo-drag` / `make demo-close`
-/ `make demo-dock` (drag + close pixel-asserted by `tools/verify_drag.py`). The
-compositor is **double-buffered and damage-driven (v0.9.8)** — events repaint only
-the rectangles that changed instead of the whole screen (a pointer move no longer
-recomposites the desktop), output verified pixel-identical to the old full
-repaint. FS write and the rendering/window-server core are additionally verified
-on the host (the real `fs/fat32.c` write path + image re-parse; the real
-`kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
+its icons, highlights on hover, and **launches apps on click** — and the
+**Finder (`Aurora Files`) browses the filesystem**: it lists `/disk` via the new
+`readdir` syscall (the VFS, used through ordinary syscalls like the shell — no
+special privileges), selects a row on click, and on a second click **opens** it
+(a directory is entered, an `.ELF` is exec'd). All captured to PNG via
+`make verify-gui` / `make demo-focus` / `make demo-drag` / `make demo-close` /
+`make demo-dock` / `make demo-files` (drag + close pixel-asserted by
+`tools/verify_drag.py`). The compositor is **double-buffered and damage-driven
+(v0.9.8)** — events repaint only the rectangles that changed instead of the whole
+screen (a pointer move no longer recomposites the desktop), output verified
+pixel-identical to the old full repaint. FS write and the rendering/window-server
+core are additionally verified on the host (the real `fs/fat32.c` write path +
+image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 
 > **v0.9.5 fix.** The live framebuffer was being blocked by a real
 > memory-corruption bug: `pmm_init` reserved only the kernel image, not the
@@ -57,7 +61,8 @@ on the host (the real `fs/fat32.c` write path + image re-parse; the real
 | 9.4/9.5 | **Window dragging** (title-bar grab → `wm_move_clamped`) + **close button** (`wm_in_close_button` → `wm_destroy` → app exits) | v0.9.7 | ✅ live-confirmed in QEMU (`make demo-drag`/`make demo-close`) |
 | 9.5.1 | **Damage-driven compositor**: off-screen back buffer (`wm_compose`) + per-event dirty-rect blits (`wm_window_bounds`); pointer moves no longer repaint the whole screen | v0.9.8 | ✅ live-confirmed in QEMU (pixel-identical to full repaint) |
 | 9.6 | **Dock as a separate process** (`user/dock.c`): borderless `WM_F_DOCK` window, color-key transparency, `WM_POINTER` forwarding → hover + **click-to-launch** apps | v0.9.9 | ✅ live-confirmed in QEMU (`make demo-dock`) |
-| 9.7 | Launcher / Finder (`Aurora Files`) over the VFS (design in docs/INPUT.md) | — | ⏳ NEXT |
+| 9.7 | **Finder** (`user/files.c`, `Aurora Files`): lists `/disk` via the `readdir` syscall, click-to-select, click-again-to-open (enter dir / exec `.ELF`) | v0.9.10 | ✅ live-confirmed in QEMU (`make demo-files`) |
+| 9.8 | Text Viewer (`Viewer.app`) — open `POEM.TXT` from the Finder | — | ⏳ NEXT |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after desktop |
 | 10 | Desktop apps + Aurora Assistant (userspace `aurorad`) | — | ⏳ later |
 
@@ -126,6 +131,14 @@ on the host (the real `fs/fat32.c` write path + image re-parse; the real
   hovered icon and, on a left-click, **launches the app** (double-`fork`+`exec`, so
   it reparents to init). **Confirmed live**: `make demo-dock` clicks the Terminal
   icon and a new Terminal window appears (`aurora_live_dock.png`).
+- Finder / Aurora Files (9.7): `user/files.c` lists a directory through the new
+  `readdir` syscall — the VFS via ordinary syscalls, like the shell, with no
+  special privileges. A single click selects a row (blue highlight); clicking the
+  selected row opens it — a directory is entered (`..` goes up), an `.ELF` is
+  exec'd (other files are handed to the Viewer, arriving in 9.8). Apps are spawned
+  detached (double-`fork`+`exec`, reparented to init). **Confirmed live**: `make
+  demo-files` opens the Finder from the Dock's Files icon, lists `/disk`, and
+  double-clicks `TERM.ELF` to launch a Terminal (`aurora_live_files.png`).
 - Orphan reparenting to init and reaping (`orphan`).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.
@@ -145,15 +158,16 @@ on the host (the real `fs/fat32.c` write path + image re-parse; the real
 - **kernel:** kmain, scheduler, process, pipe, socket, elf, syscall, gfx, desktop.
 - **user:** crt0, libc (libc.h + string/printf/malloc/net), wm (compositor core),
   init, logger, netd, sh, cat, grep, hello, orphan, echosrv, echocli, save,
-  wserver (windowserver), term (Terminal app), dock (Dock app).
+  wserver (windowserver), term (Terminal app), dock (Dock app),
+  files (Finder / Aurora Files).
 - **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py,
   genfont.py, screendump.py (headless live-framebuffer capture via QEMU monitor),
   verify_drag.py (pixel-asserts window drag + close).
 - **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT.
 
-## Syscalls (28)
+## Syscalls (29)
 
 `putc, yield, exit, fork, exec, wait, open, read, write, close, getpid, pipe,
 dup2, sbrk, msgsend, msgrecv, register, lookup, kill, socket, sock_link, poll,
-getuid, setuid, uid_of, fb_map, fb_active, mouse`. See
+getuid, setuid, uid_of, fb_map, fb_active, mouse, readdir`. See
 [docs/SYSCALLS.md](docs/SYSCALLS.md).

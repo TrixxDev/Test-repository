@@ -119,6 +119,8 @@ def do_mouse(qmp_sock, script):
             mouse_btn(qmp_sock, True)
         elif step == "up":
             mouse_btn(qmp_sock, False)
+        elif step.startswith("wait:"):
+            time.sleep(float(step[5:]))     # let a launched app settle mid-script
         else:
             sys.stderr.write("ignoring unknown mouse step: %r\n" % step)
         time.sleep(0.1)

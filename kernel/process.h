@@ -74,6 +74,7 @@ int  sys_open(const char *path, int flags);
 int  sys_read(int fd, void *buf, uint32_t len);
 int  sys_write(int fd, const void *buf, uint32_t len);
 int  sys_close(int fd);
+int  sys_readdir(const char *path, int index, struct dirent *out);
 int  sys_pipe(int fds[2]);
 int  sys_dup2(int oldfd, int newfd);
 uint32_t sys_sbrk(int increment);

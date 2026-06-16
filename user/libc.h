@@ -51,6 +51,8 @@ static inline void *fb_map(unsigned *info)               { return (void *)_sysca
 static inline int   fb_active(void)                      { return _syscall(SYS_FBACTIVE, 0, 0, 0); }
 /* Block for one pointer event; fills info[0..2] = {dx, dy, buttons}. */
 static inline int   mouse_read(int *info)                { return _syscall(SYS_MOUSE, (int)info, 0, 0); }
+/* Read directory `path` entry `index` into *out: 1 = filled, 0 = past end, -1 err. */
+static inline int   readdir(const char *path, int index, struct dirent *out) { return _syscall(SYS_READDIR, (int)path, index, (int)out); }
 
 /* send/recv are just write/read on a connected socket fd. */
 static inline int send(int fd, const void *b, int n)     { return write(fd, b, n); }

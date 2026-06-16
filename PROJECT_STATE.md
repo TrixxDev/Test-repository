@@ -18,15 +18,16 @@ first slice of its macOS-like visual stack: a framebuffer, a 2D library with an
 8×16 font, and a **userspace window server** with an event loop that takes
 keyboard **and mouse** input and interactive Terminal apps — **confirmed running
 live in QEMU** (desktop, windows, on-screen keyboard echo, a moving cursor,
-click-to-focus, **title-bar window dragging**, a **close button**, and a **Dock
-that is its own process** — a borderless GUI client that highlights icons on hover
-and launches apps on click), with a **double-buffered, damage-driven compositor**
-that repaints only the rectangles that change rather than the whole screen on every
-event. It is **not** yet a daily-driver OS (no external networking yet — loopback
-only; a basic permission model — uid + rwx — but no login/groups; no file manager
-yet — the Finder is next).
+click-to-focus, **title-bar window dragging**, a **close button**, a **Dock that is
+its own process** — a borderless GUI client that launches apps on click — and a
+**Finder (`Aurora Files`)** that browses the filesystem and opens/launches files),
+with a **double-buffered, damage-driven compositor** that repaints only the
+rectangles that change rather than the whole screen on every event. It is **not**
+yet a daily-driver OS (no external networking yet — loopback only; a basic
+permission model — uid + rwx — but no login/groups; no text viewer yet — that's
+next).
 
-- **Current version:** v0.9.9
+- **Current version:** v0.9.10
 - **Size:** ~6,800 lines of C / assembly (plus a generated 8×16 font header)
   across kernel + drivers + fs + libc + userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
@@ -45,14 +46,14 @@ yet — the Finder is next).
 | Memory | ✅ | E820 parse, bitmap PMM, paging (recursive), per-process address spaces, kernel heap, `sbrk`. |
 | Scheduling | ✅ | Preemptive round-robin threads, run states, block/wake, idle thread, context switch. |
 | Processes | ✅ | PCB, `fork`/`exec`/`wait`/`exit`, exit codes, reparent-to-init, zombie reaping, `kill`. |
-| Ring 3 | ✅ | User mode via TSS + `iret`, `int 0x80` syscalls (28 calls). |
+| Ring 3 | ✅ | User mode via TSS + `iret`, `int 0x80` syscalls (29 calls). |
 | Filesystem | ✅ | VFS (mounts, vnodes, ops, rwx/owner); tmpfs (rw); FAT32 **read/write** over ATA (create/grow/truncate); console device. |
 | Executables | ✅ | ELF32 loader (PT_LOAD), `argc`/`argv` setup, crt0. |
 | IPC | ✅ | Pipes (`pipe`/`dup2`), message passing (`msgsend`/`msgrecv`), named service registry. |
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
-| Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`, `save`, `wserver`, `term`, `dock`. |
+| Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`, `save`, `wserver`, `term`, `dock`, `files` (Finder). |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | ✅ (9.0–9.6) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** (damage-driven compositor) + **keyboard & mouse pipelines** + interactive Terminals + a **standalone Dock process** (surfaces, z-order, focus, window IPC, **cursor + click-to-focus + title-bar dragging + close button + pointer forwarding + Dock click-to-launch**). **Live-confirmed in QEMU** (`make verify-gui`, `make demo-focus`, `make demo-drag`, `make demo-close`, `make demo-dock`). Finder (9.7) next. |
+| Graphics | ✅ (9.0–9.7) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** (damage-driven compositor) + **keyboard & mouse pipelines** + interactive Terminals + a **standalone Dock process** + a **Finder (`Aurora Files`)** (surfaces, z-order, focus, window IPC, **cursor + click-to-focus + title-bar dragging + close button + pointer forwarding + Dock click-to-launch + `readdir` file browsing**). **Live-confirmed in QEMU** (`make verify-gui`, `make demo-focus`, `make demo-drag`, `make demo-close`, `make demo-dock`, `make demo-files`). Text Viewer (9.8) next. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What it looks like
@@ -101,6 +102,7 @@ make demo-focus     # move the mouse, click the back window to focus it, then ty
 make demo-drag      # grab the front Terminal by its title bar and drag it
 make demo-close     # click the front Terminal's red close button (window exits)
 make demo-dock      # click the Dock's Terminal icon -> the Dock launches a Terminal
+make demo-files     # open the Finder from the Dock, list /disk, launch TERM.ELF from it
 make screenshot     # render the desktop to aurora_desktop.png (no QEMU needed)
 make screenshot-wm  # render the compositor (two windows) to aurora_windows.png
 make debug    # text boot, waits for GDB on :1234
@@ -122,7 +124,8 @@ include/     kio.h, multiboot.h, syscall_abi.h (shared ABI), syscall.h, net.h (n
 user/        crt0, libc (libc.h + libc/), wm (windowserver core: wm.h + wm.c),
              programs (init, logger, netd, sh, cat, grep, hello, orphan,
              echosrv, echocli, save, wserver (windowserver), term (Terminal),
-             dock (Dock — borderless GUI client, click-to-launch))
+             dock (Dock — borderless GUI client, click-to-launch),
+             files (Finder / Aurora Files — readdir-based file browser))
 boot/        grub.cfg (for the `make iso` GRUB boot path)
 tools/       bin2c.py (embed ELF), mkfat32.py (FAT32 image), render_desktop.c +
              render_wm.c + ppm2png.py (host -> PNG), genfont.py (8×16 font header),

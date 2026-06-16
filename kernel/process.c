@@ -178,6 +178,46 @@ int sys_open(const char *path, int flags)
     return fd_install(process_current(), node);
 }
 
+/* Enumerate one directory entry. Returns 1 if *out was filled, 0 past the last
+ * entry, -1 on error (bad path, not a directory, or no read permission). The
+ * Finder uses this the same way the shell uses open/read — no special rights. */
+int sys_readdir(const char *path, int index, struct dirent *out)
+{
+    char kpath[256];
+    if (copy_str_from_user(kpath, path, sizeof(kpath)) < 0)
+        return -1;
+    if (!is_user_addr((uint32_t)out, sizeof(*out)))
+        return -1;
+
+    vfs_node_t *dir = vfs_resolve(kpath);
+    if (!dir || !(dir->flags & VFS_DIR))
+        return -1;
+    if (!vfs_permitted(dir, process_current()->uid, VFS_R))
+        return -1;
+
+    char name[64];
+    if (vfs_readdir(dir, (uint32_t)index, name, sizeof(name)) != 0)
+        return 0;                           /* past the last entry */
+
+    struct dirent d;
+    memset(&d, 0, sizeof(d));
+    int i = 0;
+    while (name[i] && i < (int)sizeof(d.name) - 1) { d.name[i] = name[i]; i++; }
+    d.name[i] = '\0';
+
+    vfs_node_t *child = vfs_finddir(dir, name);
+    if (child) {
+        d.type = (child->flags & VFS_DIR) ? DT_DIR : DT_FILE;
+        d.size = child->size;
+    } else {
+        d.type = DT_FILE;                   /* shouldn't happen; be safe */
+        d.size = 0;
+    }
+
+    memcpy(out, &d, sizeof(d));             /* user pointer already validated */
+    return 1;
+}
+
 int sys_read(int fd, void *buf, uint32_t len)
 {
     process_t *p = process_current();

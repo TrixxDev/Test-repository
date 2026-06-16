@@ -159,7 +159,14 @@
   использует color-key прозрачность (`WM_COLOR_KEY`). Сервер **пробрасывает
   pointer-события** окну под курсором (`WM_POINTER`); Dock подсвечивает иконку под
   курсором и по клику **запускает приложение** (`fork`+double-`fork`+`exec`).
-  Проверка: `make demo-dock` → `aurora_live_dock.png`. Затем 9.7 Launcher/Finder.
+  Проверка: `make demo-dock` → `aurora_live_dock.png`.
+- [x] **9.7 Finder (`Aurora Files`) — ПОДТВЕРЖДЕНО в QEMU (v0.9.10)**: первое GUI-
+  приложение, читающее ФС. Новый syscall `readdir` (через VFS, как shell, без
+  привилегий); `user/files.c` показывает `/disk`, одиночный клик — выделение,
+  повторный клик по строке — открытие (каталог → вход, `.ELF` → exec, прочее →
+  Viewer в 9.8). Цепочка Dock → Finder → приложение. Проверка: `make demo-files`
+  → `aurora_live_files.png` (открыт Finder, двойной клик по `TERM.ELF` запускает
+  Terminal). Затем 9.8 Text Viewer.
 - [ ] потом (когда десктоп «живой»): client-side surfaces, shared memory,
   анимации, сеть (virtio-net/TCP)
 

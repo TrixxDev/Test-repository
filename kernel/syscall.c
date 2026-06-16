@@ -139,6 +139,11 @@ void syscall_handler(registers_t *regs)
         break;
     }
 
+    case SYS_READDIR:
+        regs->eax = (uint32_t)sys_readdir((const char *)regs->ebx, (int)regs->ecx,
+                                          (struct dirent *)regs->edx);
+        break;
+
     default:
         kprintf("\n[syscall] unknown call %u\n", regs->eax);
         regs->eax = (uint32_t)-1;

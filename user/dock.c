@@ -31,9 +31,9 @@ static const struct {
     uint32_t    color;
     const char *path;
 } slots[ICONS] = {
-    { 'T', GFX_RGB(0xff, 0x5f, 0x57), "/disk/TERM.ELF" },  /* Terminal */
-    { 'F', GFX_RGB(0xfe, 0xbc, 0x2e), 0               },  /* Files (Finder, 9.7) */
-    { 'E', GFX_RGB(0x28, 0xc8, 0x40), 0               },  /* Editor   */
+    { 'T', GFX_RGB(0xff, 0x5f, 0x57), "/disk/TERM.ELF"  },  /* Terminal */
+    { 'F', GFX_RGB(0xfe, 0xbc, 0x2e), "/disk/FILES.ELF" },  /* Aurora Files (Finder) */
+    { 'E', GFX_RGB(0x28, 0xc8, 0x40), 0                },  /* Editor   */
     { 'N', GFX_RGB(0x33, 0x99, 0xff), 0               },  /* Net      */
     { 'S', GFX_RGB(0xa8, 0x6f, 0xff), 0               },  /* Settings */
 };
@@ -127,7 +127,9 @@ static void launch(int i)
     char xs[12], ys[12];
     itoa(300 + (n % 6) * 28, xs);   /* cascade, offset from init's Terminals */
     itoa(250 + (n % 6) * 28, ys);
-    char *argv[] = { (char *)slots[i].path, xs, ys, "Terminal*", 0 };
+    /* argv = {path, x, y}; each app sets its own title (the Finder ignores the
+     * position and opens at a fixed spot). */
+    char *argv[] = { (char *)slots[i].path, xs, ys, 0 };
 
     int mid = fork();
     if (mid == 0) {

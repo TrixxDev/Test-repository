@@ -37,7 +37,19 @@
 #define SYS_FBACTIVE 27 /* fb_active()               -> 1 / 0        */
 #define SYS_MOUSE   28  /* mouse_read(int out[3])    -> 0 (blocks)   */
                         /*   out = {dx, dy, buttons}                 */
+#define SYS_READDIR 29  /* readdir(path, index, struct dirent *out)  */
+                        /*   -> 1 (filled) / 0 (past end) / -1 (err) */
 /* Note: SYS_REGISTER takes a service mode in arg2 (was reserved/0).   */
+
+/* ---- directory enumeration (SYS_READDIR) ---- */
+#define DT_FILE 1       /* a regular file      */
+#define DT_DIR  2       /* a directory         */
+
+struct dirent {
+    char     name[64];  /* entry name (NUL-terminated)               */
+    unsigned type;      /* DT_FILE / DT_DIR                          */
+    unsigned size;      /* size in bytes (files)                     */
+};
 
 /* wait() flags (passed in arg2) */
 #define WNOHANG    1    /* return 0 immediately if no child has exited */
@@ -49,7 +61,7 @@
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
 
-#define SYS_MAX    29   /* one past the last valid syscall number    */
+#define SYS_MAX    30   /* one past the last valid syscall number    */
 
 /* ---- socket layer (AF_LOOPBACK only for now) ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

@@ -1,18 +1,21 @@
 # AuroraOS Input & Pointer — Phase 9.3+
 
 **Status: 9.3 (mouse + cursor + click-to-focus), 9.4/9.5 (window dragging +
-close button) and 9.6 (the Dock as a separate process) are implemented and
-verified live in QEMU (v0.9.9).** The PS/2 mouse driver + IRQ12, the cursor,
-hit-testing, click-to-focus, title-bar dragging and the close button all work on
-the real framebuffer; the windowserver also **forwards pointer events to the app
-under the cursor** (`WM_POINTER`), which the Dock uses for hover + click-to-launch.
-Regenerate the proofs with `make demo-focus` (→ `aurora_live_focus.png`: the back
-window is clicked, raised, and typed into), `make demo-drag` (→ `aurora_live_drag.png`:
+close button), 9.6 (the Dock as a separate process) and 9.7 (the Finder,
+`Aurora Files`) are implemented and verified live in QEMU (v0.9.10).** The PS/2
+mouse driver + IRQ12, the cursor, hit-testing, click-to-focus, title-bar dragging
+and the close button all work on the real framebuffer; the windowserver also
+**forwards pointer events to the app under the cursor** (`WM_POINTER`), which the
+Dock uses for hover + click-to-launch and the Finder uses for row selection +
+open. Regenerate the proofs with `make demo-focus` (→ `aurora_live_focus.png`: the
+back window is clicked, raised, and typed into), `make demo-drag` (→ `aurora_live_drag.png`:
 the front Terminal is grabbed by its title bar and moved), `make demo-close`
-(→ `aurora_live_close.png`: its red button is clicked and the window disappears)
-and `make demo-dock` (→ `aurora_live_dock.png`: a Dock icon is clicked and a new
-Terminal launches). `tools/verify_drag.py` pixel-asserts drag + close. This doc is
-the design + the as-built reference.
+(→ `aurora_live_close.png`: its red button is clicked and the window disappears),
+`make demo-dock` (→ `aurora_live_dock.png`: a Dock icon is clicked and a new
+Terminal launches) and `make demo-files` (→ `aurora_live_files.png`: the Finder
+opens from the Dock, lists `/disk`, and launches `TERM.ELF` on double-click).
+`tools/verify_drag.py` pixel-asserts drag + close. This doc is the design + the
+as-built reference.
 
 ## Data flow (mirrors the keyboard pipeline)
 
@@ -103,9 +106,12 @@ server branches on `op`.)
   drag is in progress; the Dock highlights the hovered icon and, on a left-click,
   launches the app (`fork` + double-`fork` + `exec`, so the new app reparents to
   init for reaping). Proof: `make demo-dock`.
-- **9.7 — Launcher / Finder** (`Aurora Files`) as real windowed apps over the VFS
-  (FS write already exists). **NEXT.** It will reuse the same `WM_POINTER` plumbing
-  the Dock introduced (click a file row → open/launch).
+- **9.7 — Finder (`Aurora Files`). DONE.** `user/files.c` lists a directory via the
+  new `readdir` syscall (the VFS through ordinary syscalls, like the shell) and
+  reuses the Dock's `WM_POINTER` plumbing: a click selects a row, a click on the
+  selected row opens it (enter a directory / `..` up / exec an `.ELF` / hand other
+  files to the Viewer). Verified with `make demo-files`. **9.8 — Text Viewer** is
+  next (open `POEM.TXT` from the Finder).
 
 Note: the cursor/hit-test/focus/drag logic is pure and can be exercised with the
 off-screen renderer (drive `wm_*` + synthetic mouse events) *if* useful — but the
@@ -124,6 +130,6 @@ Dock + menus, not from render throughput.
 
 ```
 9.2 (live ✅) → 9.3 cursor + click-to-focus (✅) → 9.4/9.5 window dragging + close (✅)
-             → 9.6 Dock process (✅) → 9.7 Launcher/Finder (next)
+             → 9.6 Dock process (✅) → 9.7 Finder (✅) → 9.8 Text Viewer (next)
 later: client-side surfaces · shared memory · animations · networking
 ```
