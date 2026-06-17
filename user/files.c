@@ -21,6 +21,8 @@ static int wm;
 static int win;
 static int S = 100;                 /* UI scale percent (queried from the system) */
 static int W = DEF_W, H = DEF_H;    /* content size (updated on WM_RESIZE) */
+static gfx_surface_t surf;          /* shared content surface (mapped from server) */
+static int shm_id = -1;
 
 /* Layout metrics scaled by the UI scale (base: 26px header, 20px rows, 8px font).
  * At S=100 these are the original constants. */
@@ -63,21 +65,16 @@ static void join_path(char *out, const char *base, const char *name)
     out[p] = '\0';
 }
 
-/* ---- window-server drawing (same IPC the Terminal uses) ---- */
+/* ---- client-side drawing into the shared content surface ---- */
 
 static void rect(int x, int y, int w, int h, uint32_t color)
 {
-    wm_req_t r; memset(&r, 0, sizeof(r));
-    r.op = WM_DRAW_RECT; r.win = win; r.x = x; r.y = y; r.w = w; r.h = h; r.color = color;
-    msgsend(wm, &r, sizeof(r));
+    gfx_fill_rect(&surf, x, y, w, h, color);
 }
 
 static void text(int x, int y, const char *s, uint32_t color)
 {
-    wm_req_t r; memset(&r, 0, sizeof(r));
-    r.op = WM_DRAW_TEXT; r.win = win; r.x = x; r.y = y; r.color = color;
-    int i = 0; while (s[i] && i < 47) { r.str[i] = s[i]; i++; } r.str[i] = '\0';
-    msgsend(wm, &r, sizeof(r));
+    gfx_draw_text_s(&surf, x, y, s, color, S);
 }
 
 static void present(void)
@@ -195,7 +192,8 @@ int main(int argc, char **argv)
 
     wm_req_t r; wm_rep_t rep;
     memset(&r, 0, sizeof(r));
-    r.op = WM_CREATE; r.x = 160; r.y = 110; r.w = W; r.h = H; r.flags = WM_F_RESIZABLE;
+    r.op = WM_CREATE; r.x = 160; r.y = 110; r.w = W; r.h = H;
+    r.flags = WM_F_RESIZABLE | WM_F_SHM;        /* render client-side, zero-copy */
     { const char *t = "Aurora Files"; int i = 0; while (t[i]) { r.str[i] = t[i]; i++; } r.str[i] = 0; }
     msgsend(wm, &r, sizeof(r));
     int from;
@@ -203,8 +201,14 @@ int main(int argc, char **argv)
         int n = msgrecv(&rep, sizeof(rep), &from);
         if (n >= (int)sizeof(rep) && from == wm) break;
     }
-    if (rep.status != 0 || rep.win <= 0) { fprintf(2, "files: create failed\n"); return 1; }
+    if (rep.status != 0 || rep.win <= 0 || rep.shm < 0) { fprintf(2, "files: create failed\n"); return 1; }
     win = rep.win;
+
+    void *px = shm_map(rep.shm);                 /* map the shared content surface */
+    if (!px) { fprintf(2, "files: shm map failed\n"); return 1; }
+    shm_id = rep.shm;
+    surf.pixels = (uint8_t *)px;
+    surf.width = W; surf.height = H; surf.pitch = W * 4; surf.bpp = 32;
 
     load_dir();
     redraw();
@@ -217,7 +221,15 @@ int main(int argc, char **argv)
         int n = msgrecv(&ev, sizeof(ev), &from);
         if (n < (int)sizeof(ev)) continue;
         if (ev.op == WM_DESTROY) { printf("[files] closed\n"); return 0; }
-        if (ev.op == WM_RESIZE) { W = ev.w; H = ev.h; redraw(); continue; }
+        if (ev.op == WM_RESIZE) {
+            W = ev.w; H = ev.h;
+            if (ev.flags >= 0) {                /* shared surface reallocated: re-map */
+                void *p = shm_map(ev.flags);
+                if (p) { surf.pixels = (uint8_t *)p; shm_id = ev.flags; }
+            }
+            surf.width = W; surf.height = H; surf.pitch = W * 4;
+            redraw(); continue;
+        }
         if (ev.op == WM_SCALE)  { S = ui_scale(); redraw(); continue; }
         if (ev.op == WM_KEY) {                  /* Ctrl+C: copy the selected name */
             if (ev.x == 3 && selected >= 0 && selected < nents) {

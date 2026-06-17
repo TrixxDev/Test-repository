@@ -87,6 +87,12 @@ user/dock.elf: user/dock.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) user/gf
 user/term.elf: user/term.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) user/gfx_u.o user/user.ld
 	$(CC) $(UCFLAGS) -c user/term.c -o user/term.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/term.o user/gfx_u.o $(LIBC_OBJ) -o $@
+user/files.elf: user/files.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) user/gfx_u.o user/user.ld
+	$(CC) $(UCFLAGS) -c user/files.c -o user/files.o
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/files.o user/gfx_u.o $(LIBC_OBJ) -o $@
+user/viewer.elf: user/viewer.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) user/gfx_u.o user/user.ld
+	$(CC) $(UCFLAGS) -c user/viewer.c -o user/viewer.o
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/viewer.o user/gfx_u.o $(LIBC_OBJ) -o $@
 
 $(EMBEDDED): user/init.elf tools/bin2c.py
 	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
