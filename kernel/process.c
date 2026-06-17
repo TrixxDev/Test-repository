@@ -1,6 +1,7 @@
 #include "process.h"
 #include "paging.h"
 #include "pmm.h"
+#include "pit.h"
 #include "elf.h"
 #include "scheduler.h"
 #include "kheap.h"
@@ -143,6 +144,29 @@ static vfs_node_t *create_file(const char *path, int uid)
         node->mode = 0644;
     }
     return node;
+}
+
+int process_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (proc_table[i].state == PROC_RUNNING)
+            n++;
+    return n;
+}
+
+int sys_sysinfo(struct sysinfo *out)
+{
+    if (!is_user_addr((uint32_t)out, sizeof(*out)))
+        return -1;
+    struct sysinfo si;
+    si.ram_kb      = pmm_total_frames() * 4;
+    si.ram_used_kb = pmm_used_frames()  * 4;
+    si.free_frames = pmm_free_frames();
+    si.procs       = (unsigned)process_count();
+    si.uptime_ms   = pit_ticks() * 10;          /* PIT runs at 100 Hz */
+    memcpy(out, &si, sizeof(si));
+    return 0;
 }
 
 int sys_open(const char *path, int flags)

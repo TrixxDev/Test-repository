@@ -167,6 +167,7 @@ enum {
                         (req.x,req.y = content-local; req.w = button bitmask)  */
     WM_STAT,         /* app -> server: log live-window count + heap top (debug) */
     WM_RESIZE,       /* server -> app: your content is now req.w x req.h; redraw */
+    WM_RELOAD_SETTINGS, /* app -> server: re-read /disk/settings.cfg (theme)     */
 };
 
 typedef struct {

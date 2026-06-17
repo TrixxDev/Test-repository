@@ -106,6 +106,12 @@ server branches on `op`.)
   destroy every window but the Dock; **Shut Down** → paint a final screen + the
   `halt` syscall. Lives in the windowserver so it survives a dead Dock.
   Proof: `make demo-menu`.
+- **10.3 — Settings. DONE (v1.1.2).** The Settings app (Aurora menu → Settings)
+  takes pointer clicks (`WM_POINTER`) on its Desktop pane to choose a wallpaper +
+  accent, writes them to `/disk/settings.cfg` (just the VFS), and sends the
+  windowserver `WM_RELOAD_SETTINGS`; the server re-reads the file (also at boot)
+  and re-themes the desktop. A System pane shows `sysinfo`. Proof: `make
+  demo-settings`. **10.4 Clipboard** (`WM_CLIPBOARD_*`) is the last v1.1 piece.
 - **9.5 — Close button. DONE.** A **press** on the red title-bar light
   (`wm_in_close_button`, the left traffic light at `(x+16, y+14)`, drawn with a
   small dark "×") destroys the window (`wm_destroy`) and sends its `owner` a

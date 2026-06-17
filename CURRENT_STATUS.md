@@ -3,8 +3,13 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v1.1.1** — the desktop environment grows. The **Aurora system
-menu** is now live: clicking "Aurora" in the menu bar drops down **About AuroraOS**
+**Current version: v1.1.2** — the desktop environment grows. **Settings** is now a
+real app: a Desktop pane picks the **wallpaper** (Aurora Blue/Dark/Purple/Green)
+and **accent color** (Blue/Orange/Purple/Green), saved to `/disk/settings.cfg`
+(plain `key=value` over the VFS) and applied live (the window server re-reads it on
+`WM_RELOAD_SETTINGS` and at boot — the theme **persists across reboots**); a
+read-only System pane shows version / RAM / pages / processes / uptime from the
+new `sysinfo` syscall. The **Aurora system menu** (v1.1.1) drops down **About AuroraOS**
 (opens the Viewer on the about text), **Settings...** (a placeholder app),
 **Close All Windows** (closes every window but the Dock) and **Shut Down** (a
 "safe to power off" screen + a real `halt` syscall). The menu is drawn by the
@@ -84,7 +89,8 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 | 9.9 | **Stabilization audit**: fix window-buffer leak (heap proven flat), free-on-full, dead-owner window reaping, destroy ownership check; verify zombies/limits/IPC | v1.0.0 | ✅ `make stress` + [docs/STABILITY.md](docs/STABILITY.md) |
 | 10.1 | **Window controls**: minimize (window-shade) + maximize (resize protocol: `WM_RESIZE`, `WM_F_RESIZABLE`, server reallocs the surface; apps resize-aware) | v1.1.0 | ✅ live-confirmed (`make demo-max`/`make demo-min`) |
 | 10.2 | **Aurora system menu** (in the windowserver): About / Settings / Close All Windows / Shut Down (`halt` syscall); launches apps via the menu | v1.1.1 | ✅ live-confirmed (`make demo-menu`) |
-| 10.3–10.4 | Settings (fill the panes) · Clipboard (`WM_CLIPBOARD_*`) | — | ⏳ NEXT (rest of v1.1) |
+| 10.3 | **Settings**: Desktop pane (wallpaper + accent → `/disk/settings.cfg`, live `WM_RELOAD_SETTINGS`, persists) + System pane (`sysinfo`) | v1.1.2 | ✅ live-confirmed (`make demo-settings`) |
+| 10.4 | Clipboard (`WM_CLIPBOARD_*`) — cross-process copy/paste | — | ⏳ NEXT (last of v1.1) |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after the desktop milestone |
 | 10.1 | Aurora Assistant (userspace `aurorad`) + more desktop apps | — | ⏳ later |
 
@@ -169,6 +175,15 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
   codes (`include/keys.h`) that flow through the existing char pipeline →
   `WM_KEY`. **Confirmed live**: `make demo-view` opens the Finder, double-clicks
   `ABOUT.TXT`, and the Viewer shows it scrolled by PgDn (`aurora_live_view.png`).
+- Settings (10.3, v1.1.2): the Settings app (launched from the Aurora menu) has a
+  Desktop pane that sets the wallpaper + accent color and a read-only System pane.
+  Choices are written to `/disk/settings.cfg` as plain `key=value` lines (just the
+  VFS — `open`/`write`/`close`, no new IPC); the windowserver re-reads them on a
+  `WM_RELOAD_SETTINGS` message and at boot, so the desktop re-themes live and the
+  choice survives a reboot. The System pane reads RAM / free pages / process count
+  / uptime via the new `sysinfo` syscall. **Confirmed live**: `make demo-settings`
+  switches to the Aurora Dark wallpaper + Orange accent (`aurora_live_settings.png`);
+  a fresh boot loads the saved theme.
 - Aurora system menu (10.2, v1.1.1): the menu bar's "Aurora" title opens a
   windowserver-drawn dropdown. **About AuroraOS** launches the Viewer on
   `/disk/ABOUT.TXT`; **Settings...** launches the `settings` placeholder app
@@ -214,16 +229,16 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 - **user:** crt0, libc (libc.h + string/printf/malloc/net), wm (compositor core),
   init, logger, netd, sh, cat, grep, hello, orphan, echosrv, echocli, save,
   wserver (windowserver), term (Terminal app), dock (Dock app),
-  files (Finder / Aurora Files), viewer (Text Viewer), settings (placeholder),
+  files (Finder / Aurora Files), viewer (Text Viewer), settings (control panel),
   wmstress (WS self-test).
 - **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py,
   genfont.py, screendump.py (headless live-framebuffer capture via QEMU monitor),
   verify_drag.py (pixel-asserts window drag + close).
 - **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT, STABILITY.
 
-## Syscalls (30)
+## Syscalls (31)
 
 `putc, yield, exit, fork, exec, wait, open, read, write, close, getpid, pipe,
 dup2, sbrk, msgsend, msgrecv, register, lookup, kill, socket, sock_link, poll,
-getuid, setuid, uid_of, fb_map, fb_active, mouse, readdir, halt`. See
+getuid, setuid, uid_of, fb_map, fb_active, mouse, readdir, halt, sysinfo`. See
 [docs/SYSCALLS.md](docs/SYSCALLS.md).

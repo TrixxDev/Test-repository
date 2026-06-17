@@ -145,6 +145,10 @@ void syscall_handler(registers_t *regs)
                                           (struct dirent *)regs->edx);
         break;
 
+    case SYS_SYSINFO:
+        regs->eax = (uint32_t)sys_sysinfo((struct sysinfo *)regs->ebx);
+        break;
+
     case SYS_HALT:
         if (process_current()->uid != 0) {      /* root only */
             regs->eax = (uint32_t)-1;

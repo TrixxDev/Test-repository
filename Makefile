@@ -174,7 +174,7 @@ screenshot-wm:
 # live framebuffer to a PNG via the QEMU monitor — proves the GUI on actual
 # hardware emulation without needing a display. `verify-gui` types into the
 # Terminal first to also prove the keyboard pipeline.
-.PHONY: live-shot verify-gui demo-focus demo-drag demo-close demo-dock demo-files demo-view demo-max demo-min demo-menu stress
+.PHONY: live-shot verify-gui demo-focus demo-drag demo-close demo-dock demo-files demo-view demo-max demo-min demo-menu demo-settings stress
 live-shot: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live.png
 verify-gui: $(KERNEL) $(DISK)
@@ -231,6 +231,12 @@ demo-min: $(KERNEL) $(DISK)
 demo-menu: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_menu.png \
 	    --mouse "move:472,370;click"
+# Phase 10.3: open the Aurora menu -> Settings, then pick the "Aurora Dark"
+# wallpaper and the "Orange" accent. Settings writes /disk/settings.cfg and the
+# window server re-reads it (WM_RELOAD_SETTINGS), so the desktop retheme is live.
+demo-settings: $(KERNEL) $(DISK)
+	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_settings.png \
+	    --mouse "move:472,370;click;move:-68,-59;click;wait:2;move:-392,-207;click;wait:1;move:0,-128;click;wait:1"
 # Stabilization audit: click the Dock's diagnostics icon (E) to run the window
 # server stress / leak self-test; the serial log shows the heap top (brk) staying
 # flat across 50 create/destroy cycles and a graceful window-table limit.

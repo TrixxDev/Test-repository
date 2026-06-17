@@ -55,6 +55,8 @@ static inline int   mouse_read(int *info)                { return _syscall(SYS_M
 static inline int   readdir(const char *path, int index, struct dirent *out) { return _syscall(SYS_READDIR, (int)path, index, (int)out); }
 /* Power off the machine (root only; no return on success). */
 static inline int   halt(void)                          { return _syscall(SYS_HALT, 0, 0, 0); }
+/* Fill *out with RAM/process/uptime stats. Returns 0/-1. */
+static inline int   sysinfo(struct sysinfo *out)        { return _syscall(SYS_SYSINFO, (int)out, 0, 0); }
 
 /* send/recv are just write/read on a connected socket fd. */
 static inline int send(int fd, const void *b, int n)     { return write(fd, b, n); }

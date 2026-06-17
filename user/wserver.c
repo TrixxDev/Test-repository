@@ -8,6 +8,7 @@
  */
 #include "libc.h"
 #include "wm.h"
+#include "desktop.h"
 
 static wm_state_t   st;
 static gfx_surface_t screen;    /* the live framebuffer (slow VRAM) */
@@ -42,6 +43,53 @@ typedef struct {
 static int menu_open  = 0;
 static int menu_hover = -1;
 
+/* ---- theme settings (/disk/settings.cfg) ---- */
+static const char *const WP_NAMES[4] = { "blue", "dark", "purple", "green" };
+static const char *const AC_NAMES[4] = { "blue", "orange", "purple", "green" };
+
+static int cfg_value(const char *buf, const char *key, char *out, int cap)
+{
+    int klen = (int)strlen(key);
+    for (const char *p = buf; *p; ) {
+        if (strncmp(p, key, (size_t)klen) == 0 && p[klen] == '=') {
+            const char *v = p + klen + 1;
+            int i = 0;
+            while (v[i] && v[i] != '\n' && v[i] != '\r' && i < cap - 1) { out[i] = v[i]; i++; }
+            out[i] = '\0';
+            return 1;
+        }
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+    return 0;
+}
+
+static int cfg_map(const char *v, const char *const *names, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(v, names[i]) == 0) return i;
+    return 0;                               /* default to index 0 */
+}
+
+/* Read /disk/settings.cfg and apply the wallpaper + accent theme. */
+static void load_settings(void)
+{
+    int wp = 0, ac = 0;
+    int fd = open("/disk/settings.cfg", O_RDONLY);
+    if (fd >= 0) {
+        char buf[256];
+        int n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            char val[16];
+            if (cfg_value(buf, "wallpaper", val, sizeof(val))) wp = cfg_map(val, WP_NAMES, 4);
+            if (cfg_value(buf, "accent",    val, sizeof(val))) ac = cfg_map(val, AC_NAMES, 4);
+        }
+    }
+    desktop_set_theme(wp, ac);
+}
+
 static const char *menu_items[MENU_N] = {
     "About AuroraOS",
     "Settings...",
@@ -66,8 +114,9 @@ static int menu_item_at(int x, int y)   /* item under (x,y) while open, or -1 */
 static void draw_menu(gfx_surface_t *dst)
 {
     if (!menu_open) return;
-    /* Highlight the Aurora title in the bar. */
-    gfx_fill_rect(dst, AURORA_X0, 0, AURORA_X1 - AURORA_X0, MENUBAR_H, GFX_RGB(0x33, 0x66, 0xff));
+    uint32_t accent = desktop_accent_color();
+    /* Highlight the Aurora title in the bar (theme accent). */
+    gfx_fill_rect(dst, AURORA_X0, 0, AURORA_X1 - AURORA_X0, MENUBAR_H, accent);
     gfx_fill_round_rect(dst, 12, 6, 16, 16, 4, GFX_RGB(0xff, 0xff, 0xff));
     gfx_draw_text(dst, 36, 6, "Aurora", GFX_RGB(0xff, 0xff, 0xff));
     /* Dropdown: a hard shadow, then a light rounded panel with the items. */
@@ -77,7 +126,7 @@ static void draw_menu(gfx_surface_t *dst)
         int iy = MENU_Y + MENU_PAD + i * MENU_ITEM_H;
         uint32_t fg = GFX_RGB(0x22, 0x22, 0x2a);
         if (i == menu_hover) {
-            gfx_fill_rect(dst, MENU_X + 3, iy, MENU_W - 6, MENU_ITEM_H, GFX_RGB(0x34, 0x78, 0xf6));
+            gfx_fill_rect(dst, MENU_X + 3, iy, MENU_W - 6, MENU_ITEM_H, accent);
             fg = GFX_RGB(0xff, 0xff, 0xff);
         }
         gfx_draw_text(dst, MENU_X + 14, iy + (MENU_ITEM_H - 16) / 2, menu_items[i], fg);
@@ -314,6 +363,7 @@ int main(int argc, char **argv)
     st.cursor_on = 1;                /* the windowserver owns the pointer */
     st.cursor_x = screen.width / 2;
     st.cursor_y = screen.height / 2;
+    load_settings();                 /* apply the saved wallpaper + accent theme */
     compose();                       /* build the empty desktop in the back buffer */
     flush(0, 0, screen.width, screen.height);   /* push it (with cursor) once */
     printf("[wm] ready (pid %d), framebuffer %ux%u pitch %u\n",
@@ -407,6 +457,12 @@ int main(int argc, char **argv)
             /* Diagnostics: live-window count + heap top, for leak/stress checks. */
             printf("[wm] stat: live=%d brk=0x%x\n",
                    wm_window_count(&st), (unsigned)(uintptr_t)sbrk(0));
+            break;
+        case WM_RELOAD_SETTINGS:
+            /* Settings changed /disk/settings.cfg: re-apply the theme + repaint. */
+            load_settings();
+            compose();
+            flush(0, 0, screen.width, screen.height);
             break;
         case WM_MOUSE: {
             /* Move the cursor, then run the pointer state machine. The scene only

@@ -40,6 +40,16 @@
 #define SYS_READDIR 29  /* readdir(path, index, struct dirent *out)  */
                         /*   -> 1 (filled) / 0 (past end) / -1 (err) */
 #define SYS_HALT    30  /* halt() -> no return (root only); powers off */
+#define SYS_SYSINFO 31  /* sysinfo(struct sysinfo *out) -> 0/-1         */
+
+/* ---- system info (SYS_SYSINFO) ---- */
+struct sysinfo {
+    unsigned ram_kb;        /* total usable RAM (KiB)            */
+    unsigned ram_used_kb;   /* RAM in use (KiB)                  */
+    unsigned free_frames;   /* free 4 KiB page frames            */
+    unsigned procs;         /* running processes                 */
+    unsigned uptime_ms;     /* milliseconds since boot           */
+};
 /* Note: SYS_REGISTER takes a service mode in arg2 (was reserved/0).   */
 
 /* ---- directory enumeration (SYS_READDIR) ---- */
@@ -62,7 +72,7 @@ struct dirent {
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
 
-#define SYS_MAX    31   /* one past the last valid syscall number    */
+#define SYS_MAX    32   /* one past the last valid syscall number    */
 
 /* ---- socket layer (AF_LOOPBACK only for now) ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

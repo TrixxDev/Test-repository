@@ -5,3 +5,8 @@
 #include "gfx.h"
 
 void desktop_render(gfx_surface_t *s);
+
+/* Theme: wallpaper 0=blue 1=dark 2=purple 3=green; accent 0=blue 1=orange
+ * 2=purple 3=green. The windowserver sets these from /disk/settings.cfg. */
+void     desktop_set_theme(int wallpaper, int accent);
+uint32_t desktop_accent_color(void);

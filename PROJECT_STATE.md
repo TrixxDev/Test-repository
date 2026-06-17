@@ -16,8 +16,9 @@ It has moved well past a "teaching kernel" — **v1.0.0 was the first stabilized
 release** (a functional GUI OS hardened by a memory/process/IPC audit, see
 [docs/STABILITY.md](docs/STABILITY.md)); **v1.1.x** grows the desktop environment
 — a complete window model (**minimize/maximize** via a `WM_RESIZE` resize protocol,
-on top of close/focus/drag) and an **Aurora system menu** (About / Settings /
-Close All Windows / Shut Down, drawn by the window server). It is an early
+on top of close/focus/drag), an **Aurora system menu** (About / Settings / Close
+All Windows / Shut Down) and a **Settings** app (wallpaper + accent theme saved to
+`/disk/settings.cfg` and applied live; a System info pane). It is an early
 Unix-like execution environment that looks like a platform of services, with the
 first slice of its macOS-like visual stack: a framebuffer, a 2D library with an
 8×16 font, and a **userspace window server** with an event loop that takes
@@ -30,11 +31,11 @@ and a **Text Viewer** that renders a file's contents and scrolls with the arrow
 keys), with a **double-buffered, damage-driven compositor** that repaints only the
 rectangles that change rather than the whole screen on every event. It is **not**
 yet a daily-driver OS (no external networking yet — loopback only; a basic
-permission model — uid + rwx — but no login/groups). With the stabilization audit
-done, the next step is the **10.0 Desktop Environment** milestone (system menu,
-settings, window minimize/maximize), then networking (virtio-net → TCP).
+permission model — uid + rwx — but no login/groups). The desktop environment is
+nearly complete; the last v1.1 piece is a clipboard (10.4), after which come
+networking (virtio-net → TCP) and shared-memory surfaces in v2.0.
 
-- **Current version:** v1.1.1
+- **Current version:** v1.1.2
 - **Size:** ~6,800 lines of C / assembly (plus a generated 8×16 font header)
   across kernel + drivers + fs + libc + userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
@@ -53,14 +54,14 @@ settings, window minimize/maximize), then networking (virtio-net → TCP).
 | Memory | ✅ | E820 parse, bitmap PMM, paging (recursive), per-process address spaces, kernel heap, `sbrk`. |
 | Scheduling | ✅ | Preemptive round-robin threads, run states, block/wake, idle thread, context switch. |
 | Processes | ✅ | PCB, `fork`/`exec`/`wait`/`exit`, exit codes, reparent-to-init, zombie reaping, `kill`. |
-| Ring 3 | ✅ | User mode via TSS + `iret`, `int 0x80` syscalls (30 calls). |
+| Ring 3 | ✅ | User mode via TSS + `iret`, `int 0x80` syscalls (31 calls). |
 | Filesystem | ✅ | VFS (mounts, vnodes, ops, rwx/owner); tmpfs (rw); FAT32 **read/write** over ATA (create/grow/truncate); console device. |
 | Executables | ✅ | ELF32 loader (PT_LOAD), `argc`/`argv` setup, crt0. |
 | IPC | ✅ | Pipes (`pipe`/`dup2`), message passing (`msgsend`/`msgrecv`), named service registry. |
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
-| Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`, `save`, `wserver`, `term`, `dock`, `files` (Finder), `viewer` (Text Viewer), `settings` (placeholder), `wmstress` (WS self-test). |
+| Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`, `save`, `wserver`, `term`, `dock`, `files` (Finder), `viewer` (Text Viewer), `settings` (control panel), `wmstress` (WS self-test). |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | ✅ (9.0–9.8) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** (damage-driven compositor) + **keyboard & mouse pipelines** + interactive Terminals + a **standalone Dock process** + a **Finder (`Aurora Files`)** + a **Text Viewer** (surfaces, z-order, focus, window IPC, **cursor + click-to-focus + title-bar dragging + close/minimize/maximize + Aurora system menu + pointer forwarding + Dock click-to-launch + `readdir` file browsing + text rendering & scroll**). **Live-confirmed in QEMU** (`make demo-focus/drag/close/dock/files/view/max/min/menu`). Settings + Clipboard next. |
+| Graphics | ✅ (9.0–10.3) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); themeable desktop; **event-driven userspace `windowserver`** (damage-driven compositor) + **keyboard & mouse pipelines** + Terminals + a **standalone Dock** + a **Finder** + a **Text Viewer** + a **Settings** app (surfaces, z-order, focus, window IPC, **cursor + click-to-focus + title-bar dragging + close/minimize/maximize + Aurora system menu + Settings/themes + pointer forwarding + Dock click-to-launch + `readdir` + text rendering & scroll**). **Live-confirmed in QEMU** (`make demo-focus/drag/close/dock/files/view/max/min/menu/settings`). Clipboard next. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What it looks like
@@ -114,6 +115,7 @@ make demo-view      # open the Finder, double-click ABOUT.TXT -> the Viewer rend
 make demo-max       # click a Terminal's green light -> maximize it to fill the screen
 make demo-min       # click a Terminal's yellow light -> window-shade it to its title bar
 make demo-menu      # click "Aurora" in the menu bar -> the system menu drops down
+make demo-settings  # Aurora menu -> Settings -> pick a wallpaper + accent (live retheme)
 make stress         # window-server leak/limit self-test (heap stays flat; see docs/STABILITY.md)
 make screenshot     # render the desktop to aurora_desktop.png (no QEMU needed)
 make screenshot-wm  # render the compositor (two windows) to aurora_windows.png
@@ -140,7 +142,7 @@ user/        crt0, libc (libc.h + libc/), wm (windowserver core: wm.h + wm.c),
              dock (Dock — borderless GUI client, click-to-launch),
              files (Finder / Aurora Files — readdir-based file browser),
              viewer (Text Viewer — open/read/render + scroll),
-             settings (placeholder app launched from the Aurora menu),
+             settings (control panel: wallpaper/accent + System info),
              wmstress (window-server leak/limit self-test), about.txt)
 boot/        grub.cfg (for the `make iso` GRUB boot path)
 tools/       bin2c.py (embed ELF), mkfat32.py (FAT32 image), render_desktop.c +

@@ -186,21 +186,23 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**v1.1.0 (window controls) and v1.1.1 (Aurora system menu) are done.** The window
-model is complete (close · focus · drag · minimize · maximize), and the menu bar's
-"Aurora" title is the live entry point for system actions (About / Settings /
-Close All Windows / Shut Down), drawn by the window server.
+**v1.1.0 (window controls), v1.1.1 (Aurora system menu) and v1.1.2 (Settings) are
+done.** The desktop environment is nearly complete: windows (close/focus/drag/
+minimize/maximize), Dock, Finder, Viewer, Terminal, system menu, and a Settings
+app that themes the desktop (wallpaper + accent in `/disk/settings.cfg`, applied
+live and persisted) with a System info pane.
 
-**Continue v1.1 — Settings, then Clipboard:**
+**Finish v1.1 — Clipboard (10.4, v1.1.3):** `WM_CLIPBOARD_SET` / `WM_CLIPBOARD_GET`
+— the window server holds one (bounded) string; an app copies the current
+selection/line and another pastes it. Wire Terminal "copy line" and Viewer/
+Terminal "paste". This is the first real cross-process data sharing through the
+WM and rounds out the desktop. Design points: a fixed max length, last-writer-wins
+ownership, plain text only.
 
-- **10.3 Settings (v1.1.2):** fill the `settings` placeholder — a Desktop pane
-  (wallpaper / accent color, persisted to the VFS) and a read-only System pane
-  (memory/`brk` via the `WM_STAT`-style data, running processes). The window +
-  sidebar already exist; wire the pane content and make the sidebar clickable
-  (reuse `WM_POINTER`).
-- **10.4 Clipboard (v1.1.3):** `WM_CLIPBOARD_SET` / `WM_CLIPBOARD_GET` — the
-  window server holds one string; Terminal "copy line" → Viewer/Terminal "paste".
-  The first real cross-process data sharing through the WM.
+After v1.1.3 the desktop environment is complete; **v2.0** opens the
+infrastructure track again — client-side **shared-memory surfaces**, then
+**networking** (8B: virtio-net → ARP → IPv4 → UDP → TCP → DNS), then the
+**Aurora Assistant** (`aurorad`).
 
 Deliberately deferred (per the agreed priority): client-side **shared-memory
 surfaces** (architectural rework, low payoff now) and **networking** (8B:

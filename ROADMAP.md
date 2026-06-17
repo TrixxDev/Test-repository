@@ -191,8 +191,14 @@
   About → Viewer на ABOUT.TXT, Settings → заглушка, Close All Windows закрывает
   все окна кроме Dock, Shut Down → экран «safe to power off» + syscall `halt`
   (ACPI-poweroff, root-only). Проверка: `make demo-menu`.
-- [ ] **10.3–10.4 (остаток v1.1)**: наполнить Settings, буфер обмена
-  (`WM_CLIPBOARD_SET/GET`).
+- [x] **10.3 Settings → v1.1.2**: приложение Settings (запускается из меню
+  Aurora). Desktop-панель выбирает обои (Aurora Blue/Dark/Purple/Green) и акцент
+  (Blue/Orange/Purple/Green) → пишет `/disk/settings.cfg` (`key=value` через VFS,
+  без нового IPC); windowserver перечитывает по `WM_RELOAD_SETTINGS` и при старте
+  — тема применяется вживую и **сохраняется между перезагрузками**. System-панель
+  показывает версию/RAM/страницы/процессы/uptime через новый syscall `sysinfo`.
+  Проверка: `make demo-settings`.
+- [ ] **10.4 (последнее в v1.1)**: буфер обмена (`WM_CLIPBOARD_SET/GET`).
 - [ ] потом (когда десктоп «живой»): client-side surfaces, shared memory,
   анимации, сеть (virtio-net/TCP)
 
