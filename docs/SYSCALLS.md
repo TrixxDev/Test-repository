@@ -21,7 +21,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 13 | `dup2`   | `dup2(int oldfd, int newfd) -> newfd` | Duplicate a descriptor onto `newfd`. |
 | 14 | `sbrk`   | `sbrk(int incr) -> old_brk` | Grow the user heap; returns the previous break. |
 | 15 | `msgsend`| `msgsend(int pid, const void *buf, int len) -> 0/-1` | Send an IPC message to a process. |
-| 16 | `msgrecv`| `msgrecv(void *buf, int len, int *from) -> n` | Block until a message arrives; returns length, sets sender pid. |
+| 16 | `msgrecv`| `msgrecv(void *buf, int len, int *from) -> n` | Block until a message arrives; returns length, sets sender pid. OR `MSG_NOWAIT` into `len` (libc `msgrecv_nb`) to return `-1` immediately when the mailbox is empty instead of blocking — lets a single-mailbox event loop drain a burst. |
 | 17 | `register` | `register(const char *name, uint mode) -> 0/-1` | Register the current pid under a service name with a permission `mode` (libc `svc_register` defaults to `0644`). Re-registering a name is allowed only for its owner or root. |
 | 18 | `lookup` | `lookup(const char *name) -> pid/-1` | Resolve a service name to a pid. Requires "read" permission on the service (`-1` if denied or absent). |
 | 19 | `kill`   | `kill(int pid) -> 0/-1` | Forcibly terminate another process (force-kill fallback for shutdown). |

@@ -407,9 +407,15 @@ int sys_msgsend(int pid, const void *buf, int len)
 
 int sys_msgrecv(void *buf, int len, int *from)
 {
+    int nowait = (len & MSG_NOWAIT) != 0;   /* high bit of len = don't block */
+    len &= ~MSG_NOWAIT;
     process_t *p = process_current();
 
     __asm__ volatile("cli");
+    if (p->mbox_head == NULL && nowait) {
+        __asm__ volatile("sti");
+        return -1;                          /* mailbox empty: would block */
+    }
     while (p->mbox_head == NULL) {
         p->mbox_waiter = thread_current();
         thread_block();

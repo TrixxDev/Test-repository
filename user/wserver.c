@@ -415,15 +415,45 @@ int main(int argc, char **argv)
     printf("[wm] ready (pid %d), framebuffer %ux%u pitch %u\n",
            getpid(), info[0], info[1], info[2]);
 
-    /* Event loop: one source (the mailbox) carries app requests, keys and mouse. */
+    /* Event loop: one source (the mailbox) carries app requests, keys and mouse.
+     *
+     * The PS/2 mouse can emit ~200 events/s, but the compositor only needs to
+     * paint as fast as it can. So when a WM_MOUSE arrives we drain the mailbox
+     * (non-blocking) and *coalesce* consecutive same-button motion into a single
+     * event — summing the deltas — before doing one recomposite. This caps the
+     * compose/flush rate at the server's render throughput instead of the packet
+     * rate. Button *edges* (press/release) and non-mouse messages break the run
+     * so clicks are never merged away; the message that broke it is stashed and
+     * handled on the next iteration (with its original sender preserved). */
     int prev_buttons = 0;
     drag_state_t drag = { 0, 0, 0, 0 };
+    wm_req_t stash; int have_stash = 0, stash_from = -1;
     for (;;) {
         wm_req_t req;
         int from = -1;
-        int n = msgrecv(&req, sizeof(req), &from);
-        if (n < (int)sizeof(req))
-            continue;
+        if (have_stash) {
+            req = stash; from = stash_from; have_stash = 0;
+        } else {
+            int n = msgrecv(&req, sizeof(req), &from);
+            if (n < (int)sizeof(req))
+                continue;
+        }
+
+        if (req.op == WM_MOUSE) {
+            for (;;) {
+                wm_req_t nx; int nf = -1;
+                int n2 = msgrecv_nb(&nx, sizeof(nx), &nf);
+                if (n2 < (int)sizeof(nx))
+                    break;                  /* mailbox empty (or short): stop */
+                if (nx.op == WM_MOUSE && nx.w == req.w) {
+                    req.x += nx.x;          /* same buttons: merge the motion */
+                    req.y += nx.y;
+                    continue;
+                }
+                stash = nx; stash_from = nf; have_stash = 1;  /* handle next */
+                break;
+            }
+        }
 
         switch (req.op) {
         case WM_CREATE: {

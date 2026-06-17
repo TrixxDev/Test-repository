@@ -24,6 +24,7 @@
 #define SYS_SBRK   14   /* sbrk(int incr)            -> old brk      */
 #define SYS_MSGSEND 15  /* msgsend(pid, buf, len)    -> 0 / -1       */
 #define SYS_MSGRECV 16  /* msgrecv(buf, len, &from)  -> n (blocks)   */
+                        /*   OR len|MSG_NOWAIT -> n, or -1 if empty  */
 #define SYS_REGISTER 17 /* register(name)            -> 0 / -1       */
 #define SYS_LOOKUP  18  /* lookup(name)              -> pid / -1     */
 #define SYS_KILL    19  /* kill(pid)                 -> 0 / -1       */
@@ -64,6 +65,11 @@ struct dirent {
 
 /* wait() flags (passed in arg2) */
 #define WNOHANG    1    /* return 0 immediately if no child has exited */
+
+/* msgrecv() flag, OR'd into the `len` argument: return -1 immediately instead of
+ * blocking when the mailbox is empty. (High bit so it never collides with a real
+ * buffer length.) Lets a single-mailbox event loop drain a burst of messages. */
+#define MSG_NOWAIT 0x40000000
 
 /* open() flags (passed in arg2): low 2 bits are the access mode */
 #define O_RDONLY   0

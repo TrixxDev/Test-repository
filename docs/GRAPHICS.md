@@ -209,11 +209,22 @@ Two invariants, deliberately simple at this stage:
   just the windows onto a caller-supplied background; `wm_compose` (desktop +
   windows) is kept for the host PNG renderer.
 
-  Remaining levers (not yet done): an **FPS cap / mouse-event coalescing** (the
-  mouse helper can emit ~200 events/s but the compositor only needs ~60 fps) needs
-  a non-blocking `msgrecv` (`MSG_NOWAIT`) since the event loop currently blocks on
-  one mailbox; and **per-window surface caching** (skip redrawing windows that did
-  not change) is a further upgrade once the background cost is gone.
+- **Mouse-event coalescing / FPS cap (v1.1.x perf pass):** the PS/2 mouse can
+  emit ~200 events/s, but the compositor only needs to paint as fast as it can.
+  When a `WM_MOUSE` arrives the event loop drains the mailbox **non-blockingly**
+  (`msgrecv_nb`, backed by a new `MSG_NOWAIT` flag OR'd into `msgrecv`'s length
+  argument) and **coalesces** consecutive same-button motion into one event by
+  summing the deltas, then does a single recomposite. This caps the compose/flush
+  rate at the server's render throughput instead of the packet rate — no wall-clock
+  frame timer needed, since draining the backlog each iteration self-limits the
+  work. Button **edges** (press/release) and non-mouse messages break the run, so
+  clicks are never merged away; the message that broke the run is stashed (with its
+  original sender) and handled on the next loop iteration. Verified: `verify_drag`
+  (drag + close), click-to-focus, and Dock click-to-launch all still pass.
+
+  Remaining lever (not yet done): **per-window surface caching** (skip redrawing
+  windows whose content did not change) is a further upgrade once the background
+  and per-frame costs are gone.
 
 **Keyboard pipeline** (closing the loop keyboard → windowserver → app → screen):
 the windowserver forks a small helper child that blocks on the console

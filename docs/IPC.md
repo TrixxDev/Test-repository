@@ -42,7 +42,10 @@ Datagram mailboxes attached to processes (`kernel/process.c`).
   bytes into the target's mailbox and wakes it. Non-blocking; fails if the
   target is gone or its mailbox is full.
 - `msgrecv(void *buf, int len, int *from)` — blocks until a message is queued,
-  then returns its length and the sender pid.
+  then returns its length and the sender pid. OR `MSG_NOWAIT` into `len` (libc
+  `msgrecv_nb`) for a non-blocking receive: returns `-1` at once if the mailbox is
+  empty. The window server uses this to drain and coalesce a burst of mouse events
+  before recompositing once.
 - Each message records the sender's pid; mailboxes are bounded (back-pressure
   via `-1` on overflow). Pending messages are freed when a process exits.
 

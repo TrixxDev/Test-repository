@@ -33,6 +33,9 @@ static inline void *sbrk(int incr)                      { return (void *)_syscal
 /* message-passing IPC + named services */
 static inline int msgsend(int pid, const void *b, int n) { return _syscall(SYS_MSGSEND, pid, (int)b, n); }
 static inline int msgrecv(void *b, int n, int *from)     { return _syscall(SYS_MSGRECV, (int)b, n, (int)from); }
+/* Non-blocking receive: returns n (>=0) if a message was dequeued, or -1 if the
+ * mailbox was empty (would block). Lets an event loop drain a burst of events. */
+static inline int msgrecv_nb(void *b, int n, int *from)  { return _syscall(SYS_MSGRECV, (int)b, n | MSG_NOWAIT, (int)from); }
 /* svc_register defaults to a world-discoverable service (0644); use
  * svc_register_mode for a private one (e.g. 0600 = root-only lookup). */
 static inline int svc_register_mode(const char *name, int mode) { return _syscall(SYS_REGISTER, (int)name, mode, 0); }
