@@ -3,12 +3,16 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v1.1.0** — the desktop environment grows. On top of the
-stabilized v1.0.0 base, the **window model is complete**: windows can be
-**minimized** (window-shade: collapse to the title bar) and **maximized**
-(the server reallocs the surface to fill the screen and sends `WM_RESIZE`; the
-app redraws — Terminal, Finder and Viewer are resize-aware), alongside the
-existing close / focus / drag. The v1.0.0 base remains a full GUI stack (window
+**Current version: v1.1.1** — the desktop environment grows. The **Aurora system
+menu** is now live: clicking "Aurora" in the menu bar drops down **About AuroraOS**
+(opens the Viewer on the about text), **Settings...** (a placeholder app),
+**Close All Windows** (closes every window but the Dock) and **Shut Down** (a
+"safe to power off" screen + a real `halt` syscall). The menu is drawn by the
+window server itself (chrome), so it works even if the Dock or an app has died.
+Also (v1.1.0) the **window model is complete**: windows can be **minimized**
+(window-shade: collapse to the title bar) and **maximized** (the server reallocs
+the surface to fill the screen and sends `WM_RESIZE`; the app redraws — Terminal,
+Finder and Viewer are resize-aware), alongside close / focus / drag. The v1.0.0 base remains a full GUI stack (window
 server, Dock, Finder, Viewer, Terminal) over a Unix-like kernel, hardened by a
 memory/process/IPC **stabilization audit** (see
 [docs/STABILITY.md](docs/STABILITY.md)): the window content-buffer leak is fixed
@@ -79,7 +83,8 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 | 9.8 | **Text Viewer** (`user/viewer.c`): `open`/`read`/`close` + 8×16 font, arrow/PgUp/PgDn scroll (keyboard now decodes extended scancodes) | v0.9.11 | ✅ live-confirmed in QEMU (`make demo-view`) |
 | 9.9 | **Stabilization audit**: fix window-buffer leak (heap proven flat), free-on-full, dead-owner window reaping, destroy ownership check; verify zombies/limits/IPC | v1.0.0 | ✅ `make stress` + [docs/STABILITY.md](docs/STABILITY.md) |
 | 10.1 | **Window controls**: minimize (window-shade) + maximize (resize protocol: `WM_RESIZE`, `WM_F_RESIZABLE`, server reallocs the surface; apps resize-aware) | v1.1.0 | ✅ live-confirmed (`make demo-max`/`make demo-min`) |
-| 10.2–10.4 | System menu (Aurora) · Settings · Clipboard (`WM_CLIPBOARD_*`) | — | ⏳ NEXT (rest of v1.1) |
+| 10.2 | **Aurora system menu** (in the windowserver): About / Settings / Close All Windows / Shut Down (`halt` syscall); launches apps via the menu | v1.1.1 | ✅ live-confirmed (`make demo-menu`) |
+| 10.3–10.4 | Settings (fill the panes) · Clipboard (`WM_CLIPBOARD_*`) | — | ⏳ NEXT (rest of v1.1) |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after the desktop milestone |
 | 10.1 | Aurora Assistant (userspace `aurorad`) + more desktop apps | — | ⏳ later |
 
@@ -164,6 +169,16 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
   codes (`include/keys.h`) that flow through the existing char pipeline →
   `WM_KEY`. **Confirmed live**: `make demo-view` opens the Finder, double-clicks
   `ABOUT.TXT`, and the Viewer shows it scrolled by PgDn (`aurora_live_view.png`).
+- Aurora system menu (10.2, v1.1.1): the menu bar's "Aurora" title opens a
+  windowserver-drawn dropdown. **About AuroraOS** launches the Viewer on
+  `/disk/ABOUT.TXT`; **Settings...** launches the `settings` placeholder app
+  (both via a double-`fork`+`exec` from the windowserver); **Close All Windows**
+  destroys every window but the Dock (apps get `WM_DESTROY` and exit);
+  **Shut Down** paints "It is now safe to power off AuroraOS." and calls the new
+  root-only `halt` syscall (ACPI poweroff + CPU halt). The menu lives in the
+  windowserver (chrome), so it works even with no Dock. **Confirmed live**: `make
+  demo-menu` (`aurora_live_menu.png`), plus About/Settings/Close/Shut Down each
+  verified (`aurora_live_shutdown.png`).
 - Window controls (10.1, v1.1.0): the title-bar traffic lights are live — red
   closes (9.5), **yellow window-shades** (collapse to/expand from the title bar),
   **green maximizes/restores**. Maximize uses a resize protocol: a window opts in
@@ -199,15 +214,16 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 - **user:** crt0, libc (libc.h + string/printf/malloc/net), wm (compositor core),
   init, logger, netd, sh, cat, grep, hello, orphan, echosrv, echocli, save,
   wserver (windowserver), term (Terminal app), dock (Dock app),
-  files (Finder / Aurora Files), viewer (Text Viewer), wmstress (WS self-test).
+  files (Finder / Aurora Files), viewer (Text Viewer), settings (placeholder),
+  wmstress (WS self-test).
 - **tools:** bin2c.py, mkfat32.py, render_desktop.c, render_wm.c, ppm2png.py,
   genfont.py, screendump.py (headless live-framebuffer capture via QEMU monitor),
   verify_drag.py (pixel-asserts window drag + close).
 - **docs:** ABI, SYSCALLS, PROCESS_MODEL, VFS, IPC, NETWORKING, GRAPHICS, INPUT, STABILITY.
 
-## Syscalls (29)
+## Syscalls (30)
 
 `putc, yield, exit, fork, exec, wait, open, read, write, close, getpid, pipe,
 dup2, sbrk, msgsend, msgrecv, register, lookup, kill, socket, sock_link, poll,
-getuid, setuid, uid_of, fb_map, fb_active, mouse, readdir`. See
+getuid, setuid, uid_of, fb_map, fb_active, mouse, readdir, halt`. See
 [docs/SYSCALLS.md](docs/SYSCALLS.md).

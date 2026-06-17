@@ -35,6 +35,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 27 | `fb_active` | `fb_active() -> 1/0` | Whether a graphics framebuffer is up; lets `init` choose the GUI vs the text session. |
 | 28 | `mouse` | `mouse_read(int out[3]) -> 0` | Block for one PS/2 pointer event; fills `out` = {dx, dy, buttons} (dy>0 = down; buttons bit0/1/2 = L/R/M). Used by the `windowserver` mouse helper. |
 | 29 | `readdir` | `readdir(const char *path, int index, struct dirent *out) -> 1/0/-1` | Enumerate directory `path`: fills `out` = {name, type (`DT_FILE`/`DT_DIR`), size} for entry `index`. `1` = filled, `0` = past the last entry, `-1` = error (not a directory / no read permission). Permission-checked (`VFS_R`) like `open`. Used by the Finder (`Aurora Files`). |
+| 30 | `halt` | `halt() -> -1 on error, else no return` | Power off the machine (root only): tries the QEMU/Bochs ACPI poweroff ports, then halts the CPU. Used by the Aurora menu's **Shut Down**. |
 
 ## Notes
 

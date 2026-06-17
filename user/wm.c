@@ -337,6 +337,14 @@ int wm_window_count(wm_state_t *st)
     return st->count;
 }
 
+int wm_first_window_except(wm_state_t *st, int except)
+{
+    for (int i = 0; i < WM_MAX_WINDOWS; i++)
+        if (st->used[i] && st->win[i].id != except)
+            return st->win[i].id;
+    return -1;
+}
+
 int wm_window_bounds(wm_state_t *st, int id, int *bx, int *by, int *bw, int *bh)
 {
     int s = slot_of(st, id);

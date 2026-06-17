@@ -97,6 +97,15 @@ server branches on `op`.)
   (it owns the buffer) and sends the app a **`WM_RESIZE {w,h}`** message; the app
   (Terminal/Finder/Viewer) recomputes its layout and redraws. Restore reverses it.
   Proof: `make demo-max` / `make demo-min`.
+- **10.2 — Aurora system menu. DONE (v1.1.1).** The menu bar's "Aurora" title is
+  hit-tested by the windowserver: a press toggles a dropdown (drawn into the back
+  buffer as chrome, above all windows). A press on an item runs it and closes the
+  menu; a press elsewhere just closes it; hovering highlights items. Actions:
+  **About** → spawn the Viewer on `ABOUT.TXT`; **Settings** → spawn the settings
+  app (both via a windowserver double-`fork`+`exec`); **Close All Windows** →
+  destroy every window but the Dock; **Shut Down** → paint a final screen + the
+  `halt` syscall. Lives in the windowserver so it survives a dead Dock.
+  Proof: `make demo-menu`.
 - **9.5 — Close button. DONE.** A **press** on the red title-bar light
   (`wm_in_close_button`, the left traffic light at `(x+16, y+14)`, drawn with a
   small dark "×") destroys the window (`wm_destroy`) and sends its `owner` a

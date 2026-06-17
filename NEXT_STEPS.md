@@ -186,22 +186,21 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-**v1.1.0 is done for window controls (10.1):** minimize (window-shade) + maximize
-(the `WM_RESIZE` resize protocol), with Terminal/Finder/Viewer resize-aware. The
-window model is now complete (close · focus · drag · minimize · maximize).
+**v1.1.0 (window controls) and v1.1.1 (Aurora system menu) are done.** The window
+model is complete (close · focus · drag · minimize · maximize), and the menu bar's
+"Aurora" title is the live entry point for system actions (About / Settings /
+Close All Windows / Shut Down), drawn by the window server.
 
-**Continue v1.1 — the rest of the desktop environment**, each as the same
-`app → IPC → windowserver` client, in this order:
+**Continue v1.1 — Settings, then Clipboard:**
 
-- **10.2 System menu (Aurora):** make the menu bar interactive — click "Aurora"
-  for a dropdown (About / Settings / Restart Window Server / Shutdown). Needs
-  menu-bar hit-testing + a dropdown surface in the windowserver.
-- **10.3 Settings** app: wallpaper / accent color, plus a read-only "System"
-  pane (memory usage via the `WM_STAT`-style data, running processes). Over IPC +
-  the VFS.
-- **10.4 Clipboard:** `WM_CLIPBOARD_SET` / `WM_CLIPBOARD_GET` — the windowserver
-  holds one string; Terminal "copy line" → Viewer/Terminal "paste". Small, and
-  the first real cross-process data sharing through the WM.
+- **10.3 Settings (v1.1.2):** fill the `settings` placeholder — a Desktop pane
+  (wallpaper / accent color, persisted to the VFS) and a read-only System pane
+  (memory/`brk` via the `WM_STAT`-style data, running processes). The window +
+  sidebar already exist; wire the pane content and make the sidebar clickable
+  (reuse `WM_POINTER`).
+- **10.4 Clipboard (v1.1.3):** `WM_CLIPBOARD_SET` / `WM_CLIPBOARD_GET` — the
+  window server holds one string; Terminal "copy line" → Viewer/Terminal "paste".
+  The first real cross-process data sharing through the WM.
 
 Deliberately deferred (per the agreed priority): client-side **shared-memory
 surfaces** (architectural rework, low payoff now) and **networking** (8B:

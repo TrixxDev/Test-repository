@@ -113,6 +113,9 @@ int  wm_window_of_owner(wm_state_t *st, int owner);
 void *wm_content_ptr(wm_state_t *st, int id);
 /* Number of live windows (for leak/limit diagnostics). */
 int  wm_window_count(wm_state_t *st);
+/* First used window id whose id != `except` (or -1). Lets the server iterate to
+ * close every window but the Dock. */
+int  wm_first_window_except(wm_state_t *st, int except);
 /* On-screen bounding box of window `id` including its drop shadow. Returns 1 and
  * fills *bx..*bh, or 0 if `id` is unknown. The windowserver uses this as the
  * damage rectangle so a redraw only touches that window's pixels. */

@@ -185,8 +185,14 @@
   resize-протокол (`WM_F_RESIZABLE` + `WM_RESIZE`: сервер переаллоцирует
   surface, приложение перерисовывается). Terminal/Finder/Viewer стали
   resize-aware. Проверка: `make demo-max` / `make demo-min`.
-- [ ] **10.2–10.4 (остаток v1.1)**: системное меню Aurora, Settings, буфер
-  обмена (`WM_CLIPBOARD_SET/GET`).
+- [x] **10.2 системное меню Aurora → v1.1.1**: клик по «Aurora» в меню-баре
+  открывает выпадашку (About / Settings / Close All Windows / Shut Down),
+  нарисованную самим windowserver (chrome — работает даже если Dock упал).
+  About → Viewer на ABOUT.TXT, Settings → заглушка, Close All Windows закрывает
+  все окна кроме Dock, Shut Down → экран «safe to power off» + syscall `halt`
+  (ACPI-poweroff, root-only). Проверка: `make demo-menu`.
+- [ ] **10.3–10.4 (остаток v1.1)**: наполнить Settings, буфер обмена
+  (`WM_CLIPBOARD_SET/GET`).
 - [ ] потом (когда десктоп «живой»): client-side surfaces, shared memory,
   анимации, сеть (virtio-net/TCP)
 

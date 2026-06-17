@@ -23,6 +23,67 @@ typedef struct {
     int offset_x, offset_y;     /* cursor-to-window-origin offset at grab time */
 } drag_state_t;
 
+/* ---- Aurora system menu (chrome, owned by the windowserver) ---------------
+ *
+ * The menu bar's "Aurora" title is the entry point for system actions. It lives
+ * in the windowserver (not a separate process) so it works even if the Dock or
+ * an app has died; the actions themselves launch ordinary processes. */
+#define MENUBAR_H    28             /* matches kernel/desktop.c MENUBAR_H */
+#define AURORA_X0    8
+#define AURORA_X1    96
+#define MENU_X       8
+#define MENU_Y       MENUBAR_H
+#define MENU_W       200
+#define MENU_ITEM_H  26
+#define MENU_PAD     6
+#define MENU_N       4
+#define MENU_H       (MENU_N * MENU_ITEM_H + 2 * MENU_PAD)
+
+static int menu_open  = 0;
+static int menu_hover = -1;
+
+static const char *menu_items[MENU_N] = {
+    "About AuroraOS",
+    "Settings...",
+    "Close All Windows",
+    "Shut Down",
+};
+
+static int in_aurora_menu(int x, int y)
+{
+    return x >= AURORA_X0 && x < AURORA_X1 && y >= 0 && y < MENUBAR_H;
+}
+
+static int menu_item_at(int x, int y)   /* item under (x,y) while open, or -1 */
+{
+    if (!menu_open) return -1;
+    if (x < MENU_X || x >= MENU_X + MENU_W) return -1;
+    if (y < MENU_Y + MENU_PAD || y >= MENU_Y + MENU_H - MENU_PAD) return -1;
+    int item = (y - MENU_Y - MENU_PAD) / MENU_ITEM_H;
+    return (item >= 0 && item < MENU_N) ? item : -1;
+}
+
+static void draw_menu(gfx_surface_t *dst)
+{
+    if (!menu_open) return;
+    /* Highlight the Aurora title in the bar. */
+    gfx_fill_rect(dst, AURORA_X0, 0, AURORA_X1 - AURORA_X0, MENUBAR_H, GFX_RGB(0x33, 0x66, 0xff));
+    gfx_fill_round_rect(dst, 12, 6, 16, 16, 4, GFX_RGB(0xff, 0xff, 0xff));
+    gfx_draw_text(dst, 36, 6, "Aurora", GFX_RGB(0xff, 0xff, 0xff));
+    /* Dropdown: a hard shadow, then a light rounded panel with the items. */
+    gfx_fill_round_rect(dst, MENU_X + 3, MENU_Y + 3, MENU_W, MENU_H, 8, GFX_RGB(0x12, 0x12, 0x1a));
+    gfx_fill_round_rect(dst, MENU_X, MENU_Y, MENU_W, MENU_H, 8, GFX_RGB(0xf6, 0xf6, 0xfa));
+    for (int i = 0; i < MENU_N; i++) {
+        int iy = MENU_Y + MENU_PAD + i * MENU_ITEM_H;
+        uint32_t fg = GFX_RGB(0x22, 0x22, 0x2a);
+        if (i == menu_hover) {
+            gfx_fill_rect(dst, MENU_X + 3, iy, MENU_W - 6, MENU_ITEM_H, GFX_RGB(0x34, 0x78, 0xf6));
+            fg = GFX_RGB(0xff, 0xff, 0xff);
+        }
+        gfx_draw_text(dst, MENU_X + 14, iy + (MENU_ITEM_H - 16) / 2, menu_items[i], fg);
+    }
+}
+
 /* ---- damage-driven presentation -------------------------------------------
  *
  * The old code recomposited the entire desktop straight into the framebuffer on
@@ -33,11 +94,12 @@ typedef struct {
  * the few pixels under the old cursor and redraws it at the new spot.
  */
 
-/* Rebuild the off-screen scene (desktop + windows, no cursor). Call only when
- * the scene actually changes (window drawn/moved/created/destroyed/raised). */
+/* Rebuild the off-screen scene (desktop + windows + open menu, no cursor). Call
+ * only when the scene actually changes. */
 static void compose(void)
 {
     wm_compose(&st, &back);
+    draw_menu(&back);
 }
 
 static int cursor_visible(void)
@@ -113,6 +175,55 @@ static int deliver(int owner, const void *msg, int len)
     if (uid_of(owner) >= 0)
         return 0;                       /* alive: mailbox full, message dropped */
     return reap_owner(owner);           /* dead: clean up its windows */
+}
+
+/* Launch a program detached (double-fork so it reparents to init for reaping). */
+static void wm_spawn(char **argv)
+{
+    int mid = fork();
+    if (mid == 0) {
+        if (fork() == 0) { execv(argv[0], argv); _exit(127); }
+        _exit(0);
+    }
+    int s; wait(&s);                    /* reap the middle child */
+}
+
+/* Draw a final screen and power off (the kernel halts; windowserver is root). */
+static void do_shutdown(void)
+{
+    gfx_fill_rect(&screen, 0, 0, screen.width, screen.height, GFX_RGB(0x10, 0x12, 0x18));
+    const char *msg = "It is now safe to power off AuroraOS.";
+    int tw = gfx_text_width(msg);
+    gfx_draw_text(&screen, (screen.width - tw) / 2, screen.height / 2 - 8, msg,
+                  GFX_RGB(0xe8, 0xe8, 0xf2));
+    halt();                             /* no return */
+}
+
+/* Run an Aurora-menu item. (0) About -> Viewer on ABOUT.TXT, (1) Settings,
+ * (2) close every window but the Dock, (3) shut down. */
+static void menu_action(int item)
+{
+    if (item == 0) {
+        char *argv[] = { "/disk/VIEWER.ELF", "/disk/ABOUT.TXT", 0 };
+        wm_spawn(argv);
+    } else if (item == 1) {
+        char *argv[] = { "/disk/SETTINGS.ELF", 0 };
+        wm_spawn(argv);
+    } else if (item == 2) {
+        int id;
+        while ((id = wm_first_window_except(&st, dock_win)) > 0) {
+            int owner = wm_owner_of(&st, id);
+            destroy_window(id);
+            if (owner > 0) {            /* ask the app to exit too */
+                wm_req_t bye;
+                memset(&bye, 0, sizeof(bye));
+                bye.op = WM_DESTROY; bye.win = id;
+                msgsend(owner, &bye, sizeof(bye));
+            }
+        }
+    } else if (item == 3) {
+        do_shutdown();                  /* no return */
+    }
 }
 
 /* Forked helper: blocks on the console keyboard and forwards each key to the
@@ -330,12 +441,33 @@ int main(int argc, char **argv)
                 scene_changed = 1;                                           \
             } while (0)
 
+            int full_redraw = 0;        /* menu open/close/hover -> recompose all */
+
+            /* --- Aurora system menu (chrome, above every window) --- */
+            int menu_consumed = 0;
+            if (press && in_aurora_menu(st.cursor_x, st.cursor_y)) {
+                menu_open = !menu_open;          /* toggle the dropdown */
+                menu_hover = -1;
+                full_redraw = 1; menu_consumed = 1;
+            } else if (press && menu_open) {
+                int item = menu_item_at(st.cursor_x, st.cursor_y);
+                menu_open = 0; menu_hover = -1;  /* any click closes the menu */
+                full_redraw = 1; menu_consumed = 1;
+                if (item >= 0)
+                    menu_action(item);           /* may not return (Shut Down) */
+            }
+            if (menu_open && !menu_consumed) {   /* hover highlight while open */
+                int nh = menu_item_at(st.cursor_x, st.cursor_y);
+                if (nh != menu_hover) { menu_hover = nh; full_redraw = 1; }
+            }
+
             /* Topmost window under the pointer (may be the borderless Dock). */
             int hit = wm_window_at(&st, st.cursor_x, st.cursor_y);
 
             /* Chrome interactions (raise / drag / close) apply only to ordinary
-             * decorated windows; the Dock just receives the pointer event below. */
-            if (press && hit > 0 && wm_is_decorated(&st, hit)) {
+             * decorated windows; the Dock just receives the pointer event below.
+             * Skipped when the menu consumed the click. */
+            if (press && !menu_consumed && hit > 0 && wm_is_decorated(&st, hit)) {
                 int id = hit, cx = st.cursor_x, cy = st.cursor_y;
                 wm_raise(&st, id);                  /* click-to-focus first */
 
@@ -403,22 +535,30 @@ int main(int argc, char **argv)
 
             prev_buttons = buttons;
 
-            if (scene_changed)
+            if (full_redraw) {
+                /* Menu opened/closed/hovered (or it changed the scene): recompose
+                 * the whole screen so the dropdown appears/clears cleanly. */
                 compose();
-            /* Erase the old cursor, push any scene damage, draw the new cursor.
-             * Each flush re-overlays the pointer where it intersects. */
-            flush(old_cx, old_cy, WM_CURSOR_W, WM_CURSOR_H);
-            if (scene_changed)
-                flush(dmg_x, dmg_y, dmg_w, dmg_h);
-            flush(st.cursor_x, st.cursor_y, WM_CURSOR_W, WM_CURSOR_H);
+                flush(0, 0, screen.width, screen.height);
+            } else {
+                if (scene_changed)
+                    compose();
+                /* Erase the old cursor, push any scene damage, draw the new
+                 * cursor. Each flush re-overlays the pointer where it intersects. */
+                flush(old_cx, old_cy, WM_CURSOR_W, WM_CURSOR_H);
+                if (scene_changed)
+                    flush(dmg_x, dmg_y, dmg_w, dmg_h);
+                flush(st.cursor_x, st.cursor_y, WM_CURSOR_W, WM_CURSOR_H);
+            }
             #undef ADD_DMG
 
             /* Forward the pointer to the app under it (in content-local coords),
              * unless a window is being dragged (the cursor is captured then).
              * The Dock uses this for hover + click; ordinary apps may ignore it.
              * If that app is dead, deliver() reaps its window (e.g. a killed Dock
-             * vanishes the next time the cursor passes over where it was). */
-            if (hit > 0 && !drag.active) {
+             * vanishes the next time the cursor passes over where it was).
+             * Skipped when the menu consumed this click. */
+            if (hit > 0 && !drag.active && !menu_consumed) {
                 int ox, oy;
                 if (wm_content_origin(&st, hit, &ox, &oy)) {
                     wm_req_t pe;

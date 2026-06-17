@@ -5,6 +5,7 @@
 #include "socket.h"
 #include "fb.h"
 #include "mouse.h"
+#include "io.h"
 
 /* Convention: eax = syscall number, ebx/ecx/edx = arguments. The return value
  * is written back into regs->eax (restored to the user's eax by the stub). */
@@ -142,6 +143,18 @@ void syscall_handler(registers_t *regs)
     case SYS_READDIR:
         regs->eax = (uint32_t)sys_readdir((const char *)regs->ebx, (int)regs->ecx,
                                           (struct dirent *)regs->edx);
+        break;
+
+    case SYS_HALT:
+        if (process_current()->uid != 0) {      /* root only */
+            regs->eax = (uint32_t)-1;
+            break;
+        }
+        kprintf("\n[kernel] halt requested; powering off.\n");
+        __asm__ volatile("cli");
+        outw(0x604, 0x2000);                    /* QEMU/Bochs ACPI poweroff */
+        outw(0xB004, 0x2000);                   /* older QEMU poweroff port */
+        for (;;) __asm__ volatile("hlt");       /* fallback: stop the CPU    */
         break;
 
     default:

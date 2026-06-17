@@ -53,6 +53,8 @@ static inline int   fb_active(void)                      { return _syscall(SYS_F
 static inline int   mouse_read(int *info)                { return _syscall(SYS_MOUSE, (int)info, 0, 0); }
 /* Read directory `path` entry `index` into *out: 1 = filled, 0 = past end, -1 err. */
 static inline int   readdir(const char *path, int index, struct dirent *out) { return _syscall(SYS_READDIR, (int)path, index, (int)out); }
+/* Power off the machine (root only; no return on success). */
+static inline int   halt(void)                          { return _syscall(SYS_HALT, 0, 0, 0); }
 
 /* send/recv are just write/read on a connected socket fd. */
 static inline int send(int fd, const void *b, int n)     { return write(fd, b, n); }
