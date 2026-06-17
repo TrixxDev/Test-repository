@@ -35,6 +35,14 @@ static int       next_tid;
 static int       nthreads;
 static volatile int enabled;
 
+/* Sleeping threads waiting on a timer deadline (in PIT ticks). The PIT tick hook
+ * wakes any whose deadline has passed before it reschedules — this lets a thread
+ * block for a duration without busy-waiting (used by a userspace render ticker). */
+#define MAX_SLEEPERS 8
+static struct { thread_t *t; uint32_t wake; int used; } sleepers[MAX_SLEEPERS];
+
+static void scheduler_tick(void);   /* PIT hook: wake due sleepers, then schedule */
+
 /* First thing a freshly created user thread runs (in ring 0). */
 static void user_thread_start(void)
 {
@@ -53,7 +61,7 @@ void scheduler_init(void)
     main_thread.prev       = &main_thread;
     current = &main_thread;
     nthreads = 1;
-    pit_set_tick_hook(schedule);
+    pit_set_tick_hook(scheduler_tick);
 }
 
 static void link_thread(thread_t *t)
@@ -185,6 +193,41 @@ void thread_wake(thread_t *t)
 {
     if (t)
         t->state = TS_READY;
+}
+
+/* PIT tick hook (IRQ0, interrupts off): wake any sleeper whose deadline has
+ * passed, then run the normal preemptive scheduler. Signed compare so the tick
+ * counter can wrap safely. */
+static void scheduler_tick(void)
+{
+    uint32_t now = pit_ticks();
+    for (int i = 0; i < MAX_SLEEPERS; i++)
+        if (sleepers[i].used && (int32_t)(now - sleepers[i].wake) >= 0) {
+            sleepers[i].t->state = TS_READY;
+            sleepers[i].used = 0;
+        }
+    schedule();
+}
+
+void thread_sleep_ticks(uint32_t nticks)
+{
+    if (nticks == 0)
+        nticks = 1;
+    __asm__ volatile("cli");
+    int slot = -1;
+    for (int i = 0; i < MAX_SLEEPERS; i++)
+        if (!sleepers[i].used) { slot = i; break; }
+    if (slot < 0) {                 /* table full: degrade to a plain yield */
+        __asm__ volatile("sti");
+        schedule();
+        return;
+    }
+    sleepers[slot].t    = current;
+    sleepers[slot].wake = pit_ticks() + nticks;
+    sleepers[slot].used = 1;
+    current->state = TS_BLOCKED;
+    schedule();                     /* switch away; the tick hook wakes us */
+    __asm__ volatile("sti");
 }
 
 void thread_zombie_and_yield(void)

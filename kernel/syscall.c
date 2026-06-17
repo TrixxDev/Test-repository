@@ -149,6 +149,10 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)sys_sysinfo((struct sysinfo *)regs->ebx);
         break;
 
+    case SYS_SLEEP:
+        regs->eax = (uint32_t)sys_sleep((int)regs->ebx);
+        break;
+
     case SYS_HALT:
         if (process_current()->uid != 0) {      /* root only */
             regs->eax = (uint32_t)-1;

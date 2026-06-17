@@ -42,6 +42,7 @@
                         /*   -> 1 (filled) / 0 (past end) / -1 (err) */
 #define SYS_HALT    30  /* halt() -> no return (root only); powers off */
 #define SYS_SYSINFO 31  /* sysinfo(struct sysinfo *out) -> 0/-1         */
+#define SYS_SLEEP   32  /* sleep_ms(int ms) -> 0; block the thread ~ms  */
 
 /* ---- system info (SYS_SYSINFO) ---- */
 struct sysinfo {
@@ -78,7 +79,7 @@ struct dirent {
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
 
-#define SYS_MAX    32   /* one past the last valid syscall number    */
+#define SYS_MAX    33   /* one past the last valid syscall number    */
 
 /* ---- socket layer (AF_LOOPBACK only for now) ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

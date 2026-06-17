@@ -37,6 +37,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 29 | `readdir` | `readdir(const char *path, int index, struct dirent *out) -> 1/0/-1` | Enumerate directory `path`: fills `out` = {name, type (`DT_FILE`/`DT_DIR`), size} for entry `index`. `1` = filled, `0` = past the last entry, `-1` = error (not a directory / no read permission). Permission-checked (`VFS_R`) like `open`. Used by the Finder (`Aurora Files`). |
 | 30 | `halt` | `halt() -> -1 on error, else no return` | Power off the machine (root only): tries the QEMU/Bochs ACPI poweroff ports, then halts the CPU. Used by the Aurora menu's **Shut Down**. |
 | 31 | `sysinfo` | `sysinfo(struct sysinfo *out) -> 0/-1` | Fill `out` = {ram_kb, ram_used_kb, free_frames, procs, uptime_ms}. Used by the Settings **System** pane. |
+| 32 | `sleep` | `msleep(int ms) -> 0` | Block the calling thread for ~`ms` milliseconds (10 ms granularity; PIT is 100 Hz). Backed by a PIT-driven sleeper queue in the scheduler (no busy-wait). Used by the window server's fixed-cadence render ticker. |
 
 ## Notes
 

@@ -60,6 +60,8 @@ static inline int   readdir(const char *path, int index, struct dirent *out) { r
 static inline int   halt(void)                          { return _syscall(SYS_HALT, 0, 0, 0); }
 /* Fill *out with RAM/process/uptime stats. Returns 0/-1. */
 static inline int   sysinfo(struct sysinfo *out)        { return _syscall(SYS_SYSINFO, (int)out, 0, 0); }
+/* Block this thread for ~ms milliseconds (10 ms granularity; the PIT is 100 Hz). */
+static inline int   msleep(int ms)                      { return _syscall(SYS_SLEEP, ms, 0, 0); }
 
 /* send/recv are just write/read on a connected socket fd. */
 static inline int send(int fd, const void *b, int n)     { return write(fd, b, n); }

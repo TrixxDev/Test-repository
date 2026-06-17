@@ -27,7 +27,9 @@ PS/2 mouse  ──IRQ12──►  kernel PS/2 driver  ──►  input source (r
                                               windowserver event loop
                                                      │
                                 cursor + hit-test + focus + drag
-                                                     │ full recomposite
+                                                     │ update state + record damage
+                                  render ticker ──WM_TICK──► render_frame (fixed cadence)
+                                                     │ damage compose + flush
                                                   framebuffer
 ```
 

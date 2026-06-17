@@ -16,6 +16,14 @@ static gfx_surface_t back;      /* off-screen scene, no cursor (fast RAM)  */
 static gfx_surface_t bg;        /* cached static background: wallpaper + menu bar */
 static int           dock_win = -1;   /* the borderless Dock window, if any */
 
+/* Accumulated frame state. Input handlers update the scene and *record damage*
+ * but never paint; a fixed-cadence WM_TICK consumes this and renders one frame.
+ * This decouples the render rate from the input rate (see render_frame). */
+static int g_full_dirty = 0;          /* recompose + flush the whole screen     */
+static int g_scene_dirty = 0;         /* partial damage accumulated in g_dmg_*   */
+static int g_dmg_x, g_dmg_y, g_dmg_w, g_dmg_h;
+static int rendered_cx, rendered_cy;  /* where the cursor was last drawn to VRAM */
+
 /* Drag state: set when the user presses the left button inside a title bar, and
  * cleared on release. While active, each pointer motion re-places the window so
  * that the grabbed point stays under the cursor (offset bookkeeping). */
@@ -213,12 +221,62 @@ static void flush(int rx, int ry, int rw, int rh)
         wm_draw_cursor(&screen, st.cursor_x, st.cursor_y);
 }
 
-/* Refresh just window `id`'s footprint (content + title bar + shadow). */
-static void flush_window(int id)
+/* ---- frame accumulation (input records damage; the tick paints) ------------ */
+
+static void mark_full(void) { g_full_dirty = 1; }
+
+/* Grow the accumulated scene-damage rectangle to include (x,y,w,h). */
+static void mark_dmg(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0)
+        return;
+    if (!g_scene_dirty) {
+        g_dmg_x = x; g_dmg_y = y; g_dmg_w = w; g_dmg_h = h;
+    } else {
+        int x0 = g_dmg_x < x ? g_dmg_x : x;
+        int y0 = g_dmg_y < y ? g_dmg_y : y;
+        int x1 = g_dmg_x + g_dmg_w > x + w ? g_dmg_x + g_dmg_w : x + w;
+        int y1 = g_dmg_y + g_dmg_h > y + h ? g_dmg_y + g_dmg_h : y + h;
+        g_dmg_x = x0; g_dmg_y = y0; g_dmg_w = x1 - x0; g_dmg_h = y1 - y0;
+    }
+    g_scene_dirty = 1;
+}
+
+/* Damage window `id`'s on-screen footprint (used before *and* after it changes). */
+static void mark_window(int id)
 {
     int x, y, w, h;
     if (wm_window_bounds(&st, id, &x, &y, &w, &h))
-        flush(x, y, w, h);
+        mark_dmg(x, y, w, h);
+}
+
+/* Paint one frame from the accumulated dirty state. Driven by WM_TICK at a fixed
+ * cadence, fully decoupled from the input rate: a fast mouse stream only updates
+ * state + records damage, and nothing reaches the framebuffer until the next
+ * tick. A clean frame (no damage, cursor unmoved) is skipped entirely, so an idle
+ * desktop does no work. Damage flushing (background cache + clipped recompose) is
+ * preserved, so a moving window still costs only its footprint per frame. */
+static void render_frame(void)
+{
+    int cursor_moved = (st.cursor_x != rendered_cx || st.cursor_y != rendered_cy);
+    if (!g_full_dirty && !g_scene_dirty && !cursor_moved)
+        return;
+
+    if (g_full_dirty) {
+        compose();
+        flush(0, 0, screen.width, screen.height);
+    } else {
+        if (g_scene_dirty)
+            compose_dmg(g_dmg_x, g_dmg_y, g_dmg_w, g_dmg_h);
+        flush(rendered_cx, rendered_cy, WM_CURSOR_W, WM_CURSOR_H);   /* erase old cursor */
+        if (g_scene_dirty)
+            flush(g_dmg_x, g_dmg_y, g_dmg_w, g_dmg_h);
+        flush(st.cursor_x, st.cursor_y, WM_CURSOR_W, WM_CURSOR_H);   /* draw new cursor */
+    }
+    rendered_cx = st.cursor_x;
+    rendered_cy = st.cursor_y;
+    g_full_dirty = g_scene_dirty = 0;
+    g_dmg_w = g_dmg_h = 0;
 }
 
 /* Destroy a window and free the content buffer the server malloc'd for it, so
@@ -326,6 +384,20 @@ static void keyboard_helper(int server_pid)
     }
 }
 
+/* Forked helper: a fixed-cadence render clock. It blocks on a real timer
+ * (msleep, no busy-wait) and sends the server a WM_TICK each frame, so the
+ * server paints at a steady rate independent of how fast input arrives. */
+static void render_ticker(int server_pid)
+{
+    for (;;) {
+        msleep(16);                 /* ~60 fps (PIT is 100 Hz -> ~10 ms minimum) */
+        wm_req_t t;
+        memset(&t, 0, sizeof(t));
+        t.op = WM_TICK;
+        msgsend(server_pid, &t, sizeof(t));
+    }
+}
+
 /* Forked helper: blocks on the PS/2 mouse and forwards each pointer event to the
  * server as a WM_MOUSE message (same single-source event-loop model as keys). */
 static void mouse_helper(int server_pid)
@@ -362,6 +434,10 @@ int main(int argc, char **argv)
     }
     if (fork() == 0) {
         mouse_helper(server_pid);
+        _exit(0);
+    }
+    if (fork() == 0) {
+        render_ticker(server_pid);
         _exit(0);
     }
 
@@ -412,19 +488,27 @@ int main(int argc, char **argv)
     rebuild_bg();                    /* render the static background into the cache */
     compose();                       /* build the empty desktop in the back buffer */
     flush(0, 0, screen.width, screen.height);   /* push it (with cursor) once */
+    rendered_cx = st.cursor_x;       /* the cursor is now on screen here */
+    rendered_cy = st.cursor_y;
     printf("[wm] ready (pid %d), framebuffer %ux%u pitch %u\n",
            getpid(), info[0], info[1], info[2]);
 
-    /* Event loop: one source (the mailbox) carries app requests, keys and mouse.
+    /* Event loop: one source (the mailbox) carries app requests, keys, mouse and
+     * the render ticker's WM_TICK. Rendering is split from input:
      *
-     * The PS/2 mouse can emit ~200 events/s, but the compositor only needs to
-     * paint as fast as it can. So when a WM_MOUSE arrives we drain the mailbox
-     * (non-blocking) and *coalesce* consecutive same-button motion into a single
-     * event — summing the deltas — before doing one recomposite. This caps the
-     * compose/flush rate at the server's render throughput instead of the packet
-     * rate. Button *edges* (press/release) and non-mouse messages break the run
-     * so clicks are never merged away; the message that broke it is stashed and
-     * handled on the next iteration (with its original sender preserved). */
+     *   - input/app handlers update window state and *record damage* (mark_*),
+     *     but never paint;
+     *   - a WM_TICK arrives at a fixed cadence (render_ticker) and paints one
+     *     frame from the accumulated damage (render_frame), or skips it if the
+     *     scene is clean.
+     *
+     * So the render rate is time-driven (steady) instead of event-driven, and a
+     * fast mouse stream can't trigger a paint storm. As a second guard, a burst
+     * of mouse motion is still coalesced: when a WM_MOUSE arrives we drain the
+     * mailbox non-blockingly and merge consecutive same-button motion (summing
+     * deltas) into one event. Button *edges* (press/release) and non-mouse
+     * messages break the run so clicks are never merged away; the message that
+     * broke it is stashed (with its sender) and handled next iteration. */
     int prev_buttons = 0;
     drag_state_t drag = { 0, 0, 0, 0 };
     wm_req_t stash; int have_stash = 0, stash_from = -1;
@@ -490,10 +574,9 @@ int main(int argc, char **argv)
             int ox, oy, ow, oh;
             int had = wm_window_bounds(&st, req.win, &ox, &oy, &ow, &oh);
             wm_move(&st, req.win, req.x, req.y);
-            compose();
             if (had)
-                flush(ox, oy, ow, oh);
-            flush_window(req.win);
+                mark_dmg(ox, oy, ow, oh);
+            mark_window(req.win);
             break;
         }
         case WM_DESTROY: {
@@ -502,33 +585,34 @@ int main(int argc, char **argv)
             int ox, oy, ow, oh;
             int had = wm_window_bounds(&st, req.win, &ox, &oy, &ow, &oh);
             destroy_window(req.win);     /* frees the content buffer too */
-            compose();
             if (had)
-                flush(ox, oy, ow, oh);   /* reveal whatever was behind it */
+                mark_dmg(ox, oy, ow, oh); /* reveal whatever was behind it */
             break;
         }
         case WM_PRESENT: {
-            /* The app just finished redrawing its surface; refresh only that
-             * window's footprint instead of the whole screen. */
+            /* The app just finished redrawing its surface; damage only that
+             * window's footprint (the next tick paints it). */
             int id = wm_window_of_owner(&st, from);
-            compose();
             if (id > 0)
-                flush_window(id);
+                mark_window(id);
             else
-                flush(0, 0, screen.width, screen.height);
+                mark_full();
             break;
         }
         case WM_KEY: {
-            /* Deliver the key to the focused window's app (full repaint is the
-             * app's job via DRAW_* + PRESENT). If that app turns out to be dead,
-             * deliver() reaps its window(s) and we recomposite. */
+            /* Deliver the key to the focused window's app (the app redraws via
+             * DRAW_* + PRESENT). If that app turns out to be dead, deliver()
+             * reaps its window(s) and we must recompose. */
             int owner = wm_focus_owner(&st);
-            if (deliver(owner, &req, sizeof(req))) {
-                compose();
-                flush(0, 0, screen.width, screen.height);
-            }
+            if (deliver(owner, &req, sizeof(req)))
+                mark_full();
             break;
         }
+        case WM_TICK:
+            /* Fixed-cadence frame: paint whatever input has dirtied since the
+             * last tick (a no-op if nothing changed). */
+            render_frame();
+            break;
         case WM_STAT:
             /* Diagnostics: live-window count + heap top, for leak/stress checks. */
             printf("[wm] stat: live=%d brk=0x%x\n",
@@ -539,15 +623,12 @@ int main(int argc, char **argv)
              * The wallpaper/accent may have changed, so refresh the cache too. */
             load_settings();
             rebuild_bg();
-            compose();
-            flush(0, 0, screen.width, screen.height);
+            mark_full();
             break;
         case WM_MOUSE: {
-            /* Move the cursor, then run the pointer state machine. The scene only
-             * needs recompositing when it actually changes (raise, close, drag);
-             * a plain move just restores the pixels under the old cursor and
-             * redraws the pointer at its new spot — no full repaint. */
-            int old_cx = st.cursor_x, old_cy = st.cursor_y;
+            /* Update the pointer + window state and *record damage* only — the
+             * next WM_TICK paints the frame. Nothing here touches the framebuffer,
+             * so a ~200 Hz mouse stream never drives ~200 Hz compositing. */
             st.cursor_x += req.x;
             st.cursor_y += req.y;
             if (st.cursor_x < 0) st.cursor_x = 0;
@@ -559,40 +640,22 @@ int main(int argc, char **argv)
             int press   =  (buttons & 1) && !(prev_buttons & 1);
             int release = !(buttons & 1) &&  (prev_buttons & 1);
 
-            int scene_changed = 0;
-            /* Bounding box of any scene damage (window raised/closed/moved). */
-            int dmg_x = 0, dmg_y = 0, dmg_w = 0, dmg_h = 0;
-            #define ADD_DMG(x, y, w, h) do {                                  \
-                if (!scene_changed) { dmg_x = (x); dmg_y = (y);               \
-                    dmg_w = (w); dmg_h = (h); }                               \
-                else {                                                        \
-                    int x0 = dmg_x < (x) ? dmg_x : (x);                       \
-                    int y0 = dmg_y < (y) ? dmg_y : (y);                       \
-                    int x1 = dmg_x + dmg_w > (x) + (w) ? dmg_x + dmg_w : (x) + (w); \
-                    int y1 = dmg_y + dmg_h > (y) + (h) ? dmg_y + dmg_h : (y) + (h); \
-                    dmg_x = x0; dmg_y = y0; dmg_w = x1 - x0; dmg_h = y1 - y0; \
-                }                                                             \
-                scene_changed = 1;                                           \
-            } while (0)
-
-            int full_redraw = 0;        /* menu open/close/hover -> recompose all */
-
             /* --- Aurora system menu (chrome, above every window) --- */
             int menu_consumed = 0;
             if (press && in_aurora_menu(st.cursor_x, st.cursor_y)) {
                 menu_open = !menu_open;          /* toggle the dropdown */
                 menu_hover = -1;
-                full_redraw = 1; menu_consumed = 1;
+                mark_full(); menu_consumed = 1;
             } else if (press && menu_open) {
                 int item = menu_item_at(st.cursor_x, st.cursor_y);
                 menu_open = 0; menu_hover = -1;  /* any click closes the menu */
-                full_redraw = 1; menu_consumed = 1;
+                mark_full(); menu_consumed = 1;
                 if (item >= 0)
                     menu_action(item);           /* may not return (Shut Down) */
             }
             if (menu_open && !menu_consumed) {   /* hover highlight while open */
                 int nh = menu_item_at(st.cursor_x, st.cursor_y);
-                if (nh != menu_hover) { menu_hover = nh; full_redraw = 1; }
+                if (nh != menu_hover) { menu_hover = nh; mark_full(); }
             }
 
             /* Topmost window under the pointer (may be the borderless Dock). */
@@ -604,10 +667,7 @@ int main(int argc, char **argv)
             if (press && !menu_consumed && hit > 0 && wm_is_decorated(&st, hit)) {
                 int id = hit, cx = st.cursor_x, cy = st.cursor_y;
                 wm_raise(&st, id);                  /* click-to-focus first */
-
-                int bx, by, bw, bh;                 /* footprint before any change */
-                if (wm_window_bounds(&st, id, &bx, &by, &bw, &bh))
-                    ADD_DMG(bx, by, bw, bh);
+                mark_window(id);                    /* footprint before any change */
 
                 if (wm_in_close_button(&st, id, cx, cy)) {
                     int owner = wm_owner_of(&st, id);
@@ -620,8 +680,7 @@ int main(int argc, char **argv)
                     }
                 } else if (wm_in_min_button(&st, id, cx, cy)) {
                     wm_toggle_shade(&st, id);       /* window-shade collapse/expand */
-                    if (wm_window_bounds(&st, id, &bx, &by, &bw, &bh))
-                        ADD_DMG(bx, by, bw, bh);
+                    mark_window(id);
                 } else if (wm_in_max_button(&st, id, cx, cy)) {
                     int nw, nh;                     /* maximize/restore: resize the surface */
                     if (wm_toggle_max(&st, id, screen.width, screen.height, &nw, &nh)) {
@@ -640,8 +699,7 @@ int main(int argc, char **argv)
                             }
                         }
                     }
-                    if (wm_window_bounds(&st, id, &bx, &by, &bw, &bh))
-                        ADD_DMG(bx, by, bw, bh);
+                    mark_window(id);
                 } else if (wm_in_titlebar(&st, id, cx, cy)) {
                     drag.active   = 1;
                     drag.window_id = id;
@@ -651,40 +709,18 @@ int main(int argc, char **argv)
             }
 
             if (drag.active && (buttons & 1)) {
-                int ox, oy, ow, oh;                /* old footprint */
-                int had = wm_window_bounds(&st, drag.window_id, &ox, &oy, &ow, &oh);
+                mark_window(drag.window_id);        /* old footprint */
                 wm_move_clamped(&st, drag.window_id,
                                 st.cursor_x - drag.offset_x,
                                 st.cursor_y - drag.offset_y,
                                 screen.width, screen.height);
-                if (had)
-                    ADD_DMG(ox, oy, ow, oh);
-                int nx, ny, nw, nh;                /* new footprint */
-                if (wm_window_bounds(&st, drag.window_id, &nx, &ny, &nw, &nh))
-                    ADD_DMG(nx, ny, nw, nh);
+                mark_window(drag.window_id);        /* new footprint */
             }
 
             if (release)
                 drag.active = 0;
 
             prev_buttons = buttons;
-
-            if (full_redraw) {
-                /* Menu opened/closed/hovered (or it changed the scene): recompose
-                 * the whole screen so the dropdown appears/clears cleanly. */
-                compose();
-                flush(0, 0, screen.width, screen.height);
-            } else {
-                if (scene_changed)
-                    compose_dmg(dmg_x, dmg_y, dmg_w, dmg_h);
-                /* Erase the old cursor, push any scene damage, draw the new
-                 * cursor. Each flush re-overlays the pointer where it intersects. */
-                flush(old_cx, old_cy, WM_CURSOR_W, WM_CURSOR_H);
-                if (scene_changed)
-                    flush(dmg_x, dmg_y, dmg_w, dmg_h);
-                flush(st.cursor_x, st.cursor_y, WM_CURSOR_W, WM_CURSOR_H);
-            }
-            #undef ADD_DMG
 
             /* Forward the pointer to the app under it (in content-local coords),
              * unless a window is being dragged (the cursor is captured then).
@@ -702,10 +738,8 @@ int main(int argc, char **argv)
                     pe.x   = st.cursor_x - ox;
                     pe.y   = st.cursor_y - oy;
                     pe.w   = buttons;
-                    if (deliver(wm_owner_of(&st, hit), &pe, sizeof(pe))) {
-                        compose();
-                        flush(0, 0, screen.width, screen.height);
-                    }
+                    if (deliver(wm_owner_of(&st, hit), &pe, sizeof(pe)))
+                        mark_full();            /* a dead app was reaped */
                 }
             }
             break;

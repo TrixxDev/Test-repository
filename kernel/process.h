@@ -76,6 +76,7 @@ int  sys_write(int fd, const void *buf, uint32_t len);
 int  sys_close(int fd);
 int  sys_readdir(const char *path, int index, struct dirent *out);
 int  sys_sysinfo(struct sysinfo *out);
+int  sys_sleep(int ms);
 int  process_count(void);
 int  sys_pipe(int fds[2]);
 int  sys_dup2(int oldfd, int newfd);

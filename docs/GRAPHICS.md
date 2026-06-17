@@ -222,9 +222,30 @@ Two invariants, deliberately simple at this stage:
   original sender) and handled on the next loop iteration. Verified: `verify_drag`
   (drag + close), click-to-focus, and Dock click-to-launch all still pass.
 
+- **Time-driven render loop (v1.1.x perf pass):** the compositor is now a
+  *persistent-scene* compositor with the render rate **decoupled from the input
+  rate**, the standard model for tear/judder-free desktops (Wayland/Quartz). Input
+  and app handlers only **update window state and record damage** (`mark_dmg` /
+  `mark_full`); they never paint. A forked **render ticker** child blocks on a real
+  timer (`msleep`, a new `SYS_SLEEP` backed by a PIT-driven sleeper queue in the
+  scheduler — no busy-wait) and sends the server a `WM_TICK` at a steady ~60–100 Hz.
+  Each tick, `render_frame` paints **one** frame from the accumulated damage (full
+  recompose, or the clipped `compose_dmg` + cursor restore for partial damage), and
+  a clean frame (no damage, cursor unmoved) is **skipped entirely**, so an idle
+  desktop does no work. This gives steady frame pacing regardless of how fast the
+  mouse streams events, and removes the input-driven "render storm". The damage
+  model is preserved (a moving window still costs only its footprint per frame).
+  Verified: `verify_drag` (drag + close), click-to-focus + type, Dock
+  click-to-launch, the menu dropdown, and the leak stress test all pass.
+
+  Note on tearing: we still write straight to VRAM with no vblank sync, so true
+  *tearing* would need vsync — but QEMU's emulated VBE exposes no vblank and
+  samples the framebuffer on its own timer, so it does not manifest here. The
+  render loop is about frame **pacing** and decoupling, not vsync.
+
   Remaining lever (not yet done): **per-window surface caching** (skip redrawing
-  windows whose content did not change) is a further upgrade once the background
-  and per-frame costs are gone.
+  windows whose content did not change) is the next step — with the background and
+  the render storm gone, this is what makes complex drag/resize cost-free.
 
 **Keyboard pipeline** (closing the loop keyboard → windowserver → app → screen):
 the windowserver forks a small helper child that blocks on the console

@@ -171,6 +171,7 @@ enum {
     WM_STAT,         /* app -> server: log live-window count + heap top (debug) */
     WM_RESIZE,       /* server -> app: your content is now req.w x req.h; redraw */
     WM_RELOAD_SETTINGS, /* app -> server: re-read /disk/settings.cfg (theme)     */
+    WM_TICK,         /* render ticker -> server: a frame is due (render if dirty) */
 };
 
 typedef struct {

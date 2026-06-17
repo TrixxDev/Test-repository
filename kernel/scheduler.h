@@ -31,6 +31,9 @@ void thread_start(thread_t *t);
 void schedule(void);          /* yield to another runnable thread */
 void thread_block(void);      /* mark current BLOCKED + yield (call with IF off) */
 void thread_wake(thread_t *t);
+/* Block the current thread for `nticks` PIT ticks (woken from the timer IRQ).
+ * Returns when the deadline passes; safe to call with interrupts on. */
+void thread_sleep_ticks(uint32_t nticks);
 void thread_zombie_and_yield(void);  /* mark current ZOMBIE and switch away */
 void thread_free(thread_t *t);       /* unlink + free a non-running thread */
 

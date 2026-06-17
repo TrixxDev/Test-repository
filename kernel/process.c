@@ -169,6 +169,16 @@ int sys_sysinfo(struct sysinfo *out)
     return 0;
 }
 
+/* Block the calling thread for ~`ms` milliseconds (PIT runs at 100 Hz -> 10 ms
+ * per tick). Used by the window server's render ticker for a fixed cadence. */
+int sys_sleep(int ms)
+{
+    if (ms <= 0)
+        return 0;
+    thread_sleep_ticks((uint32_t)(ms / 10));    /* thread_sleep_ticks floors to 1 */
+    return 0;
+}
+
 int sys_open(const char *path, int flags)
 {
     char kpath[256];
