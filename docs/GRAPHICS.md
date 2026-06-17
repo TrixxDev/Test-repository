@@ -262,6 +262,30 @@ Two invariants, deliberately simple at this stage:
   surfaces (so apps render into the cache directly) and a virtio-gpu/vsync path —
   both deferred.
 
+- **UI scale — chrome (staged, step 1 of 2):** the desktop has a UI-scale setting
+  (100 / 125 / 150 / 200 %), chosen in **Settings → Display** and saved as
+  `ui_scale=` in `/disk/settings.cfg`. The scale percent is a single source of
+  truth in `desktop.c` (`desktop_set_scale`/`desktop_scale`); the window server and
+  `wm.c` read it so everything agrees. The bitmap font gains nearest-neighbor
+  scaled variants (`gfx_draw_text_s`, `gfx_text_width_s`, `gfx_font_{w,h}_s`): each
+  8×16 cell is scaled to `(8·s)×(16·s)`, and **`scale == 100` is byte-identical to
+  the unscaled calls** (the plain `gfx_draw_*` are now thin wrappers over them, and
+  the host PNG renderers — which never set a scale — are unchanged). This step
+  scales the **server-drawn chrome** uniformly: the menu bar + its text and clock
+  (`desktop.c`), the window title bar height, traffic-light positions/radii, corner
+  radius and centered title (`wm.c`, via `wm_titlebar_h()`), and the Aurora system
+  menu + dropdown (`wserver.c`). App **content** stays native for now (the
+  Terminal/Finder/Viewer text), so a high scale shows large chrome around
+  native-size content — step 2 makes the apps scale-aware so the whole desktop
+  scales together. Changing the scale is **live** (`WM_RELOAD_SETTINGS` re-reads the
+  file and `wm_mark_all_dirty` rebuilds every window's surface); to make a live
+  change never reallocate, presentation buffers are sized for the **largest** scale
+  up front (`wm_present_footprint`, reserving the tallest title bar), so a taller
+  title bar always fits the existing buffer. Verified: 100 % host renders + boot are
+  byte-/pixel-identical, `verify_drag` still passes, a 150 % boot scales the chrome
+  with native content, and a live 100 %→150 % change via Settings rescales every
+  window's title bar in one frame with no crash and no leak (`round1 == round2`).
+
 **Keyboard pipeline** (closing the loop keyboard → windowserver → app → screen):
 the windowserver forks a small helper child that blocks on the console
 (`read(0)`) and forwards each key as a `WM_KEY` message; the windowserver routes

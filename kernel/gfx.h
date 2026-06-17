@@ -30,3 +30,14 @@ void gfx_blit(gfx_surface_t *s, int x, int y, const uint32_t *src, int sw, int s
 void gfx_draw_char(gfx_surface_t *s, int x, int y, char c, uint32_t color);
 void gfx_draw_text(gfx_surface_t *s, int x, int y, const char *str, uint32_t color);
 int  gfx_text_width(const char *str);   /* width in pixels */
+
+/* Scaled text: each 8x16 cell is nearest-neighbor scaled to a
+ * (FONT_W*scale/100) x (FONT_H*scale/100) box. scale == 100 is pixel-identical
+ * to the unscaled calls above (which are thin wrappers over these). Used by the
+ * window server to grow chrome + menu-bar text for the UI-scale setting; app
+ * content keeps the native (100%) calls until it is made scale-aware. */
+void gfx_draw_char_s(gfx_surface_t *s, int x, int y, char c, uint32_t color, int scale);
+void gfx_draw_text_s(gfx_surface_t *s, int x, int y, const char *str, uint32_t color, int scale);
+int  gfx_text_width_s(const char *str, int scale);   /* scaled width in pixels */
+int  gfx_font_w_s(int scale);                        /* FONT_W scaled by `scale` */
+int  gfx_font_h_s(int scale);                        /* FONT_H scaled by `scale` */

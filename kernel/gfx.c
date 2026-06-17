@@ -108,33 +108,62 @@ void gfx_blit(gfx_surface_t *s, int x, int y, const uint32_t *src, int sw, int s
             put(s, x + xx, y + yy, src[yy * sw + xx]);
 }
 
-void gfx_draw_char(gfx_surface_t *s, int x, int y, char c, uint32_t color)
+int gfx_font_w_s(int scale) { return FONT_W * scale / 100; }
+int gfx_font_h_s(int scale) { return FONT_H * scale / 100; }
+
+/* Nearest-neighbor scale of one glyph into a (dw x dh) box. At scale == 100
+ * (dw=FONT_W, dh=FONT_H) the source maps 1:1, so the output is byte-identical to
+ * the unscaled glyph; larger scales replicate source pixels into bigger blocks. */
+void gfx_draw_char_s(gfx_surface_t *s, int x, int y, char c, uint32_t color, int scale)
 {
     unsigned ch = (unsigned char)c;
     if (ch < FONT_FIRST || ch > FONT_LAST)
         ch = '?';
     const uint8_t *g = font8x16[ch - FONT_FIRST];
-    for (int row = 0; row < FONT_H; row++) {
-        uint8_t bits = g[row];
-        for (int col = 0; col < FONT_W; col++)
-            if (bits & (0x80 >> col))
-                put(s, x + col, y + row, color);
+    int dw = FONT_W * scale / 100;
+    int dh = FONT_H * scale / 100;
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+    for (int dy = 0; dy < dh; dy++) {
+        uint8_t bits = g[dy * FONT_H / dh];             /* nearest source row */
+        for (int dx = 0; dx < dw; dx++)
+            if (bits & (0x80 >> (dx * FONT_W / dw)))    /* nearest source col */
+                put(s, x + dx, y + dy, color);
+    }
+}
+
+void gfx_draw_char(gfx_surface_t *s, int x, int y, char c, uint32_t color)
+{
+    gfx_draw_char_s(s, x, y, c, color, 100);
+}
+
+void gfx_draw_text_s(gfx_surface_t *s, int x, int y, const char *str, uint32_t color, int scale)
+{
+    int dw = FONT_W * scale / 100;
+    int dh = FONT_H * scale / 100;
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+    int cx = x;
+    for (; *str; str++) {
+        if (*str == '\n') { y += dh; cx = x; continue; }
+        gfx_draw_char_s(s, cx, y, *str, color, scale);
+        cx += dw;
     }
 }
 
 void gfx_draw_text(gfx_surface_t *s, int x, int y, const char *str, uint32_t color)
 {
-    int cx = x;
-    for (; *str; str++) {
-        if (*str == '\n') { y += FONT_H; cx = x; continue; }
-        gfx_draw_char(s, cx, y, *str, color);
-        cx += FONT_W;
-    }
+    gfx_draw_text_s(s, x, y, str, color, 100);
+}
+
+int gfx_text_width_s(const char *str, int scale)
+{
+    int n = 0;
+    while (str[n]) n++;
+    return n * (FONT_W * scale / 100);
 }
 
 int gfx_text_width(const char *str)
 {
-    int n = 0;
-    while (str[n]) n++;
-    return n * FONT_W;
+    return gfx_text_width_s(str, 100);
 }

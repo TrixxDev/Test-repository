@@ -15,9 +15,11 @@
 #pragma once
 #include "gfx.h"
 
-#define WM_TITLEBAR_H  28
+#define WM_TITLEBAR_H  28    /* base height (at 100% UI scale); see wm_titlebar_h */
 #define WM_MENUBAR_H   28    /* must match desktop.c MENUBAR_H (drag y-clamp) */
 #define WM_MAX_WINDOWS 16
+#define WM_MAX_UI_SCALE 200  /* the largest UI scale; present buffers are sized for
+                              * this so a live scale change never needs a realloc */
 
 /* Bounding box of the arrow cursor glyph (see cursor_glyph[] in wm.c). Used by
  * the windowserver to damage only the pixels the pointer covers. */
@@ -51,6 +53,17 @@ typedef struct {
 
 void wm_draw_window(gfx_surface_t *screen, const window_t *win);
 void wm_composite(gfx_surface_t *screen, window_t *windows[], int n);
+
+/* ---- UI scale ----
+ * The scale percent lives in desktop.c (desktop_scale()); these report the
+ * window chrome metrics at that scale so the server's footprint/allocation math
+ * matches what wm.c draws. */
+int  wm_titlebar_h(void);    /* WM_TITLEBAR_H scaled by the current UI scale */
+/* Allocation footprint (in *fw,*fh) of a window's presentation surface for a
+ * `content_w` x `content_h` content area, sized for the LARGEST UI scale so the
+ * buffer is never reallocated when the scale changes. wm_refresh_surfaces draws
+ * into it at the current scale, which is always within these bounds. */
+void wm_present_footprint(int content_w, int content_h, int *fw, int *fh);
 
 /* ---- window-server core (window table + z-order + drawing) ---- */
 
@@ -127,6 +140,9 @@ void  wm_set_present(wm_state_t *st, int id, void *pixels, int fw, int fh);
 void *wm_present_ptr(wm_state_t *st, int id);
 /* Mark window `id`'s presentation surface stale (its content/state changed). */
 void  wm_mark_dirty(wm_state_t *st, int id);
+/* Mark every live window's surface stale — used after a UI-scale change, which
+ * alters the title-bar height (and thus every window's composed pixels). */
+void  wm_mark_all_dirty(wm_state_t *st);
 /* Rebuild the cached presentation surface of every dirty decorated window. Cheap
  * when nothing is dirty; called by the server once per frame before compositing. */
 void  wm_refresh_surfaces(wm_state_t *st);

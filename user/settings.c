@@ -19,8 +19,9 @@
 
 static int wm;
 static int win;
-static int pane = 0;                /* 0 = Desktop, 1 = System */
+static int pane = 0;                /* 0 = Desktop, 1 = Display, 2 = System */
 static int cur_wp = 0, cur_ac = 0;  /* current wallpaper / accent index */
+static int cur_scale = 0;           /* current UI-scale index (into sc_val) */
 
 static const char *wp_cfg[4]  = { "blue", "dark", "purple", "green" };
 static const char *ac_cfg[4]  = { "blue", "orange", "purple", "green" };
@@ -39,6 +40,11 @@ static const uint32_t ac_sw[4] = {
 #define WP_Y0 40
 #define AC_Y0 168
 #define ROW_H 24
+
+/* Display pane: UI scale options (percent). 100% is the native size. */
+#define SC_Y0 56
+static const char    *sc_name[4] = { "100%", "125%", "150%", "200%" };
+static const int      sc_val[4]  = { 100, 125, 150, 200 };
 
 static void rect(int x, int y, int w, int h, uint32_t color)
 {
@@ -90,15 +96,23 @@ static void option_row(int y, uint32_t swatch, const char *name, int selected)
     if (selected) text(W - 26, y, "*", GFX_RGB(0x33, 0x66, 0xff));
 }
 
+/* A selectable text row (no color swatch) for the Display pane's scale list. */
+static void pick_row(int y, const char *name, int selected)
+{
+    if (selected) rect(X0 - 6, y - 3, W - X0 - 4, ROW_H, GFX_RGB(0xdf, 0xe7, 0xff));
+    text(X0, y, name, GFX_RGB(0x22, 0x22, 0x2a));
+    if (selected) text(W - 26, y, "*", GFX_RGB(0x33, 0x66, 0xff));
+}
+
 static void redraw(void)
 {
     rect(0, 0, W, H, GFX_RGB(0xf6, 0xf6, 0xf9));
     rect(0, 0, SIDEBAR, H, GFX_RGB(0xec, 0xec, 0xf1));        /* sidebar */
     rect(SIDEBAR, 0, 1, H, GFX_RGB(0xd5, 0xd5, 0xdc));
-    if (pane == 0) rect(0, 10, SIDEBAR, 22, GFX_RGB(0xdf, 0xe7, 0xff));
-    else           rect(0, 38, SIDEBAR, 22, GFX_RGB(0xdf, 0xe7, 0xff));
+    rect(0, 10 + pane * 28, SIDEBAR, 22, GFX_RGB(0xdf, 0xe7, 0xff));   /* active row */
     text(16, 13, "Desktop", GFX_RGB(0x22, 0x22, 0x2a));
-    text(16, 41, "System",  GFX_RGB(0x22, 0x22, 0x2a));
+    text(16, 41, "Display", GFX_RGB(0x22, 0x22, 0x2a));
+    text(16, 69, "System",  GFX_RGB(0x22, 0x22, 0x2a));
 
     if (pane == 0) {
         text(X0, 12, "Wallpaper", GFX_RGB(0x11, 0x11, 0x18));
@@ -107,6 +121,14 @@ static void redraw(void)
         text(X0, AC_Y0 - 28, "Accent Color", GFX_RGB(0x11, 0x11, 0x18));
         for (int i = 0; i < 4; i++)
             option_row(AC_Y0 + i * ROW_H, ac_sw[i], ac_name[i], i == cur_ac);
+    } else if (pane == 1) {
+        text(X0, 12, "UI Scale", GFX_RGB(0x11, 0x11, 0x18));
+        for (int i = 0; i < 4; i++)
+            pick_row(SC_Y0 + i * ROW_H, sc_name[i], i == cur_scale);
+        text(X0, SC_Y0 + 4 * ROW_H + 12, "Scales menus, title bars",
+             GFX_RGB(0x66, 0x66, 0x70));
+        text(X0, SC_Y0 + 4 * ROW_H + 30, "and window chrome.",
+             GFX_RGB(0x66, 0x66, 0x70));
     } else {
         struct sysinfo si;
         memset(&si, 0, sizeof(si));
@@ -124,7 +146,7 @@ static void redraw(void)
 
 static void write_cfg(void)
 {
-    char buf[64]; int p = 0;
+    char buf[96]; int p = 0;
     const char *k1 = "wallpaper=";
     for (int i = 0; k1[i]; i++) buf[p++] = k1[i];
     for (int i = 0; wp_cfg[cur_wp][i]; i++) buf[p++] = wp_cfg[cur_wp][i];
@@ -133,11 +155,16 @@ static void write_cfg(void)
     for (int i = 0; k2[i]; i++) buf[p++] = k2[i];
     for (int i = 0; ac_cfg[cur_ac][i]; i++) buf[p++] = ac_cfg[cur_ac][i];
     buf[p++] = '\n';
+    const char *k3 = "ui_scale=";
+    for (int i = 0; k3[i]; i++) buf[p++] = k3[i];
+    char num[12]; utoa((unsigned)sc_val[cur_scale], num);
+    for (int i = 0; num[i]; i++) buf[p++] = num[i];
+    buf[p++] = '\n';
 
     int fd = open("/disk/settings.cfg", O_WRONLY | O_CREAT | O_TRUNC);
     if (fd >= 0) { write(fd, buf, p); close(fd); }
 
-    wm_req_t r; memset(&r, 0, sizeof(r));      /* ask the WM to re-read the theme */
+    wm_req_t r; memset(&r, 0, sizeof(r));      /* ask the WM to re-read the settings */
     r.op = WM_RELOAD_SETTINGS;
     msgsend(wm, &r, sizeof(r));
 }
@@ -159,6 +186,11 @@ static void read_cfg(void)
         if (strncmp(p, "accent=", 7) == 0)
             for (int i = 0; i < 4; i++)
                 if (strncmp(p + 7, ac_cfg[i], strlen(ac_cfg[i])) == 0) cur_ac = i;
+        if (strncmp(p, "ui_scale=", 9) == 0) {
+            int v = 0; const char *q = p + 9;
+            while (*q >= '0' && *q <= '9') { v = v * 10 + (*q - '0'); q++; }
+            for (int i = 0; i < 4; i++) if (sc_val[i] == v) cur_scale = i;
+        }
         while (*p && *p != '\n') p++;
         if (*p == '\n') p++;
     }
@@ -167,20 +199,27 @@ static void read_cfg(void)
 static void on_click(int x, int y)
 {
     if (x < SIDEBAR) {                          /* sidebar: switch pane */
-        int np = (y < 34) ? 0 : (y < 62 ? 1 : pane);
+        int np = (y < 34) ? 0 : (y < 62) ? 1 : (y < 90) ? 2 : pane;
         if (np != pane) { pane = np; redraw(); }
         return;
     }
-    if (pane != 0) return;                       /* System pane is read-only */
 
-    for (int i = 0; i < 4; i++) {               /* wallpaper rows */
-        int ry = WP_Y0 + i * ROW_H;
-        if (y >= ry - 3 && y < ry - 3 + ROW_H) { cur_wp = i; write_cfg(); redraw(); return; }
+    if (pane == 0) {
+        for (int i = 0; i < 4; i++) {           /* wallpaper rows */
+            int ry = WP_Y0 + i * ROW_H;
+            if (y >= ry - 3 && y < ry - 3 + ROW_H) { cur_wp = i; write_cfg(); redraw(); return; }
+        }
+        for (int i = 0; i < 4; i++) {           /* accent rows */
+            int ry = AC_Y0 + i * ROW_H;
+            if (y >= ry - 3 && y < ry - 3 + ROW_H) { cur_ac = i; write_cfg(); redraw(); return; }
+        }
+    } else if (pane == 1) {
+        for (int i = 0; i < 4; i++) {           /* UI scale rows */
+            int ry = SC_Y0 + i * ROW_H;
+            if (y >= ry - 3 && y < ry - 3 + ROW_H) { cur_scale = i; write_cfg(); redraw(); return; }
+        }
     }
-    for (int i = 0; i < 4; i++) {               /* accent rows */
-        int ry = AC_Y0 + i * ROW_H;
-        if (y >= ry - 3 && y < ry - 3 + ROW_H) { cur_ac = i; write_cfg(); redraw(); return; }
-    }
+    /* pane 2 (System) is read-only */
 }
 
 int main(int argc, char **argv)

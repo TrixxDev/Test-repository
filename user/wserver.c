@@ -49,6 +49,11 @@ typedef struct {
 #define MENU_N       4
 #define MENU_H       (MENU_N * MENU_ITEM_H + 2 * MENU_PAD)
 
+/* The Aurora menu (chrome) scales with the desktop UI scale; sc() scales a base
+ * literal, and the menu bar height comes from desktop_menubar_h(). At 100% these
+ * are identities, so the menu geometry is unchanged. */
+static int sc(int v) { return v * desktop_scale() / 100; }
+
 static int menu_open  = 0;
 static int menu_hover = -1;
 
@@ -80,10 +85,20 @@ static int cfg_map(const char *v, const char *const *names, int n)
     return 0;                               /* default to index 0 */
 }
 
-/* Read /disk/settings.cfg and apply the wallpaper + accent theme. */
+/* Parse a UI-scale percent, clamped to the supported 100..200 range. */
+static int cfg_scale(const char *v)
+{
+    int n = 0;
+    while (*v >= '0' && *v <= '9') { n = n * 10 + (*v - '0'); v++; }
+    if (n < 100) n = 100;
+    if (n > WM_MAX_UI_SCALE) n = WM_MAX_UI_SCALE;
+    return n;
+}
+
+/* Read /disk/settings.cfg and apply the wallpaper + accent theme + UI scale. */
 static void load_settings(void)
 {
-    int wp = 0, ac = 0;
+    int wp = 0, ac = 0, scale = 100;
     int fd = open("/disk/settings.cfg", O_RDONLY);
     if (fd >= 0) {
         char buf[256];
@@ -94,9 +109,11 @@ static void load_settings(void)
             char val[16];
             if (cfg_value(buf, "wallpaper", val, sizeof(val))) wp = cfg_map(val, WP_NAMES, 4);
             if (cfg_value(buf, "accent",    val, sizeof(val))) ac = cfg_map(val, AC_NAMES, 4);
+            if (cfg_value(buf, "ui_scale",  val, sizeof(val))) scale = cfg_scale(val);
         }
     }
     desktop_set_theme(wp, ac);
+    desktop_set_scale(scale);
 }
 
 static const char *menu_items[MENU_N] = {
@@ -108,37 +125,42 @@ static const char *menu_items[MENU_N] = {
 
 static int in_aurora_menu(int x, int y)
 {
-    return x >= AURORA_X0 && x < AURORA_X1 && y >= 0 && y < MENUBAR_H;
+    return x >= sc(AURORA_X0) && x < sc(AURORA_X1) && y >= 0 && y < desktop_menubar_h();
 }
 
 static int menu_item_at(int x, int y)   /* item under (x,y) while open, or -1 */
 {
     if (!menu_open) return -1;
-    if (x < MENU_X || x >= MENU_X + MENU_W) return -1;
-    if (y < MENU_Y + MENU_PAD || y >= MENU_Y + MENU_H - MENU_PAD) return -1;
-    int item = (y - MENU_Y - MENU_PAD) / MENU_ITEM_H;
+    int mx = sc(MENU_X), my = desktop_menubar_h(), mw = sc(MENU_W);
+    int pad = sc(MENU_PAD), ih = sc(MENU_ITEM_H);
+    if (x < mx || x >= mx + mw) return -1;
+    if (y < my + pad || y >= my + pad + MENU_N * ih) return -1;
+    int item = (y - my - pad) / ih;
     return (item >= 0 && item < MENU_N) ? item : -1;
 }
 
 static void draw_menu(gfx_surface_t *dst)
 {
     if (!menu_open) return;
+    int sp = desktop_scale();
     uint32_t accent = desktop_accent_color();
     /* Highlight the Aurora title in the bar (theme accent). */
-    gfx_fill_rect(dst, AURORA_X0, 0, AURORA_X1 - AURORA_X0, MENUBAR_H, accent);
-    gfx_fill_round_rect(dst, 12, 6, 16, 16, 4, GFX_RGB(0xff, 0xff, 0xff));
-    gfx_draw_text(dst, 36, 6, "Aurora", GFX_RGB(0xff, 0xff, 0xff));
+    gfx_fill_rect(dst, sc(AURORA_X0), 0, sc(AURORA_X1) - sc(AURORA_X0), desktop_menubar_h(), accent);
+    gfx_fill_round_rect(dst, sc(12), sc(6), sc(16), sc(16), sc(4), GFX_RGB(0xff, 0xff, 0xff));
+    gfx_draw_text_s(dst, sc(36), sc(6), "Aurora", GFX_RGB(0xff, 0xff, 0xff), sp);
     /* Dropdown: a hard shadow, then a light rounded panel with the items. */
-    gfx_fill_round_rect(dst, MENU_X + 3, MENU_Y + 3, MENU_W, MENU_H, 8, GFX_RGB(0x12, 0x12, 0x1a));
-    gfx_fill_round_rect(dst, MENU_X, MENU_Y, MENU_W, MENU_H, 8, GFX_RGB(0xf6, 0xf6, 0xfa));
+    int mx = sc(MENU_X), my = desktop_menubar_h(), mw = sc(MENU_W);
+    int pad = sc(MENU_PAD), ih = sc(MENU_ITEM_H), mh = MENU_N * ih + 2 * pad;
+    gfx_fill_round_rect(dst, mx + sc(3), my + sc(3), mw, mh, sc(8), GFX_RGB(0x12, 0x12, 0x1a));
+    gfx_fill_round_rect(dst, mx, my, mw, mh, sc(8), GFX_RGB(0xf6, 0xf6, 0xfa));
     for (int i = 0; i < MENU_N; i++) {
-        int iy = MENU_Y + MENU_PAD + i * MENU_ITEM_H;
+        int iy = my + pad + i * ih;
         uint32_t fg = GFX_RGB(0x22, 0x22, 0x2a);
         if (i == menu_hover) {
-            gfx_fill_rect(dst, MENU_X + 3, iy, MENU_W - 6, MENU_ITEM_H, accent);
+            gfx_fill_rect(dst, mx + sc(3), iy, mw - sc(6), ih, accent);
             fg = GFX_RGB(0xff, 0xff, 0xff);
         }
-        gfx_draw_text(dst, MENU_X + 14, iy + (MENU_ITEM_H - 16) / 2, menu_items[i], fg);
+        gfx_draw_text_s(dst, mx + sc(14), iy + (ih - gfx_font_h_s(sp)) / 2, menu_items[i], fg, sp);
     }
 }
 
@@ -564,7 +586,8 @@ int main(int argc, char **argv)
                 dock_win = id;
             }
             if (id > 0 && !dock) {      /* decorated: attach a cached presentation surface */
-                int fw = req.w + 4, fh = req.h + WM_TITLEBAR_H + 6;
+                int fw, fh;             /* sized for the max UI scale (no realloc on rescale) */
+                wm_present_footprint(req.w, req.h, &fw, &fh);
                 void *ppx = malloc((size_t)fw * fh * 4);
                 if (ppx)                /* on OOM, present stays NULL -> immediate path */
                     wm_set_present(&st, id, ppx, fw, fh);
@@ -635,10 +658,13 @@ int main(int argc, char **argv)
                    wm_window_count(&st), (unsigned)(uintptr_t)sbrk(0));
             break;
         case WM_RELOAD_SETTINGS:
-            /* Settings changed /disk/settings.cfg: re-apply the theme + repaint.
-             * The wallpaper/accent may have changed, so refresh the cache too. */
+            /* Settings changed /disk/settings.cfg: re-apply the theme + scale and
+             * repaint. The wallpaper/accent may have changed, so refresh the
+             * background cache; a UI-scale change alters the title-bar height, so
+             * every window's cached surface is now stale (rebuilt next tick). */
             load_settings();
             rebuild_bg();
+            wm_mark_all_dirty(&st);
             mark_full();
             break;
         case WM_MOUSE: {
@@ -709,7 +735,8 @@ int main(int argc, char **argv)
                             if (old) free(old);
                             /* resize the cached presentation surface too */
                             void *opp = wm_present_ptr(&st, id);
-                            int fw = nw + 4, fh = nh + WM_TITLEBAR_H + 6;
+                            int fw, fh;
+                            wm_present_footprint(nw, nh, &fw, &fh);
                             void *ppx = malloc((size_t)fw * fh * 4);
                             wm_set_present(&st, id, ppx, fw, fh);  /* NULL -> immediate */
                             if (opp) free(opp);

@@ -4,6 +4,24 @@
 
 #define WIN_RADIUS 10
 
+/* ---- UI scale helpers (the scale percent lives in desktop.c) ----
+ * tbh()  = the title-bar height at the current scale; sc(v) scales any chrome
+ * literal (button offsets, radii, paddings) by the same factor so the chrome
+ * grows uniformly. At 100% these are identities, so output is unchanged. */
+static int sc(int v)  { return v * desktop_scale() / 100; }
+static int tbh(void)  { return WM_TITLEBAR_H * desktop_scale() / 100; }
+
+int wm_titlebar_h(void) { return tbh(); }
+
+void wm_present_footprint(int content_w, int content_h, int *fw, int *fh)
+{
+    /* Width is scale-independent (content stays native); only the title bar grows
+     * with scale, so reserve the tallest title bar (WM_MAX_UI_SCALE) plus the
+     * (+4,+6) drop-shadow margin. wm_refresh_surfaces draws within this. */
+    if (fw) *fw = content_w + 4;
+    if (fh) *fh = content_h + WM_TITLEBAR_H * WM_MAX_UI_SCALE / 100 + 6;
+}
+
 /* ---- compositor primitives ---- */
 
 /* Blit a content surface but skip color-key pixels (1-bit transparency), so a
@@ -37,43 +55,49 @@ static void draw_window_at(gfx_surface_t *screen, const window_t *win, int x, in
 {
     int cw = win->content->width;
     int ch = win->content->height;
+    int tb = tbh();                 /* title-bar height at the current UI scale */
+    int rad = sc(WIN_RADIUS);       /* corner radius scales with the chrome */
 
     /* When window-shaded the window collapses to just its title bar. */
-    int total_h = win->shaded ? WM_TITLEBAR_H : ch + WM_TITLEBAR_H;
+    int total_h = win->shaded ? tb : ch + tb;
 
     uint32_t title_bg = GFX_RGB(0xec, 0xec, 0xf0);
     uint32_t white    = GFX_RGB(0xff, 0xff, 0xff);
 
     /* Hard drop shadow (soft/alpha shadows arrive with the design system, 9.6). */
-    gfx_fill_round_rect(screen, x + 4, y + 6, cw, total_h, WIN_RADIUS, GFX_RGB(0x14, 0x14, 0x1e));
+    gfx_fill_round_rect(screen, x + 4, y + 6, cw, total_h, rad, GFX_RGB(0x14, 0x14, 0x1e));
 
     /* Content panel (rounded), then the title bar (rounded top, square bottom). */
-    gfx_fill_round_rect(screen, x, y, cw, total_h, WIN_RADIUS, white);
-    gfx_fill_round_rect(screen, x, y, cw, WM_TITLEBAR_H, WIN_RADIUS, title_bg);
-    gfx_fill_rect(screen, x, y + WM_TITLEBAR_H - WIN_RADIUS, cw, WIN_RADIUS, title_bg);
-    gfx_fill_rect(screen, x, y + WM_TITLEBAR_H - 1, cw, 1, GFX_RGB(0xd2, 0xd2, 0xd8));
+    gfx_fill_round_rect(screen, x, y, cw, total_h, rad, white);
+    gfx_fill_round_rect(screen, x, y, cw, tb, rad, title_bg);
+    gfx_fill_rect(screen, x, y + tb - rad, cw, rad, title_bg);
+    gfx_fill_rect(screen, x, y + tb - 1, cw, 1, GFX_RGB(0xd2, 0xd2, 0xd8));
 
     /* Traffic-light buttons; the red one (left) is the close button — mark it
      * with a small dark "x" so its action reads at a glance. */
-    gfx_fill_circle(screen, x + 16, y + 14, 6, GFX_RGB(0xff, 0x5f, 0x57));
-    gfx_fill_circle(screen, x + 34, y + 14, 6, GFX_RGB(0xfe, 0xbc, 0x2e));
-    gfx_fill_circle(screen, x + 52, y + 14, 6, GFX_RGB(0x28, 0xc8, 0x40));
+    int by = y + sc(14), r = sc(6);
+    gfx_fill_circle(screen, x + sc(16), by, r, GFX_RGB(0xff, 0x5f, 0x57));
+    gfx_fill_circle(screen, x + sc(34), by, r, GFX_RGB(0xfe, 0xbc, 0x2e));
+    gfx_fill_circle(screen, x + sc(52), by, r, GFX_RGB(0x28, 0xc8, 0x40));
     uint32_t xmark = GFX_RGB(0x7a, 0x12, 0x10);
-    for (int d = -2; d <= 2; d++) {
-        gfx_fill_rect(screen, x + 16 + d, y + 14 + d, 1, 1, xmark);   /* "\" */
-        gfx_fill_rect(screen, x + 16 + d, y + 14 - d, 1, 1, xmark);   /* "/" */
+    int arm = sc(2); if (arm < 1) arm = 1;
+    for (int d = -arm; d <= arm; d++) {
+        gfx_fill_rect(screen, x + sc(16) + d, by + d, 1, 1, xmark);   /* "\" */
+        gfx_fill_rect(screen, x + sc(16) + d, by - d, 1, 1, xmark);   /* "/" */
     }
 
-    /* Centered title. */
+    /* Centered title (font + baseline scale with the bar). */
     if (win->title) {
-        int tw = gfx_text_width(win->title);
-        gfx_draw_text(screen, x + (cw - tw) / 2, y + 6, win->title, GFX_RGB(0x33, 0x33, 0x3a));
+        int sp = desktop_scale();
+        int tw = gfx_text_width_s(win->title, sp);
+        gfx_draw_text_s(screen, x + (cw - tw) / 2, y + sc(6), win->title,
+                        GFX_RGB(0x33, 0x33, 0x3a), sp);
     }
 
     /* The window's content surface (packed, pitch == width*4) — hidden when
      * window-shaded. */
     if (!win->shaded)
-        gfx_blit(screen, x, y + WM_TITLEBAR_H, (const uint32_t *)win->content->pixels, cw, ch);
+        gfx_blit(screen, x, y + tb, (const uint32_t *)win->content->pixels, cw, ch);
 }
 
 void wm_draw_window(gfx_surface_t *screen, const window_t *win)
@@ -196,8 +220,8 @@ static int frame_hit(const window_t *w, int x, int y)
     int cw = w->content->width;
     int total_h;
     if (!w->decorated)     total_h = w->content->height;
-    else if (w->shaded)    total_h = WM_TITLEBAR_H;
-    else                   total_h = w->content->height + WM_TITLEBAR_H;
+    else if (w->shaded)    total_h = tbh();
+    else                   total_h = w->content->height + tbh();
     return x >= w->x && x < w->x + cw && y >= w->y && y < w->y + total_h;
 }
 
@@ -220,7 +244,7 @@ int wm_in_titlebar(wm_state_t *st, int id, int x, int y)
         return 0;
     window_t *w = &st->win[s];
     return x >= w->x && x < w->x + w->content->width &&
-           y >= w->y && y < w->y + WM_TITLEBAR_H;
+           y >= w->y && y < w->y + tbh();
 }
 
 /* Traffic-light hit tests: red close (x+16), yellow minimize (x+34), green
@@ -230,9 +254,10 @@ static int in_light(wm_state_t *st, int id, int cxoff, int x, int y)
     int s = slot_of(st, id);
     if (s < 0 || !st->win[s].decorated)
         return 0;
-    int cx = st->win[s].x + cxoff, cy = st->win[s].y + 14;
-    int dx = x - cx, dy = y - cy;
-    return dx * dx + dy * dy <= 9 * 9;
+    /* Centers + hit radius scale with the chrome (matches draw_window_at). */
+    int cx = st->win[s].x + sc(cxoff), cy = st->win[s].y + sc(14);
+    int dx = x - cx, dy = y - cy, r = sc(9);
+    return dx * dx + dy * dy <= r * r;
 }
 
 int wm_in_close_button(wm_state_t *st, int id, int x, int y) { return in_light(st, id, 16, x, y); }
@@ -258,9 +283,9 @@ int wm_toggle_max(wm_state_t *st, int id, int screen_w, int screen_h, int *w, in
     if (!win->maximized) {
         win->sx = win->x; win->sy = win->y;
         win->sw = win->content->width; win->sh = win->content->height;
-        win->x = 0; win->y = WM_MENUBAR_H;
+        win->x = 0; win->y = desktop_menubar_h();
         *w = screen_w;
-        *h = screen_h - WM_MENUBAR_H - WM_TITLEBAR_H;
+        *h = screen_h - desktop_menubar_h() - tbh();
         win->maximized = 1;
     } else {
         win->x = win->sx; win->y = win->sy;
@@ -301,7 +326,7 @@ int wm_content_origin(wm_state_t *st, int id, int *ox, int *oy)
     if (s < 0)
         return 0;
     if (ox) *ox = st->win[s].x;
-    if (oy) *oy = st->win[s].y + (st->win[s].decorated ? WM_TITLEBAR_H : 0);
+    if (oy) *oy = st->win[s].y + (st->win[s].decorated ? tbh() : 0);
     return 1;
 }
 
@@ -377,6 +402,13 @@ void wm_mark_dirty(wm_state_t *st, int id)
         st->win[s].dirty = 1;
 }
 
+void wm_mark_all_dirty(wm_state_t *st)
+{
+    for (int i = 0; i < WM_MAX_WINDOWS; i++)
+        if (st->used[i])
+            st->win[i].dirty = 1;
+}
+
 void wm_refresh_surfaces(wm_state_t *st)
 {
     for (int i = 0; i < WM_MAX_WINDOWS; i++) {
@@ -393,7 +425,7 @@ void wm_refresh_surfaces(wm_state_t *st)
         /* Size the surface to the current footprint (shaded shrinks the height;
          * the buffer was allocated for the full, un-shaded footprint). */
         int cw = w->content->width;
-        int total_h = w->shaded ? WM_TITLEBAR_H : w->content->height + WM_TITLEBAR_H;
+        int total_h = w->shaded ? tbh() : w->content->height + tbh();
         int fw = cw + 4, fh = total_h + 6;
         p->width = fw; p->height = fh; p->pitch = fw * 4; p->bpp = 32;
         /* Color-key the whole footprint so corners + shadow gaps stay transparent
@@ -438,10 +470,10 @@ int wm_window_bounds(wm_state_t *st, int id, int *bx, int *by, int *bw, int *bh)
         *bh = ch;
     } else if (st->win[s].shaded) {
         *bw = cw + 4;
-        *bh = WM_TITLEBAR_H + 6;
+        *bh = tbh() + 6;
     } else {
         *bw = cw + 4;
-        *bh = ch + WM_TITLEBAR_H + 6;
+        *bh = ch + tbh() + 6;
     }
     return 1;
 }
@@ -491,9 +523,10 @@ void wm_move_clamped(wm_state_t *st, int id, int x, int y, int screen_w, int scr
     int cw = st->win[s].content->width;
     int margin = 40;                /* min graspable strip kept on-screen */
 
+    int mb = desktop_menubar_h();
     if (x > screen_w - margin)      x = screen_w - margin;
     if (x < margin - cw)            x = margin - cw;     /* keep some right edge */
-    if (y < WM_MENUBAR_H)           y = WM_MENUBAR_H;    /* never under the menu bar */
+    if (y < mb)                     y = mb;              /* never under the menu bar */
     if (y > screen_h - margin)      y = screen_h - margin;
 
     st->win[s].x = x;
