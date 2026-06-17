@@ -262,6 +262,10 @@ static void render_frame(void)
     if (!g_full_dirty && !g_scene_dirty && !cursor_moved)
         return;
 
+    /* Rebuild any window whose content/state changed since the last frame; a
+     * plain drag/move dirties nothing here, so it stays a pure blit. */
+    wm_refresh_surfaces(&st);
+
     if (g_full_dirty) {
         compose();
         flush(0, 0, screen.width, screen.height);
@@ -284,9 +288,12 @@ static void render_frame(void)
 static void destroy_window(int id)
 {
     void *px = wm_content_ptr(&st, id);
+    void *pp = wm_present_ptr(&st, id);     /* cached presentation surface, if any */
     wm_destroy(&st, id);
     if (px)
         free(px);
+    if (pp)
+        free(pp);
     if (id == dock_win)
         dock_win = -1;
 }
@@ -556,6 +563,12 @@ int main(int argc, char **argv)
                 wm_set_top(&st, id);    /* the Dock floats above ordinary windows */
                 dock_win = id;
             }
+            if (id > 0 && !dock) {      /* decorated: attach a cached presentation surface */
+                int fw = req.w + 4, fh = req.h + WM_TITLEBAR_H + 6;
+                void *ppx = malloc((size_t)fw * fh * 4);
+                if (ppx)                /* on OOM, present stays NULL -> immediate path */
+                    wm_set_present(&st, id, ppx, fw, fh);
+            }
             wm_rep_t rep = { id > 0 ? 0 : -1, id };
             msgsend(from, &rep, sizeof(rep));
             break;
@@ -590,13 +603,16 @@ int main(int argc, char **argv)
             break;
         }
         case WM_PRESENT: {
-            /* The app just finished redrawing its surface; damage only that
-             * window's footprint (the next tick paints it). */
+            /* The app just finished redrawing its surface; its cached window
+             * surface is now stale and only that window's footprint is damaged
+             * (the next tick rebuilds + paints it). */
             int id = wm_window_of_owner(&st, from);
-            if (id > 0)
+            if (id > 0) {
+                wm_mark_dirty(&st, id);
                 mark_window(id);
-            else
+            } else {
                 mark_full();
+            }
             break;
         }
         case WM_KEY: {
@@ -680,6 +696,7 @@ int main(int argc, char **argv)
                     }
                 } else if (wm_in_min_button(&st, id, cx, cy)) {
                     wm_toggle_shade(&st, id);       /* window-shade collapse/expand */
+                    wm_mark_dirty(&st, id);         /* footprint + content visibility changed */
                     mark_window(id);
                 } else if (wm_in_max_button(&st, id, cx, cy)) {
                     int nw, nh;                     /* maximize/restore: resize the surface */
@@ -690,6 +707,12 @@ int main(int argc, char **argv)
                             void *old = wm_content_ptr(&st, id);
                             wm_set_content(&st, id, npx, nw, nh);
                             if (old) free(old);
+                            /* resize the cached presentation surface too */
+                            void *opp = wm_present_ptr(&st, id);
+                            int fw = nw + 4, fh = nh + WM_TITLEBAR_H + 6;
+                            void *ppx = malloc((size_t)fw * fh * 4);
+                            wm_set_present(&st, id, ppx, fw, fh);  /* NULL -> immediate */
+                            if (opp) free(opp);
                             int owner = wm_owner_of(&st, id);
                             if (owner > 0) {        /* ask the app to redraw at the new size */
                                 wm_req_t rz;

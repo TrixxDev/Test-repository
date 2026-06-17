@@ -243,9 +243,24 @@ Two invariants, deliberately simple at this stage:
   samples the framebuffer on its own timer, so it does not manifest here. The
   render loop is about frame **pacing** and decoupling, not vsync.
 
-  Remaining lever (not yet done): **per-window surface caching** (skip redrawing
-  windows whose content did not change) is the next step — with the background and
-  the render storm gone, this is what makes complex drag/resize cost-free.
+- **Per-window surface caching — windows are real surfaces (v1.1.x perf pass):**
+  each decorated window now owns a server-side **presentation surface** that holds
+  its fully-composed pixels (drop shadow + rounded panel + title bar + traffic
+  lights + title + content). `wm_refresh_surfaces` rebuilds that surface **only
+  when the window is `dirty`** — i.e. its content changed (`WM_PRESENT`), it was
+  shaded, or it was resized (maximize) — not every frame. Compositing a window is
+  then a single `blit_keyed` of the cached surface (the footprint is color-keyed,
+  so corners + the shadow's L-gap stay transparent). So a drag/move/raise no longer
+  re-renders any chrome: the window travels as a finished bitmap, the same model as
+  Wayland/Quartz surfaces (here with 1-bit alpha via the color key). The server
+  owns the presentation buffer like it owns the content buffer (allocated in
+  `WM_CREATE`, realloc'd on maximize, freed on destroy — the leak test confirms a
+  flat heap). The host PNG renderer keeps the immediate path (no cache attached →
+  `wm_draw_window` draws in place). Verified pixel-identical: `verify_drag`
+  (drag + close), boot, click-to-focus + type, shade, maximize, and the menu all
+  match. **Remaining levers** are now hardware-facing only — shared-memory client
+  surfaces (so apps render into the cache directly) and a virtio-gpu/vsync path —
+  both deferred.
 
 **Keyboard pipeline** (closing the loop keyboard → windowserver → app → screen):
 the windowserver forks a small helper child that blocks on the console

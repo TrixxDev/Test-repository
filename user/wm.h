@@ -41,8 +41,10 @@ typedef struct {
     int            shaded;      /* 1 = window-shaded (collapsed to its title bar)   */
     int            maximized;   /* 1 = filling the screen (saved geometry in s*)    */
     int            sx, sy, sw, sh;  /* geometry to restore from maximize           */
+    int            dirty;       /* 1 = the cached presentation surface needs a rebuild */
     const char    *title;
     gfx_surface_t *content;     /* the app's content surface (w x h, packed) */
+    gfx_surface_t *present;     /* cached composed window (chrome+content), or NULL */
 } window_t;
 
 /* ---- compositor primitives ---- */
@@ -55,6 +57,7 @@ void wm_composite(gfx_surface_t *screen, window_t *windows[], int n);
 typedef struct {
     window_t      win[WM_MAX_WINDOWS];
     gfx_surface_t surf[WM_MAX_WINDOWS];
+    gfx_surface_t psurf[WM_MAX_WINDOWS];    /* per-window cached presentation surfaces */
     char          titles[WM_MAX_WINDOWS][48];
     int           used[WM_MAX_WINDOWS];
     int           count, next_id, next_z;
@@ -111,6 +114,22 @@ int  wm_window_of_owner(wm_state_t *st, int owner);
 /* The content pixel buffer of window `id` (the one the windowserver malloc'd),
  * or NULL; the server frees it on destroy so closing a window leaks nothing. */
 void *wm_content_ptr(wm_state_t *st, int id);
+
+/* ---- per-window surface caching ----
+ * Each decorated window's fully-composed pixels (shadow + chrome + content) are
+ * cached in a server-owned presentation surface, so a drag/move just *blits* it
+ * rather than re-rendering the chrome every frame. The surface is rebuilt only
+ * when the window's content/geometry changes (the `dirty` flag). */
+/* Attach a presentation buffer of footprint `fw`x`fh` to window `id` (server
+ * owns `pixels`); marks it dirty. `pixels` NULL falls back to immediate drawing. */
+void  wm_set_present(wm_state_t *st, int id, void *pixels, int fw, int fh);
+/* The presentation pixel buffer of window `id`, or NULL (for the server to free). */
+void *wm_present_ptr(wm_state_t *st, int id);
+/* Mark window `id`'s presentation surface stale (its content/state changed). */
+void  wm_mark_dirty(wm_state_t *st, int id);
+/* Rebuild the cached presentation surface of every dirty decorated window. Cheap
+ * when nothing is dirty; called by the server once per frame before compositing. */
+void  wm_refresh_surfaces(wm_state_t *st);
 /* Number of live windows (for leak/limit diagnostics). */
 int  wm_window_count(wm_state_t *st);
 /* First used window id whose id != `except` (or -1). Lets the server iterate to

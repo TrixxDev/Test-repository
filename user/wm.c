@@ -30,18 +30,13 @@ static void blit_keyed(gfx_surface_t *screen, int x, int y,
     }
 }
 
-void wm_draw_window(gfx_surface_t *screen, const window_t *win)
+/* Render a decorated window's chrome + content with its top-left (panel corner)
+ * at (x,y) onto `screen`. Shared by the immediate path (x,y = on-screen position)
+ * and the cached-surface rebuild (x,y = 0,0 into a per-window buffer). */
+static void draw_window_at(gfx_surface_t *screen, const window_t *win, int x, int y)
 {
     int cw = win->content->width;
     int ch = win->content->height;
-    int x = win->x, y = win->y;
-
-    /* Borderless (Dock): no chrome — just the content, color-keyed so its
-     * rounded corners let the desktop show through. */
-    if (!win->decorated) {
-        blit_keyed(screen, x, y, (const uint32_t *)win->content->pixels, cw, ch);
-        return;
-    }
 
     /* When window-shaded the window collapses to just its title bar. */
     int total_h = win->shaded ? WM_TITLEBAR_H : ch + WM_TITLEBAR_H;
@@ -79,6 +74,26 @@ void wm_draw_window(gfx_surface_t *screen, const window_t *win)
      * window-shaded. */
     if (!win->shaded)
         gfx_blit(screen, x, y + WM_TITLEBAR_H, (const uint32_t *)win->content->pixels, cw, ch);
+}
+
+void wm_draw_window(gfx_surface_t *screen, const window_t *win)
+{
+    /* Borderless (Dock): no chrome — just the content, color-keyed so its
+     * rounded corners let the desktop show through. */
+    if (!win->decorated) {
+        blit_keyed(screen, win->x, win->y, (const uint32_t *)win->content->pixels,
+                   win->content->width, win->content->height);
+        return;
+    }
+    /* Decorated: blit the cached presentation surface (rebuilt only when dirty),
+     * so a drag/move is a single blit instead of re-rendering the chrome. The
+     * footprint is color-keyed (corners + shadow gaps transparent). If there is
+     * no cache (the host PNG renderer), fall back to drawing in place. */
+    if (win->present && win->present->pixels)
+        blit_keyed(screen, win->x, win->y, (const uint32_t *)win->present->pixels,
+                   win->present->width, win->present->height);
+    else
+        draw_window_at(screen, win, win->x, win->y);
 }
 
 void wm_composite(gfx_surface_t *screen, window_t *windows[], int n)
@@ -150,8 +165,11 @@ int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
         st->win[i].resizable = resizable;
         st->win[i].shaded = 0;
         st->win[i].maximized = 0;
+        st->win[i].dirty = 1;               /* needs a first surface build */
         st->win[i].title = st->titles[i];
         st->win[i].content = &st->surf[i];
+        st->psurf[i].pixels = (uint8_t *)0; /* server attaches a buffer via wm_set_present */
+        st->win[i].present = &st->psurf[i];
         return st->win[i].id;
     }
     return -1;
@@ -330,6 +348,63 @@ void *wm_content_ptr(wm_state_t *st, int id)
 {
     int s = slot_of(st, id);
     return s < 0 ? (void *)0 : st->surf[s].pixels;
+}
+
+/* ---- per-window surface caching ---- */
+
+void wm_set_present(wm_state_t *st, int id, void *pixels, int fw, int fh)
+{
+    int s = slot_of(st, id);
+    if (s < 0)
+        return;
+    st->psurf[s].pixels = (uint8_t *)pixels;
+    st->psurf[s].width = fw; st->psurf[s].height = fh;
+    st->psurf[s].pitch = fw * 4; st->psurf[s].bpp = 32;
+    st->win[s].present = &st->psurf[s];
+    st->win[s].dirty = 1;
+}
+
+void *wm_present_ptr(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    return s < 0 ? (void *)0 : st->psurf[s].pixels;
+}
+
+void wm_mark_dirty(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    if (s >= 0)
+        st->win[s].dirty = 1;
+}
+
+void wm_refresh_surfaces(wm_state_t *st)
+{
+    for (int i = 0; i < WM_MAX_WINDOWS; i++) {
+        if (!st->used[i])
+            continue;
+        window_t *w = &st->win[i];
+        if (!w->decorated || !w->dirty)
+            continue;
+        gfx_surface_t *p = w->present;
+        if (!p || !p->pixels) {             /* no cache buffer: immediate path */
+            w->dirty = 0;
+            continue;
+        }
+        /* Size the surface to the current footprint (shaded shrinks the height;
+         * the buffer was allocated for the full, un-shaded footprint). */
+        int cw = w->content->width;
+        int total_h = w->shaded ? WM_TITLEBAR_H : w->content->height + WM_TITLEBAR_H;
+        int fw = cw + 4, fh = total_h + 6;
+        p->width = fw; p->height = fh; p->pitch = fw * 4; p->bpp = 32;
+        /* Color-key the whole footprint so corners + shadow gaps stay transparent
+         * (blit_keyed skips them), then render the window into it at (0,0). */
+        uint32_t *px = (uint32_t *)p->pixels;
+        int n = fw * fh;
+        for (int k = 0; k < n; k++)
+            px[k] = WM_COLOR_KEY;
+        draw_window_at(p, w, 0, 0);
+        w->dirty = 0;
+    }
 }
 
 int wm_window_count(wm_state_t *st)
