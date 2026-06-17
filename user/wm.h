@@ -151,6 +151,9 @@ int  wm_window_count(wm_state_t *st);
 /* First used window id whose id != `except` (or -1). Lets the server iterate to
  * close every window but the Dock. */
 int  wm_first_window_except(wm_state_t *st, int except);
+/* Fill out[] (up to `cap`) with every live window id; returns the count. Lets the
+ * server broadcast (e.g. a UI-scale change) to each window's owner. */
+int  wm_list_windows(wm_state_t *st, int *out, int cap);
 /* On-screen bounding box of window `id` including its drop shadow. Returns 1 and
  * fills *bx..*bh, or 0 if `id` is unknown. The windowserver uses this as the
  * damage rectangle so a redraw only touches that window's pixels. */
@@ -207,6 +210,8 @@ enum {
     WM_RESIZE,       /* server -> app: your content is now req.w x req.h; redraw */
     WM_RELOAD_SETTINGS, /* app -> server: re-read /disk/settings.cfg (theme)     */
     WM_TICK,         /* render ticker -> server: a frame is due (render if dirty) */
+    WM_SCALE,        /* server -> app: the UI scale changed; re-query ui_scale()
+                        and re-lay-out + repaint your content                    */
 };
 
 typedef struct {

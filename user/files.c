@@ -15,15 +15,18 @@
 
 #define DEF_W    380
 #define DEF_H    420
-#define HEADER_H 26
-#define ROW_H    20
-#define LIST_Y   HEADER_H
 #define MAX_ENTS 64
-#define CHAR_W   8          /* 8x16 font advance, matches kernel/font8x16.h */
 
 static int wm;
 static int win;
+static int S = 100;                 /* UI scale percent (queried from the system) */
 static int W = DEF_W, H = DEF_H;    /* content size (updated on WM_RESIZE) */
+
+/* Layout metrics scaled by the UI scale (base: 26px header, 20px rows, 8px font).
+ * At S=100 these are the original constants. */
+static int header_h(void) { return 26 * S / 100; }
+static int row_h(void)    { int v = 20 * S / 100; return v < 1 ? 1 : v; }
+static int char_w(void)   { return 8 * S / 100; }   /* 8x16 font advance */
 
 static char          path[256] = "/disk";
 static struct dirent ents[MAX_ENTS];
@@ -85,17 +88,19 @@ static void present(void)
 
 static void redraw(void)
 {
+    int hh = header_h(), rh = row_h(), cw = char_w();
+    int padx = 12 * S / 100, pady = 3 * S / 100;
     rect(0, 0, W, H, GFX_RGB(0xff, 0xff, 0xff));
     /* Header: a light strip with the current path. */
-    rect(0, 0, W, HEADER_H, GFX_RGB(0xf0, 0xf0, 0xf4));
-    rect(0, HEADER_H - 1, W, 1, GFX_RGB(0xcc, 0xcc, 0xd2));
-    text(10, 6, path, GFX_RGB(0x33, 0x33, 0x3a));
+    rect(0, 0, W, hh, GFX_RGB(0xf0, 0xf0, 0xf4));
+    rect(0, hh - 1, W, 1, GFX_RGB(0xcc, 0xcc, 0xd2));
+    text(10 * S / 100, 6 * S / 100, path, GFX_RGB(0x33, 0x33, 0x3a));
 
     for (int i = 0; i < nents; i++) {
-        int y = LIST_Y + i * ROW_H;
+        int y = hh + i * rh;
         int sel = (i == selected);
         if (sel)
-            rect(0, y, W, ROW_H, GFX_RGB(0x34, 0x78, 0xf6));
+            rect(0, y, W, rh, GFX_RGB(0x34, 0x78, 0xf6));
         uint32_t fg = sel ? GFX_RGB(0xff, 0xff, 0xff)
                           : (ents[i].type == DT_DIR ? GFX_RGB(0x22, 0x55, 0xcc)
                                                     : GFX_RGB(0x22, 0x22, 0x2a));
@@ -105,12 +110,12 @@ static void redraw(void)
             for (int k = 0; ents[i].name[k] && p < 70; k++) nm[p++] = ents[i].name[k];
             if (!streq(ents[i].name, "..")) nm[p++] = '/';
             nm[p] = '\0';
-            text(12, y + 3, nm, fg);
+            text(padx, y + pady, nm, fg);
         } else {
-            text(12, y + 3, ents[i].name, fg);
+            text(padx, y + pady, ents[i].name, fg);
             char sz[12]; utoa(ents[i].size, sz);
-            int sx = W - (int)strlen(sz) * CHAR_W - 12;
-            text(sx, y + 3, sz, sel ? GFX_RGB(0xff, 0xff, 0xff) : GFX_RGB(0x99, 0x99, 0xa2));
+            int sx = W - (int)strlen(sz) * cw - padx;
+            text(sx, y + pady, sz, sel ? GFX_RGB(0xff, 0xff, 0xff) : GFX_RGB(0x99, 0x99, 0xa2));
         }
     }
     present();
@@ -184,6 +189,10 @@ int main(int argc, char **argv)
     }
     if (wm <= 0) { fprintf(2, "files: no window server\n"); return 1; }
 
+    S = ui_scale();                     /* size the window to the UI scale */
+    W = DEF_W * S / 100;
+    H = DEF_H * S / 100;
+
     wm_req_t r; wm_rep_t rep;
     memset(&r, 0, sizeof(r));
     r.op = WM_CREATE; r.x = 160; r.y = 110; r.w = W; r.h = H; r.flags = WM_F_RESIZABLE;
@@ -209,14 +218,15 @@ int main(int argc, char **argv)
         if (n < (int)sizeof(ev)) continue;
         if (ev.op == WM_DESTROY) { printf("[files] closed\n"); return 0; }
         if (ev.op == WM_RESIZE) { W = ev.w; H = ev.h; redraw(); continue; }
+        if (ev.op == WM_SCALE)  { S = ui_scale(); redraw(); continue; }
         if (ev.op != WM_POINTER) continue;
 
         int press = (ev.w & 1) && !(prev_buttons & 1);
         prev_buttons = ev.w;
         if (!press) continue;
-        if (ev.y < LIST_Y) continue;            /* header / chrome */
+        if (ev.y < header_h()) continue;        /* header / chrome */
 
-        int row = (ev.y - LIST_Y) / ROW_H;
+        int row = (ev.y - header_h()) / row_h();
         if (row < 0 || row >= nents) { selected = -1; redraw(); continue; }
         if (row == selected) activate(row);     /* click the selected row -> open */
         else { selected = row; redraw(); }      /* first click -> select */

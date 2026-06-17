@@ -452,6 +452,15 @@ int wm_first_window_except(wm_state_t *st, int except)
     return -1;
 }
 
+int wm_list_windows(wm_state_t *st, int *out, int cap)
+{
+    int n = 0;
+    for (int i = 0; i < WM_MAX_WINDOWS && n < cap; i++)
+        if (st->used[i])
+            out[n++] = st->win[i].id;
+    return n;
+}
+
 int wm_window_bounds(wm_state_t *st, int id, int *bx, int *by, int *bw, int *bh)
 {
     int s = slot_of(st, id);
@@ -506,7 +515,10 @@ void wm_draw_round_rect(wm_state_t *st, int id, int x, int y, int w, int h, int 
 void wm_draw_text(wm_state_t *st, int id, int x, int y, const char *str, uint32_t color)
 {
     int s = slot_of(st, id);
-    if (s >= 0) gfx_draw_text(&st->surf[s], x, y, str, color);
+    /* Scale app text by the UI scale: the app lays out in scaled coordinates and
+     * the server renders the glyphs to match (so content scales with the chrome).
+     * At 100% this is the unscaled path. */
+    if (s >= 0) gfx_draw_text_s(&st->surf[s], x, y, str, color, desktop_scale());
 }
 
 void wm_move(wm_state_t *st, int id, int x, int y)

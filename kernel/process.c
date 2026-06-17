@@ -179,6 +179,20 @@ int sys_sleep(int ms)
     return 0;
 }
 
+/* Canonical UI scale (percent, 100..200). The window server (root) publishes the
+ * user's choice here; ordinary apps read it so they can lay out their content to
+ * match the scaled chrome. `set` >= 100 from root updates it; any other call (or a
+ * non-root caller) just reads the current value. */
+static int g_ui_scale = 100;
+int sys_uiscale(int set)
+{
+    if (set >= 100 && process_current()->uid == 0) {
+        if (set > 200) set = 200;
+        g_ui_scale = set;
+    }
+    return g_ui_scale;
+}
+
 int sys_open(const char *path, int flags)
 {
     char kpath[256];

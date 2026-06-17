@@ -38,6 +38,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 30 | `halt` | `halt() -> -1 on error, else no return` | Power off the machine (root only): tries the QEMU/Bochs ACPI poweroff ports, then halts the CPU. Used by the Aurora menu's **Shut Down**. |
 | 31 | `sysinfo` | `sysinfo(struct sysinfo *out) -> 0/-1` | Fill `out` = {ram_kb, ram_used_kb, free_frames, procs, uptime_ms}. Used by the Settings **System** pane. |
 | 32 | `sleep` | `msleep(int ms) -> 0` | Block the calling thread for ~`ms` milliseconds (10 ms granularity; PIT is 100 Hz). Backed by a PIT-driven sleeper queue in the scheduler (no busy-wait). Used by the window server's fixed-cadence render ticker. |
+| 33 | `uiscale` | `ui_scale() -> pct`, `ui_scale_set(pct)` | Read or publish the UI scale (percent, 100..200). `set` >= 100 from **root** updates the kernel's canonical value (the window server publishes the user's Settings → Display choice); any other call just reads it. GUI apps query it (`ui_scale()`) to lay out their content to match the scaled chrome. |
 
 ## Notes
 

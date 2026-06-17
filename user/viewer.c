@@ -15,13 +15,16 @@
 #define MAX_LINES       4096
 #define DEF_W  500
 #define DEF_H  360
-#define ROW_H  18
-#define PAD_X  12
-#define PAD_Y  8
 
 static int wm;
 static int win;
+static int S = 100;                 /* UI scale percent (queried from the system) */
 static int W = DEF_W, H = DEF_H;    /* content size (updated on WM_RESIZE) */
+
+/* Layout metrics scaled by the UI scale (base: 18px rows, 12/8px padding). */
+static int row_h(void) { int v = 18 * S / 100; return v < 1 ? 1 : v; }
+static int pad_x(void) { return 12 * S / 100; }
+static int pad_y(void) { return 8 * S / 100; }
 
 static char  fbuf[VIEWER_MAX_FILE + 1];
 static int   flen;
@@ -31,7 +34,7 @@ static int   top;                   /* index of the first visible line          
 
 static const char *fpath = "/disk/POEM.TXT";
 
-static int visible_rows(void) { return (H - 2 * PAD_Y) / ROW_H; }
+static int visible_rows(void) { return (H - 2 * pad_y()) / row_h(); }
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -60,22 +63,24 @@ static void present(void)
 
 static void redraw(void)
 {
+    int px = pad_x(), py = pad_y(), rh = row_h();
     rect(0, 0, W, H, GFX_RGB(0xff, 0xff, 0xff));            /* paper */
     int rows = visible_rows();
     for (int r = 0; r < rows; r++) {
         int li = top + r;
         if (li >= nlines) break;
-        text(PAD_X, PAD_Y + r * ROW_H, &fbuf[line_off[li]], GFX_RGB(0x1a, 0x1a, 0x22));
+        text(px, py + r * rh, &fbuf[line_off[li]], GFX_RGB(0x1a, 0x1a, 0x22));
     }
     /* A slim scroll indicator on the right when the file overflows the window. */
     if (nlines > rows) {
-        int track = H - 2 * PAD_Y;
+        int sw = 6 * S / 100, track = H - 2 * py;
         int knob  = track * rows / nlines;
-        if (knob < 12) knob = 12;
+        int kmin = 12 * S / 100;
+        if (knob < kmin) knob = kmin;
         int maxtop = nlines - rows;
-        int ky = PAD_Y + (track - knob) * (maxtop ? top : 0) / (maxtop ? maxtop : 1);
-        rect(W - 6, PAD_Y, 3, track, GFX_RGB(0xe2, 0xe2, 0xe8));
-        rect(W - 6, ky, 3, knob, GFX_RGB(0xb0, 0xb0, 0xbc));
+        int ky = py + (track - knob) * (maxtop ? top : 0) / (maxtop ? maxtop : 1);
+        rect(W - sw, py, sw / 2, track, GFX_RGB(0xe2, 0xe2, 0xe8));
+        rect(W - sw, ky, sw / 2, knob, GFX_RGB(0xb0, 0xb0, 0xbc));
     }
     present();
 }
@@ -127,6 +132,10 @@ int main(int argc, char **argv)
     }
     if (wm <= 0) { fprintf(2, "viewer: no window server\n"); return 1; }
 
+    S = ui_scale();                     /* size the window to the UI scale */
+    W = DEF_W * S / 100;
+    H = DEF_H * S / 100;
+
     load_file();
 
     char base[48]; basename_of(fpath, base);
@@ -160,6 +169,14 @@ int main(int argc, char **argv)
         if (ev.op == WM_DESTROY) { printf("[viewer] closed\n"); return 0; }
         if (ev.op == WM_RESIZE) {            /* maximize/restore: refit the text */
             W = ev.w; H = ev.h;
+            int rows = visible_rows();
+            int maxtop = nlines > rows ? nlines - rows : 0;
+            top = clampi(top, 0, maxtop);
+            redraw();
+            continue;
+        }
+        if (ev.op == WM_SCALE) {             /* UI scale changed: re-flow the text */
+            S = ui_scale();
             int rows = visible_rows();
             int maxtop = nlines > rows ? nlines - rows : 0;
             top = clampi(top, 0, maxtop);

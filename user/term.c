@@ -15,6 +15,7 @@
 
 static int wm;
 static int win;
+static int S = 100;                /* UI scale percent (queried from the system) */
 static int W = DEF_W, H = DEF_H;    /* content size (updated on WM_RESIZE) */
 static int COLS, ROWS;             /* derived character grid               */
 static char hist[MAXROWS][MAXCOLS];
@@ -22,14 +23,21 @@ static int  nhist;
 static char input[MAXCOLS];
 static int  ilen;
 
-/* Recompute the character grid from the pixel size (8x16 font, 12px margins,
- * history at y=40 stepping 18). Keeps the transcript within the new bounds. */
+/* All layout metrics scale with the UI scale S (8x16 font, 12px margins, history
+ * at y=40 stepping 18 — each multiplied by S/100). At S=100 these are the originals. */
+static int term_fw(void)  { int v = 8  * S / 100; return v < 1 ? 1 : v; }  /* font width  */
+static int term_lh(void)  { int v = 18 * S / 100; return v < 1 ? 1 : v; }  /* line height */
+static int term_mx(void)  { return 12 * S / 100; }                         /* left margin  */
+static int term_top(void) { return 40 * S / 100; }                         /* first row y  */
+
+/* Recompute the character grid from the pixel size and the UI scale. Keeps the
+ * transcript within the new bounds. */
 static void recompute_grid(void)
 {
-    COLS = (W - 24) / 8;
+    COLS = (W - 2 * term_mx()) / term_fw();
     if (COLS < 8) COLS = 8;
     if (COLS > MAXCOLS - 1) COLS = MAXCOLS - 1;
-    ROWS = (H - 40) / 18;
+    ROWS = (H - term_top()) / term_lh();
     if (ROWS < 2) ROWS = 2;
     if (ROWS > MAXROWS) ROWS = MAXROWS;
 
@@ -67,9 +75,10 @@ static void repaint(void)
     r.color = GFX_RGB(0x1e, 0x1e, 0x28);
     msgsend(wm, &r, sizeof(r));
 
-    draw_text(12, 12, "AuroraOS Terminal", GFX_RGB(0xa8, 0xb0, 0xff));
+    int mx = term_mx(), top = term_top(), lh = term_lh();
+    draw_text(mx, mx, "AuroraOS Terminal", GFX_RGB(0xa8, 0xb0, 0xff));
     for (int i = 0; i < nhist; i++)
-        draw_text(12, 40 + i * 18, hist[i], GFX_RGB(0xe6, 0xe6, 0xee));
+        draw_text(mx, top + i * lh, hist[i], GFX_RGB(0xe6, 0xe6, 0xee));
 
     char line[MAXCOLS + 16];
     int p = 0;
@@ -78,7 +87,7 @@ static void repaint(void)
     for (int i = 0; i < ilen && p < COLS + 8; i++) line[p++] = input[i];
     line[p++] = '_';
     line[p] = '\0';
-    draw_text(12, 40 + nhist * 18, line, GFX_RGB(0x3a, 0xd0, 0x6a));
+    draw_text(mx, top + nhist * lh, line, GFX_RGB(0x3a, 0xd0, 0x6a));
 
     memset(&r, 0, sizeof(r));
     r.op = WM_PRESENT;
@@ -125,6 +134,9 @@ int main(int argc, char **argv)
     }
     if (wm <= 0) { fprintf(2, "term: no window server\n"); return 1; }
 
+    S = ui_scale();                 /* size the window + grid to the UI scale */
+    W = DEF_W * S / 100;
+    H = DEF_H * S / 100;
     recompute_grid();
 
     wm_req_t r;
@@ -157,6 +169,12 @@ int main(int argc, char **argv)
         }
         if (k.op == WM_RESIZE) {
             W = k.w; H = k.h;
+            recompute_grid();
+            repaint();
+            continue;
+        }
+        if (k.op == WM_SCALE) {         /* UI scale changed: re-flow at the new scale */
+            S = ui_scale();
             recompute_grid();
             repaint();
             continue;

@@ -62,6 +62,11 @@ static inline int   halt(void)                          { return _syscall(SYS_HA
 static inline int   sysinfo(struct sysinfo *out)        { return _syscall(SYS_SYSINFO, (int)out, 0, 0); }
 /* Block this thread for ~ms milliseconds (10 ms granularity; the PIT is 100 Hz). */
 static inline int   msleep(int ms)                      { return _syscall(SYS_SLEEP, ms, 0, 0); }
+/* UI scale (percent, 100..200). ui_scale() reads the current value so an app can
+ * lay out its content to match the scaled chrome; ui_scale_set() publishes it and
+ * works only from root (the window server). */
+static inline int   ui_scale(void)                      { return _syscall(SYS_UISCALE, 0, 0, 0); }
+static inline int   ui_scale_set(int pct)               { return _syscall(SYS_UISCALE, pct, 0, 0); }
 
 /* send/recv are just write/read on a connected socket fd. */
 static inline int send(int fd, const void *b, int n)     { return write(fd, b, n); }

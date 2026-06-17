@@ -14,15 +14,31 @@
 #include "libc.h"
 #include "wm.h"
 
-#define ICONS 5
-#define ICON  56
-#define PAD   16
-#define GAP   16
-#define DOCK_W (ICONS * ICON + (ICONS - 1) * GAP + 2 * PAD)
-#define DOCK_H (ICON + 2 * PAD)
+#define ICONS    5
+#define BASE_ICON 56
+#define BASE_PAD  16
+#define BASE_GAP  16
+#define BASE_DOCK_W (ICONS * BASE_ICON + (ICONS - 1) * BASE_GAP + 2 * BASE_PAD)
+#define BASE_DOCK_H (BASE_ICON + 2 * BASE_PAD)
 
 static int wm;
 static int win;
+static int S = 100;             /* UI scale percent (queried from the system) */
+
+/* Scaled metrics. The dock is created once at boot and never recreated, so its
+ * surface is allocated for the LARGEST scale (max_w x max_h); the panel is drawn
+ * for the current scale, bottom-center-aligned within that surface (the surplus
+ * is color-keyed transparent). So a live scale change just re-lays-out within the
+ * fixed surface — correct at any scale, no realloc. */
+static int icon_sz(void) { return BASE_ICON * S / 100; }
+static int pad(void)     { return BASE_PAD  * S / 100; }
+static int gap(void)     { return BASE_GAP  * S / 100; }
+static int dock_w(void)  { return ICONS * icon_sz() + (ICONS - 1) * gap() + 2 * pad(); }
+static int dock_h(void)  { return icon_sz() + 2 * pad(); }
+static int max_w(void)   { return BASE_DOCK_W * WM_MAX_UI_SCALE / 100; }
+static int max_h(void)   { return BASE_DOCK_H * WM_MAX_UI_SCALE / 100; }
+static int off_x(void)   { return (max_w() - dock_w()) / 2; }  /* center in surface  */
+static int off_y(void)   { return max_h() - dock_h(); }        /* bottom-align        */
 
 /* Each slot: a letter, an accent color, and the program it launches (or NULL
  * for a not-yet-built app, which just highlights on hover). */
@@ -67,33 +83,38 @@ static void text(int x, int y, const char *s, uint32_t color)
     wsend(&r);
 }
 
-static int icon_x(int i) { return PAD + i * (ICON + GAP); }
+static int icon_x(int i) { return off_x() + pad() + i * (icon_sz() + gap()); }
 
 /* Which icon (0..ICONS-1) does the content-local point fall on, or -1. */
 static int icon_at(int x, int y)
 {
-    if (y < PAD || y >= PAD + ICON)
+    int iy0 = off_y() + pad(), sz = icon_sz();
+    if (y < iy0 || y >= iy0 + sz)
         return -1;
     for (int i = 0; i < ICONS; i++)
-        if (x >= icon_x(i) && x < icon_x(i) + ICON)
+        if (x >= icon_x(i) && x < icon_x(i) + sz)
             return i;
     return -1;
 }
 
 static void redraw(int hover)
 {
-    /* Transparent backdrop, then the rounded panel; the panel's corners stay
-     * keyed so the wallpaper shows through (no alpha needed). */
-    rect(0, 0, DOCK_W, DOCK_H, WM_COLOR_KEY);
-    rrect(0, 0, DOCK_W, DOCK_H, 22, GFX_RGB(0x22, 0x22, 0x2c));
+    int sz = icon_sz(), iy = off_y() + pad();
+    int fw = 8 * S / 100, fh = 16 * S / 100;
+    /* Clear the whole (max-size) surface to the color key, then draw the rounded
+     * panel for the current scale, bottom-center within it; the corners + surplus
+     * stay keyed so the wallpaper shows through (no alpha needed). */
+    rect(0, 0, max_w(), max_h(), WM_COLOR_KEY);
+    rrect(off_x(), off_y(), dock_w(), dock_h(), 22 * S / 100, GFX_RGB(0x22, 0x22, 0x2c));
 
     for (int i = 0; i < ICONS; i++) {
-        int ix = icon_x(i), iy = PAD;
+        int ix = icon_x(i);
         if (i == hover)                 /* hover: a light tile behind the icon */
-            rrect(ix - 4, iy - 4, ICON + 8, ICON + 8, 16, GFX_RGB(0x3c, 0x3c, 0x48));
-        rrect(ix, iy, ICON, ICON, 14, slots[i].color);
+            rrect(ix - 4 * S / 100, iy - 4 * S / 100, sz + 8 * S / 100, sz + 8 * S / 100,
+                  16 * S / 100, GFX_RGB(0x3c, 0x3c, 0x48));
+        rrect(ix, iy, sz, sz, 14 * S / 100, slots[i].color);
         char ch[2] = { slots[i].label, 0 };
-        text(ix + (ICON - 8) / 2, iy + (ICON - 16) / 2, ch, GFX_RGB(0xff, 0xff, 0xff));
+        text(ix + (sz - fw) / 2, iy + (sz - fh) / 2, ch, GFX_RGB(0xff, 0xff, 0xff));
     }
 
     wm_req_t r;
@@ -154,10 +175,12 @@ int main(int argc, char **argv)
     }
     if (wm <= 0) { fprintf(2, "dock: no window server\n"); return 1; }
 
+    S = ui_scale();             /* lay the dock out at the current UI scale */
+
     wm_req_t r;
     wm_rep_t rep;
     memset(&r, 0, sizeof(r));
-    r.op = WM_CREATE; r.x = 0; r.y = 0; r.w = DOCK_W; r.h = DOCK_H;
+    r.op = WM_CREATE; r.x = 0; r.y = 0; r.w = max_w(); r.h = max_h();
     r.flags = WM_F_DOCK;
     { const char *t = "Dock"; int i = 0; while (t[i]) { r.str[i] = t[i]; i++; } r.str[i] = 0; }
     wsend(&r);
@@ -178,7 +201,10 @@ int main(int argc, char **argv)
     for (;;) {
         wm_req_t ev;
         int n = msgrecv(&ev, sizeof(ev), &from);
-        if (n < (int)sizeof(ev) || ev.op != WM_POINTER)
+        if (n < (int)sizeof(ev))
+            continue;
+        if (ev.op == WM_SCALE) { S = ui_scale(); redraw(hover); continue; }
+        if (ev.op != WM_POINTER)
             continue;
 
         int idx     = icon_at(ev.x, ev.y);

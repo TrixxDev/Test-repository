@@ -114,6 +114,7 @@ static void load_settings(void)
     }
     desktop_set_theme(wp, ac);
     desktop_set_scale(scale);
+    ui_scale_set(scale);            /* publish to the kernel so apps can query it */
 }
 
 static const char *menu_items[MENU_N] = {
@@ -345,6 +346,21 @@ static int deliver(int owner, const void *msg, int len)
     if (uid_of(owner) >= 0)
         return 0;                       /* alive: mailbox full, message dropped */
     return reap_owner(owner);           /* dead: clean up its windows */
+}
+
+/* Tell every app the UI scale changed so it re-queries ui_scale() and re-lays-out
+ * its content. The window chrome already rescaled on the server side; this keeps
+ * the app's own content in step (its window keeps its current surface size, so the
+ * content re-flows at the new scale rather than the window being resized). */
+static void notify_scale(void)
+{
+    int ids[WM_MAX_WINDOWS];
+    int n = wm_list_windows(&st, ids, WM_MAX_WINDOWS);
+    wm_req_t s;
+    memset(&s, 0, sizeof(s));
+    s.op = WM_SCALE;
+    for (int i = 0; i < n; i++)
+        deliver(wm_owner_of(&st, ids[i]), &s, sizeof(s));
 }
 
 /* Launch a program detached (double-fork so it reparents to init for reaping). */
@@ -665,6 +681,7 @@ int main(int argc, char **argv)
             load_settings();
             rebuild_bg();
             wm_mark_all_dirty(&st);
+            notify_scale();             /* apps re-lay-out their content to match */
             mark_full();
             break;
         case WM_MOUSE: {

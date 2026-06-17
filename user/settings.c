@@ -12,16 +12,27 @@
 #include "libc.h"
 #include "wm.h"
 
-#define W 460
-#define H 320
-#define SIDEBAR 120
-#define X0      134                 /* content area left edge */
+#define BASE_W       460
+#define BASE_H       320
+#define BASE_SIDEBAR 120
+#define BASE_X0      134            /* content area left edge */
 
 static int wm;
 static int win;
+static int S = 100;                 /* UI scale percent (queried from the system) */
+static int W, H, SIDEBAR, X0;       /* layout, scaled by S (set in main / on rescale) */
 static int pane = 0;                /* 0 = Desktop, 1 = Display, 2 = System */
 static int cur_wp = 0, cur_ac = 0;  /* current wallpaper / accent index */
 static int cur_scale = 0;           /* current UI-scale index (into sc_val) */
+
+static int sx(int v) { return v * S / 100; }   /* scale a layout literal by S */
+
+/* (Re)compute the scaled window + content geometry from the current scale. */
+static void relayout(void)
+{
+    W = BASE_W * S / 100; H = BASE_H * S / 100;
+    SIDEBAR = BASE_SIDEBAR * S / 100; X0 = BASE_X0 * S / 100;
+}
 
 static const char *wp_cfg[4]  = { "blue", "dark", "purple", "green" };
 static const char *ac_cfg[4]  = { "blue", "orange", "purple", "green" };
@@ -36,13 +47,13 @@ static const uint32_t ac_sw[4] = {
     GFX_RGB(0xa8,0x6f,0xff), GFX_RGB(0x28,0xc8,0x40),
 };
 
-/* row layout for the Desktop pane (content-local y of each option group) */
-#define WP_Y0 40
-#define AC_Y0 168
-#define ROW_H 24
+/* row layout for the Desktop pane (content-local y of each option group), scaled */
+#define WP_Y0 sx(40)
+#define AC_Y0 sx(168)
+#define ROW_H sx(24)
 
 /* Display pane: UI scale options (percent). 100% is the native size. */
-#define SC_Y0 56
+#define SC_Y0 sx(56)
 static const char    *sc_name[4] = { "100%", "125%", "150%", "200%" };
 static const int      sc_val[4]  = { 100, 125, 150, 200 };
 
@@ -88,58 +99,64 @@ static void line_kv(int y, const char *label, unsigned v, const char *unit)
 
 static void option_row(int y, uint32_t swatch, const char *name, int selected)
 {
-    if (selected) rect(X0 - 6, y - 3, W - X0 - 4, ROW_H, GFX_RGB(0xdf, 0xe7, 0xff));
-    rect(X0, y, 16, 16, swatch);
-    rect(X0, y, 16, 1, GFX_RGB(0x88,0x88,0x90)); rect(X0, y+15, 16, 1, GFX_RGB(0x88,0x88,0x90));
-    rect(X0, y, 1, 16, GFX_RGB(0x88,0x88,0x90)); rect(X0+15, y, 1, 16, GFX_RGB(0x88,0x88,0x90));
-    text(X0 + 26, y, name, GFX_RGB(0x22, 0x22, 0x2a));
-    if (selected) text(W - 26, y, "*", GFX_RGB(0x33, 0x66, 0xff));
+    int sw = sx(16);
+    if (selected) rect(X0 - sx(6), y - sx(3), W - X0 - sx(4), ROW_H, GFX_RGB(0xdf, 0xe7, 0xff));
+    rect(X0, y, sw, sw, swatch);
+    rect(X0, y, sw, 1, GFX_RGB(0x88,0x88,0x90)); rect(X0, y+sw-1, sw, 1, GFX_RGB(0x88,0x88,0x90));
+    rect(X0, y, 1, sw, GFX_RGB(0x88,0x88,0x90)); rect(X0+sw-1, y, 1, sw, GFX_RGB(0x88,0x88,0x90));
+    text(X0 + sx(26), y, name, GFX_RGB(0x22, 0x22, 0x2a));
+    if (selected) text(W - sx(26), y, "*", GFX_RGB(0x33, 0x66, 0xff));
 }
 
 /* A selectable text row (no color swatch) for the Display pane's scale list. */
 static void pick_row(int y, const char *name, int selected)
 {
-    if (selected) rect(X0 - 6, y - 3, W - X0 - 4, ROW_H, GFX_RGB(0xdf, 0xe7, 0xff));
+    if (selected) rect(X0 - sx(6), y - sx(3), W - X0 - sx(4), ROW_H, GFX_RGB(0xdf, 0xe7, 0xff));
     text(X0, y, name, GFX_RGB(0x22, 0x22, 0x2a));
-    if (selected) text(W - 26, y, "*", GFX_RGB(0x33, 0x66, 0xff));
+    if (selected) text(W - sx(26), y, "*", GFX_RGB(0x33, 0x66, 0xff));
 }
 
 static void redraw(void)
 {
+    /* Clear the whole content surface (its allocated size may exceed the current
+     * scaled W,H if the scale was lowered after creation; the server clips to the
+     * real surface), so a live rescale never leaves stale pixels behind. */
+    rect(0, 0, BASE_W * WM_MAX_UI_SCALE / 100, BASE_H * WM_MAX_UI_SCALE / 100,
+         GFX_RGB(0xf6, 0xf6, 0xf9));
     rect(0, 0, W, H, GFX_RGB(0xf6, 0xf6, 0xf9));
     rect(0, 0, SIDEBAR, H, GFX_RGB(0xec, 0xec, 0xf1));        /* sidebar */
     rect(SIDEBAR, 0, 1, H, GFX_RGB(0xd5, 0xd5, 0xdc));
-    rect(0, 10 + pane * 28, SIDEBAR, 22, GFX_RGB(0xdf, 0xe7, 0xff));   /* active row */
-    text(16, 13, "Desktop", GFX_RGB(0x22, 0x22, 0x2a));
-    text(16, 41, "Display", GFX_RGB(0x22, 0x22, 0x2a));
-    text(16, 69, "System",  GFX_RGB(0x22, 0x22, 0x2a));
+    rect(0, sx(10) + pane * sx(28), SIDEBAR, sx(22), GFX_RGB(0xdf, 0xe7, 0xff)); /* active row */
+    text(sx(16), sx(13), "Desktop", GFX_RGB(0x22, 0x22, 0x2a));
+    text(sx(16), sx(41), "Display", GFX_RGB(0x22, 0x22, 0x2a));
+    text(sx(16), sx(69), "System",  GFX_RGB(0x22, 0x22, 0x2a));
 
     if (pane == 0) {
-        text(X0, 12, "Wallpaper", GFX_RGB(0x11, 0x11, 0x18));
+        text(X0, sx(12), "Wallpaper", GFX_RGB(0x11, 0x11, 0x18));
         for (int i = 0; i < 4; i++)
             option_row(WP_Y0 + i * ROW_H, wp_sw[i], wp_name[i], i == cur_wp);
-        text(X0, AC_Y0 - 28, "Accent Color", GFX_RGB(0x11, 0x11, 0x18));
+        text(X0, AC_Y0 - sx(28), "Accent Color", GFX_RGB(0x11, 0x11, 0x18));
         for (int i = 0; i < 4; i++)
             option_row(AC_Y0 + i * ROW_H, ac_sw[i], ac_name[i], i == cur_ac);
     } else if (pane == 1) {
-        text(X0, 12, "UI Scale", GFX_RGB(0x11, 0x11, 0x18));
+        text(X0, sx(12), "UI Scale", GFX_RGB(0x11, 0x11, 0x18));
         for (int i = 0; i < 4; i++)
             pick_row(SC_Y0 + i * ROW_H, sc_name[i], i == cur_scale);
-        text(X0, SC_Y0 + 4 * ROW_H + 12, "Scales menus, title bars",
+        text(X0, SC_Y0 + 4 * ROW_H + sx(12), "Scales the whole",
              GFX_RGB(0x66, 0x66, 0x70));
-        text(X0, SC_Y0 + 4 * ROW_H + 30, "and window chrome.",
+        text(X0, SC_Y0 + 4 * ROW_H + sx(30), "interface.",
              GFX_RGB(0x66, 0x66, 0x70));
     } else {
         struct sysinfo si;
         memset(&si, 0, sizeof(si));
         sysinfo(&si);
-        text(X0, 14, "About AuroraOS", GFX_RGB(0x11, 0x11, 0x18));
-        text(X0, 40, "AuroraOS v1.1.2", GFX_RGB(0x33, 0x33, 0x3a));
-        line_kv(64,  "RAM total:  ", si.ram_kb,         "KiB");
-        line_kv(84,  "RAM used:   ", si.ram_used_kb,    "KiB");
-        line_kv(104, "Free pages: ", si.free_frames,    0);
-        line_kv(124, "Processes:  ", si.procs,          0);
-        line_kv(144, "Uptime:     ", si.uptime_ms / 1000, "s");
+        text(X0, sx(14), "About AuroraOS", GFX_RGB(0x11, 0x11, 0x18));
+        text(X0, sx(40), "AuroraOS v1.1.2", GFX_RGB(0x33, 0x33, 0x3a));
+        line_kv(sx(64),  "RAM total:  ", si.ram_kb,         "KiB");
+        line_kv(sx(84),  "RAM used:   ", si.ram_used_kb,    "KiB");
+        line_kv(sx(104), "Free pages: ", si.free_frames,    0);
+        line_kv(sx(124), "Processes:  ", si.procs,          0);
+        line_kv(sx(144), "Uptime:     ", si.uptime_ms / 1000, "s");
     }
     present();
 }
@@ -199,7 +216,7 @@ static void read_cfg(void)
 static void on_click(int x, int y)
 {
     if (x < SIDEBAR) {                          /* sidebar: switch pane */
-        int np = (y < 34) ? 0 : (y < 62) ? 1 : (y < 90) ? 2 : pane;
+        int np = (y < sx(34)) ? 0 : (y < sx(62)) ? 1 : (y < sx(90)) ? 2 : pane;
         if (np != pane) { pane = np; redraw(); }
         return;
     }
@@ -207,16 +224,16 @@ static void on_click(int x, int y)
     if (pane == 0) {
         for (int i = 0; i < 4; i++) {           /* wallpaper rows */
             int ry = WP_Y0 + i * ROW_H;
-            if (y >= ry - 3 && y < ry - 3 + ROW_H) { cur_wp = i; write_cfg(); redraw(); return; }
+            if (y >= ry - sx(3) && y < ry - sx(3) + ROW_H) { cur_wp = i; write_cfg(); redraw(); return; }
         }
         for (int i = 0; i < 4; i++) {           /* accent rows */
             int ry = AC_Y0 + i * ROW_H;
-            if (y >= ry - 3 && y < ry - 3 + ROW_H) { cur_ac = i; write_cfg(); redraw(); return; }
+            if (y >= ry - sx(3) && y < ry - sx(3) + ROW_H) { cur_ac = i; write_cfg(); redraw(); return; }
         }
     } else if (pane == 1) {
         for (int i = 0; i < 4; i++) {           /* UI scale rows */
             int ry = SC_Y0 + i * ROW_H;
-            if (y >= ry - 3 && y < ry - 3 + ROW_H) { cur_scale = i; write_cfg(); redraw(); return; }
+            if (y >= ry - sx(3) && y < ry - sx(3) + ROW_H) { cur_scale = i; write_cfg(); redraw(); return; }
         }
     }
     /* pane 2 (System) is read-only */
@@ -233,6 +250,9 @@ int main(int argc, char **argv)
     if (wm <= 0) { fprintf(2, "settings: no window server\n"); return 1; }
 
     read_cfg();
+
+    S = ui_scale();                     /* size the window + layout to the UI scale */
+    relayout();
 
     wm_req_t r; wm_rep_t rep;
     memset(&r, 0, sizeof(r));
@@ -256,6 +276,7 @@ int main(int argc, char **argv)
         int n = msgrecv(&ev, sizeof(ev), &from);
         if (n < (int)sizeof(ev)) continue;
         if (ev.op == WM_DESTROY) { printf("[settings] closed\n"); return 0; }
+        if (ev.op == WM_SCALE) { S = ui_scale(); relayout(); redraw(); continue; }
         if (ev.op != WM_POINTER) continue;
         int press = (ev.w & 1) && !(prev & 1);
         prev = ev.w;

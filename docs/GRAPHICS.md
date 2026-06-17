@@ -262,6 +262,27 @@ Two invariants, deliberately simple at this stage:
   surfaces (so apps render into the cache directly) and a virtio-gpu/vsync path —
   both deferred.
 
+- **UI scale — app content (staged, step 2 of 2):** the apps are now scale-aware,
+  so the **whole** desktop scales together (not just the chrome). Delivery is by a
+  **new syscall**: the kernel holds the canonical scale (`SYS_UISCALE`), the window
+  server (root) publishes it on every settings load (`ui_scale_set`), and apps read
+  it (`ui_scale()`) to lay out their content; the server also renders `WM_DRAW_TEXT`
+  at the current scale (`wm_draw_text` → `gfx_draw_text_s`), so app text grows to
+  match. Each app (`term`, `files`, `viewer`, `settings`, `dock`) multiplies its
+  layout metrics by the scale and requests a scaled content size at creation, so a
+  freshly-opened window at 150 %/200 % is fully scaled (bigger window, bigger text,
+  same row/column counts). Live changes are pushed to apps with a `WM_SCALE` poke
+  (broadcast from `WM_RELOAD_SETTINGS`); an app re-queries `ui_scale()` and re-flows
+  **within its current surface** (no app-requested resize yet), so an already-open
+  window re-flows its text immediately but keeps its pixel size until reopened — a
+  freshly-opened one is ideal. The Dock is created once at boot and never recreated,
+  so its surface is allocated for the largest scale and the panel is drawn
+  bottom-center within it, making it correct at any scale (boot or live) with no
+  realloc. Verified: 100 % host renders + boot byte-/pixel-identical, `verify_drag`
+  passes, the dock still launches apps at 100 %, a 150 % boot scales the entire
+  desktop (Terminal/Finder text, Dock and all), the Finder opens + lists + is
+  clickable at 150 %, a live 100 %→150 % change re-flows every app, and the leak
+  test stays flat (`round1 == round2`).
 - **UI scale — chrome (staged, step 1 of 2):** the desktop has a UI-scale setting
   (100 / 125 / 150 / 200 %), chosen in **Settings → Display** and saved as
   `ui_scale=` in `/disk/settings.cfg`. The scale percent is a single source of
