@@ -52,10 +52,14 @@ static const uint32_t ac_sw[4] = {
 #define AC_Y0 sx(168)
 #define ROW_H sx(24)
 
-/* Display pane: UI scale options (percent). 100% is the native size. */
-#define SC_Y0 sx(56)
+/* Display pane: UI-scale list (top) + resolution list (below). */
+#define SC_Y0  sx(36)        /* first UI-scale row   */
+#define RES_Y0 sx(174)       /* first resolution row */
 static const char    *sc_name[4] = { "100%", "125%", "150%", "200%" };
 static const int      sc_val[4]  = { 100, 125, 150, 200 };
+#define RES_N 5
+static const char    *res_name[RES_N] = { "800x600", "1024x768", "1280x720", "1366x768", "1920x1080" };
+static int cur_res = 1;      /* current resolution index (default 1024x768) */
 
 static void rect(int x, int y, int w, int h, uint32_t color)
 {
@@ -142,10 +146,9 @@ static void redraw(void)
         text(X0, sx(12), "UI Scale", GFX_RGB(0x11, 0x11, 0x18));
         for (int i = 0; i < 4; i++)
             pick_row(SC_Y0 + i * ROW_H, sc_name[i], i == cur_scale);
-        text(X0, SC_Y0 + 4 * ROW_H + sx(12), "Scales the whole",
-             GFX_RGB(0x66, 0x66, 0x70));
-        text(X0, SC_Y0 + 4 * ROW_H + sx(30), "interface.",
-             GFX_RGB(0x66, 0x66, 0x70));
+        text(X0, sx(150), "Resolution", GFX_RGB(0x11, 0x11, 0x18));
+        for (int i = 0; i < RES_N; i++)
+            pick_row(RES_Y0 + i * ROW_H, res_name[i], i == cur_res);
     } else {
         struct sysinfo si;
         memset(&si, 0, sizeof(si));
@@ -163,7 +166,7 @@ static void redraw(void)
 
 static void write_cfg(void)
 {
-    char buf[96]; int p = 0;
+    char buf[128]; int p = 0;
     const char *k1 = "wallpaper=";
     for (int i = 0; k1[i]; i++) buf[p++] = k1[i];
     for (int i = 0; wp_cfg[cur_wp][i]; i++) buf[p++] = wp_cfg[cur_wp][i];
@@ -176,6 +179,10 @@ static void write_cfg(void)
     for (int i = 0; k3[i]; i++) buf[p++] = k3[i];
     char num[12]; utoa((unsigned)sc_val[cur_scale], num);
     for (int i = 0; num[i]; i++) buf[p++] = num[i];
+    buf[p++] = '\n';
+    const char *k4 = "resolution=";
+    for (int i = 0; k4[i]; i++) buf[p++] = k4[i];
+    for (int i = 0; res_name[cur_res][i]; i++) buf[p++] = res_name[cur_res][i];
     buf[p++] = '\n';
 
     int fd = open("/disk/settings.cfg", O_WRONLY | O_CREAT | O_TRUNC);
@@ -208,6 +215,9 @@ static void read_cfg(void)
             while (*q >= '0' && *q <= '9') { v = v * 10 + (*q - '0'); q++; }
             for (int i = 0; i < 4; i++) if (sc_val[i] == v) cur_scale = i;
         }
+        if (strncmp(p, "resolution=", 11) == 0)
+            for (int i = 0; i < RES_N; i++)
+                if (strncmp(p + 11, res_name[i], strlen(res_name[i])) == 0) cur_res = i;
         while (*p && *p != '\n') p++;
         if (*p == '\n') p++;
     }
@@ -234,6 +244,10 @@ static void on_click(int x, int y)
         for (int i = 0; i < 4; i++) {           /* UI scale rows */
             int ry = SC_Y0 + i * ROW_H;
             if (y >= ry - sx(3) && y < ry - sx(3) + ROW_H) { cur_scale = i; write_cfg(); redraw(); return; }
+        }
+        for (int i = 0; i < RES_N; i++) {       /* resolution rows */
+            int ry = RES_Y0 + i * ROW_H;
+            if (y >= ry - sx(3) && y < ry - sx(3) + ROW_H) { cur_res = i; write_cfg(); redraw(); return; }
         }
     }
     /* pane 2 (System) is read-only */

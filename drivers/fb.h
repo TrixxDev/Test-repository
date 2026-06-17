@@ -17,3 +17,7 @@ void fb_draw_desktop(void);
  * windowserver. Returns the user virtual base (and w/h/pitch), or 0 if no
  * framebuffer is active. */
 uint32_t fb_user_map(uint32_t *w, uint32_t *h, uint32_t *pitch);
+
+/* Change the display resolution at runtime (Bochs-VBE path only). Returns 1 on
+ * success (then re-map via fb_user_map for the new geometry), 0 if unsupported. */
+int fb_set_mode(uint32_t w, uint32_t h);

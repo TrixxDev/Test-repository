@@ -8,6 +8,7 @@
 static gfx_surface_t screen;
 static int active;
 static uint32_t fb_phys;
+static int vbe_path;        /* 1 if brought up via Bochs VBE (re-settable at runtime) */
 
 /* Map a framebuffer region (identity) and record it as the screen surface. */
 static void use_framebuffer(uint32_t addr, uint32_t w, uint32_t h, uint32_t pitch)
@@ -92,8 +93,21 @@ static int vbe_setup(uint32_t w, uint32_t h)
     uint32_t pitch = virt_w * 4;
 
     use_framebuffer(lfb, w, h, pitch);
+    vbe_path = 1;                           /* this path can be re-set at runtime */
     kprintf("[fb] Bochs VBE %ux%u x32 LFB=0x%x pitch=%u\n", w, h, lfb, pitch);
     return 1;
+}
+
+/* Change the display mode at runtime (only on the Bochs-VBE path — a Multiboot/GRUB
+ * framebuffer is fixed by the loader). Re-runs the VBE mode-set and re-maps the
+ * (same physical) framebuffer at the new geometry. Returns 1 on success, 0 if the
+ * mode can't be changed (not the VBE path) or the adapter rejected it. The window
+ * server re-maps it into user space (fb_user_map) afterwards. */
+int fb_set_mode(uint32_t w, uint32_t h)
+{
+    if (!vbe_path || w == 0 || h == 0)
+        return 0;
+    return vbe_setup(w, h);
 }
 
 static int cmdline_has(const char *cl, const char *word)

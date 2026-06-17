@@ -39,6 +39,7 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 31 | `sysinfo` | `sysinfo(struct sysinfo *out) -> 0/-1` | Fill `out` = {ram_kb, ram_used_kb, free_frames, procs, uptime_ms}. Used by the Settings **System** pane. |
 | 32 | `sleep` | `msleep(int ms) -> 0` | Block the calling thread for ~`ms` milliseconds (10 ms granularity; PIT is 100 Hz). Backed by a PIT-driven sleeper queue in the scheduler (no busy-wait). Used by the window server's fixed-cadence render ticker. |
 | 33 | `uiscale` | `ui_scale() -> pct`, `ui_scale_set(pct)` | Read or publish the UI scale (percent, 100..200). `set` >= 100 from **root** updates the kernel's canonical value (the window server publishes the user's Settings → Display choice); any other call just reads it. GUI apps query it (`ui_scale()`) to lay out their content to match the scaled chrome. |
+| 34 | `fbmode` | `fb_set_mode(w, h) -> 1/0` | Change the display resolution at runtime (**root only**; Bochs-VBE path). Re-runs the VBE mode-set and re-maps the (same physical) framebuffer at the new geometry; the window server then re-maps it (`fb_map`), resizes its buffers and repaints. Returns 0 if unsupported (e.g. a fixed GRUB framebuffer). |
 
 ## Notes
 

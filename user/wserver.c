@@ -61,6 +61,13 @@ static int menu_hover = -1;
 static const char *const WP_NAMES[4] = { "blue", "dark", "purple", "green" };
 static const char *const AC_NAMES[4] = { "blue", "orange", "purple", "green" };
 
+/* Supported display resolutions (must match the Settings → Display list). The
+ * kernel boots the VBE path at 1024x768, so that is the no-change default. */
+#define RES_N 5
+static const int RES_W[RES_N] = { 800, 1024, 1280, 1366, 1920 };
+static const int RES_H[RES_N] = { 600,  768,  720,  768, 1080 };
+static int g_res_w = 1024, g_res_h = 768;   /* desired resolution (from settings) */
+
 static int cfg_value(const char *buf, const char *key, char *out, int cap)
 {
     int klen = (int)strlen(key);
@@ -95,10 +102,25 @@ static int cfg_scale(const char *v)
     return n;
 }
 
-/* Read /disk/settings.cfg and apply the wallpaper + accent theme + UI scale. */
+/* Parse a "WxH" resolution, accepting only a value from the supported list (so a
+ * bad config can never set an unsupported mode); unknown -> the 1024x768 default. */
+static void cfg_res(const char *v, int *rw, int *rh)
+{
+    int w = 0, h = 0;
+    while (*v >= '0' && *v <= '9') { w = w * 10 + (*v - '0'); v++; }
+    if (*v == 'x' || *v == 'X') v++;
+    while (*v >= '0' && *v <= '9') { h = h * 10 + (*v - '0'); v++; }
+    for (int i = 0; i < RES_N; i++)
+        if (RES_W[i] == w && RES_H[i] == h) { *rw = w; *rh = h; return; }
+    *rw = 1024; *rh = 768;
+}
+
+/* Read /disk/settings.cfg and apply the wallpaper + accent theme + UI scale, and
+ * record the desired resolution in g_res_w/h (applying it is the caller's job, so
+ * a plain theme reload never disturbs the display mode). */
 static void load_settings(void)
 {
-    int wp = 0, ac = 0, scale = 100;
+    int wp = 0, ac = 0, scale = 100, rw = 1024, rh = 768;
     int fd = open("/disk/settings.cfg", O_RDONLY);
     if (fd >= 0) {
         char buf[256];
@@ -107,11 +129,13 @@ static void load_settings(void)
         if (n > 0) {
             buf[n] = '\0';
             char val[16];
-            if (cfg_value(buf, "wallpaper", val, sizeof(val))) wp = cfg_map(val, WP_NAMES, 4);
-            if (cfg_value(buf, "accent",    val, sizeof(val))) ac = cfg_map(val, AC_NAMES, 4);
-            if (cfg_value(buf, "ui_scale",  val, sizeof(val))) scale = cfg_scale(val);
+            if (cfg_value(buf, "wallpaper",  val, sizeof(val))) wp = cfg_map(val, WP_NAMES, 4);
+            if (cfg_value(buf, "accent",     val, sizeof(val))) ac = cfg_map(val, AC_NAMES, 4);
+            if (cfg_value(buf, "ui_scale",   val, sizeof(val))) scale = cfg_scale(val);
+            if (cfg_value(buf, "resolution", val, sizeof(val))) cfg_res(val, &rw, &rh);
         }
     }
+    g_res_w = rw; g_res_h = rh;
     desktop_set_theme(wp, ac);
     desktop_set_scale(scale);
     ui_scale_set(scale);            /* publish to the kernel so apps can query it */
@@ -461,6 +485,71 @@ static void mouse_helper(int server_pid)
     }
 }
 
+/* (Re)map the framebuffer into the server's screen surface (after boot or a mode
+ * change). Returns 1 on success. */
+static int map_screen(void)
+{
+    unsigned info[3];
+    void *fb = fb_map(info);
+    if (!fb)
+        return 0;
+    screen.pixels = fb;
+    screen.width  = (int)info[0];
+    screen.height = (int)info[1];
+    screen.pitch  = (int)info[2];
+    screen.bpp    = 32;
+    return 1;
+}
+
+/* (Re)allocate the off-screen back buffer + background cache to the current screen
+ * size, freeing any previous buffers. Returns 1 on success. */
+static int alloc_buffers(void)
+{
+    if (back.pixels) free(back.pixels);
+    if (bg.pixels)   free(bg.pixels);
+    back.width = screen.width; back.height = screen.height;
+    back.pitch = screen.width * 4; back.bpp = 32;
+    back.pixels = malloc((size_t)back.pitch * back.height);
+    bg.width = screen.width; bg.height = screen.height;
+    bg.pitch = screen.width * 4; bg.bpp = 32;
+    bg.pixels = malloc((size_t)bg.pitch * bg.height);
+    return back.pixels && bg.pixels;
+}
+
+/* Switch the display to w x h at runtime: re-set the mode, re-map the framebuffer,
+ * resize the buffers, pull the cursor + every window back on-screen, re-pin the
+ * Dock to the new bottom-center, and repaint immediately. A no-op if the mode
+ * can't be changed (e.g. a fixed GRUB framebuffer) or a (re)alloc fails. */
+static void do_resize(int w, int h)
+{
+    if (!fb_set_mode(w, h))
+        return;                      /* unsupported path: keep the current mode */
+    if (!map_screen() || !alloc_buffers())
+        return;
+    if (st.cursor_x > screen.width  - 1) st.cursor_x = screen.width  - 1;
+    if (st.cursor_y > screen.height - 1) st.cursor_y = screen.height - 1;
+    int ids[WM_MAX_WINDOWS];
+    int n = wm_list_windows(&st, ids, WM_MAX_WINDOWS);
+    for (int i = 0; i < n; i++) {
+        int id = ids[i];
+        if (id == dock_win) {                       /* re-pin the Dock bottom-center */
+            int bx, by, bw, bh;
+            if (wm_window_bounds(&st, id, &bx, &by, &bw, &bh))
+                wm_move(&st, id, (screen.width - bw) / 2, screen.height - bh - 16);
+        } else {                                    /* keep ordinary windows visible */
+            wm_move_clamped(&st, id, wm_window_x(&st, id), wm_window_y(&st, id),
+                            screen.width, screen.height);
+        }
+    }
+    wm_mark_all_dirty(&st);
+    rebuild_bg();
+    wm_refresh_surfaces(&st);
+    compose();
+    flush(0, 0, screen.width, screen.height);
+    rendered_cx = st.cursor_x; rendered_cy = st.cursor_y;
+    g_full_dirty = g_scene_dirty = 0; g_dmg_w = g_dmg_h = 0;
+}
+
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -486,38 +575,21 @@ int main(int argc, char **argv)
         _exit(0);
     }
 
-    unsigned info[3];
-    void *fb = fb_map(info);
-    if (!fb) {
+    /* Apply the saved theme/scale/resolution before mapping: the kernel boots the
+     * VBE path at 1024x768, so if the user picked another resolution, switch the
+     * mode now so apps come up at the right geometry. */
+    load_settings();
+    if (g_res_w != 1024 || g_res_h != 768)
+        fb_set_mode(g_res_w, g_res_h);
+
+    if (!map_screen()) {
         printf("[wm] framebuffer map failed\n");
         return 1;
     }
-    screen.pixels = fb;
-    screen.width  = (int)info[0];
-    screen.height = (int)info[1];
-    screen.pitch  = (int)info[2];
-    screen.bpp    = 32;
-
-    /* Off-screen scene buffer (packed, same dimensions as the framebuffer). The
-     * compositor renders here; only changed rectangles are copied to VRAM. */
-    back.width  = screen.width;
-    back.height = screen.height;
-    back.pitch  = screen.width * 4;
-    back.bpp    = 32;
-    back.pixels = malloc((size_t)back.pitch * back.height);
-    if (!back.pixels) {
-        printf("[wm] back buffer alloc failed\n");
-        return 1;
-    }
-
-    /* Cached static background (same geometry): built once, blitted every frame. */
-    bg.width  = screen.width;
-    bg.height = screen.height;
-    bg.pitch  = screen.width * 4;
-    bg.bpp    = 32;
-    bg.pixels = malloc((size_t)bg.pitch * bg.height);
-    if (!bg.pixels) {
-        printf("[wm] background cache alloc failed\n");
+    /* Off-screen back buffer + background cache, sized to the (possibly switched)
+     * framebuffer; the compositor renders here and copies changed rects to VRAM. */
+    if (!alloc_buffers()) {
+        printf("[wm] buffer alloc failed\n");
         return 1;
     }
 
@@ -529,14 +601,13 @@ int main(int argc, char **argv)
     st.cursor_on = 1;                /* the windowserver owns the pointer */
     st.cursor_x = screen.width / 2;
     st.cursor_y = screen.height / 2;
-    load_settings();                 /* apply the saved wallpaper + accent theme */
     rebuild_bg();                    /* render the static background into the cache */
     compose();                       /* build the empty desktop in the back buffer */
     flush(0, 0, screen.width, screen.height);   /* push it (with cursor) once */
     rendered_cx = st.cursor_x;       /* the cursor is now on screen here */
     rendered_cy = st.cursor_y;
-    printf("[wm] ready (pid %d), framebuffer %ux%u pitch %u\n",
-           getpid(), info[0], info[1], info[2]);
+    printf("[wm] ready (pid %d), framebuffer %dx%d pitch %d\n",
+           getpid(), screen.width, screen.height, screen.pitch);
 
     /* Event loop: one source (the mailbox) carries app requests, keys, mouse and
      * the render ticker's WM_TICK. Rendering is split from input:
@@ -679,10 +750,14 @@ int main(int argc, char **argv)
              * background cache; a UI-scale change alters the title-bar height, so
              * every window's cached surface is now stale (rebuilt next tick). */
             load_settings();
-            rebuild_bg();
-            wm_mark_all_dirty(&st);
             notify_scale();             /* apps re-lay-out their content to match */
-            mark_full();
+            if (g_res_w != screen.width || g_res_h != screen.height) {
+                do_resize(g_res_w, g_res_h);   /* re-map + re-alloc + repaint */
+            } else {
+                rebuild_bg();           /* theme/scale only: refresh cache + repaint */
+                wm_mark_all_dirty(&st);
+                mark_full();
+            }
             break;
         case WM_MOUSE: {
             /* Update the pointer + window state and *record damage* only — the

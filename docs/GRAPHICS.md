@@ -262,6 +262,23 @@ Two invariants, deliberately simple at this stage:
   surfaces (so apps render into the cache directly) and a virtio-gpu/vsync path —
   both deferred.
 
+- **Display resolution — runtime mode switching:** the resolution is selectable in
+  **Settings → Display** (800×600 / 1024×768 / 1280×720 / 1366×768 / 1920×1080),
+  saved as `resolution=WxH` in `/disk/settings.cfg`. It works because the boot path
+  here is the Bochs/QEMU VBE interface, whose mode can be re-set at runtime (the
+  linear-framebuffer BAR is stable across modes). A new root-only syscall
+  `fb_set_mode(w,h)` (#34) re-runs the VBE mode-set and re-maps the framebuffer at
+  the new geometry; on a fixed GRUB/Multiboot framebuffer it returns 0 (no change).
+  The window server applies the saved resolution at startup (before it maps the
+  framebuffer, so apps come up at the right size) and **live** on
+  `WM_RELOAD_SETTINGS`: `do_resize` re-sets the mode, re-maps (`fb_map`), reallocates
+  the back buffer + background cache, clamps the cursor and every window back
+  on-screen, re-pins the Dock to the new bottom-center, and repaints — all without a
+  reboot. Verified: a 100 % default boot is byte-/pixel-identical (no `resolution`
+  key → no switch); booting at 1280×720 and 1920×1080 comes up at that mode; a live
+  1024×768→1280×720 switch via Settings re-lays-out the whole desktop with no crash
+  or corruption; the leak test stays flat. (Under a fixed GRUB framebuffer the
+  picker is a no-op — the mode is owned by the loader.)
 - **UI scale — app content (staged, step 2 of 2):** the apps are now scale-aware,
   so the **whole** desktop scales together (not just the chrome). Delivery is by a
   **new syscall**: the kernel holds the canonical scale (`SYS_UISCALE`), the window

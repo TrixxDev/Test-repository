@@ -157,6 +157,14 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)sys_uiscale((int)regs->ebx);
         break;
 
+    case SYS_FBMODE:
+        if (process_current()->uid != 0) {      /* root only (the window server) */
+            regs->eax = (uint32_t)-1;
+            break;
+        }
+        regs->eax = (uint32_t)fb_set_mode((uint32_t)regs->ebx, (uint32_t)regs->ecx);
+        break;
+
     case SYS_HALT:
         if (process_current()->uid != 0) {      /* root only */
             regs->eax = (uint32_t)-1;
