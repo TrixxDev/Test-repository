@@ -136,6 +136,9 @@ void wm_destroy(wm_state_t *st, int id);
  * back buffer with this, then blits only the changed rectangles to the
  * framebuffer (and overlays the cursor itself). */
 void wm_compose(wm_state_t *st, gfx_surface_t *screen);
+/* Composite only the windows (no desktop, no cursor) onto an already-prepared
+ * surface — for callers that supply a cached background instead of redrawing it. */
+void wm_composite_windows(wm_state_t *st, gfx_surface_t *screen);
 /* Draw the arrow cursor at (px, py) on top of `screen`. */
 void wm_draw_cursor(gfx_surface_t *screen, int px, int py);
 /* Convenience: wm_compose + the cursor on top. Used by the host PNG renderer

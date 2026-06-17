@@ -13,6 +13,7 @@
 static wm_state_t   st;
 static gfx_surface_t screen;    /* the live framebuffer (slow VRAM) */
 static gfx_surface_t back;      /* off-screen scene, no cursor (fast RAM)  */
+static gfx_surface_t bg;        /* cached static background: wallpaper + menu bar */
 static int           dock_win = -1;   /* the borderless Dock window, if any */
 
 /* Drag state: set when the user presses the left button inside a title bar, and
@@ -143,11 +144,44 @@ static void draw_menu(gfx_surface_t *dst)
  * the few pixels under the old cursor and redraws it at the new spot.
  */
 
-/* Rebuild the off-screen scene (desktop + windows + open menu, no cursor). Call
- * only when the scene actually changes. */
+/* Render the static background (wallpaper + menu bar) into the cache. It is
+ * expensive to compute (a full-screen per-pixel gradient) but cheap to blit, so
+ * we build it once at startup and again only when the theme changes — never on a
+ * per-frame basis the way the old code recomputed the gradient on every event. */
+static void rebuild_bg(void)
+{
+    desktop_render(&bg);
+}
+
+/* Rebuild the off-screen scene (background + windows + open menu, no cursor).
+ * The background is copied from the cache instead of recomputing the gradient.
+ * Call only when the scene actually changes. */
 static void compose(void)
 {
-    wm_compose(&st, &back);
+    memcpy(back.pixels, bg.pixels, (size_t)back.pitch * back.height);
+    wm_composite_windows(&st, &back);
+    draw_menu(&back);
+}
+
+/* Like compose(), but only refreshes the background within (rx,ry,rw,rh) before
+ * redrawing the windows — used during a drag so a step costs O(damage) instead
+ * of O(screen). Windows are redrawn in full (idempotent outside the rect: the
+ * scene there is unchanged, so the cached back buffer stays correct); since only
+ * the damage rect is later flushed, the result there is identical to compose(). */
+static void compose_dmg(int rx, int ry, int rw, int rh)
+{
+    if (rx < 0) { rw += rx; rx = 0; }
+    if (ry < 0) { rh += ry; ry = 0; }
+    if (rx + rw > back.width)  rw = back.width  - rx;
+    if (ry + rh > back.height) rh = back.height - ry;
+    if (rw <= 0 || rh <= 0)
+        return;
+    for (int y = 0; y < rh; y++) {
+        uint8_t *d = back.pixels + (uint32_t)(ry + y) * back.pitch + (uint32_t)rx * 4;
+        uint8_t *s = bg.pixels   + (uint32_t)(ry + y) * bg.pitch   + (uint32_t)rx * 4;
+        memcpy(d, s, (size_t)rw * 4);
+    }
+    wm_composite_windows(&st, &back);
     draw_menu(&back);
 }
 
@@ -355,6 +389,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Cached static background (same geometry): built once, blitted every frame. */
+    bg.width  = screen.width;
+    bg.height = screen.height;
+    bg.pitch  = screen.width * 4;
+    bg.bpp    = 32;
+    bg.pixels = malloc((size_t)bg.pitch * bg.height);
+    if (!bg.pixels) {
+        printf("[wm] background cache alloc failed\n");
+        return 1;
+    }
+
     if (svc_register(WM_SERVICE) != 0) {
         fprintf(2, "windowserver: failed to register\n");
         return 1;
@@ -364,6 +409,7 @@ int main(int argc, char **argv)
     st.cursor_x = screen.width / 2;
     st.cursor_y = screen.height / 2;
     load_settings();                 /* apply the saved wallpaper + accent theme */
+    rebuild_bg();                    /* render the static background into the cache */
     compose();                       /* build the empty desktop in the back buffer */
     flush(0, 0, screen.width, screen.height);   /* push it (with cursor) once */
     printf("[wm] ready (pid %d), framebuffer %ux%u pitch %u\n",
@@ -459,8 +505,10 @@ int main(int argc, char **argv)
                    wm_window_count(&st), (unsigned)(uintptr_t)sbrk(0));
             break;
         case WM_RELOAD_SETTINGS:
-            /* Settings changed /disk/settings.cfg: re-apply the theme + repaint. */
+            /* Settings changed /disk/settings.cfg: re-apply the theme + repaint.
+             * The wallpaper/accent may have changed, so refresh the cache too. */
             load_settings();
+            rebuild_bg();
             compose();
             flush(0, 0, screen.width, screen.height);
             break;
@@ -598,7 +646,7 @@ int main(int argc, char **argv)
                 flush(0, 0, screen.width, screen.height);
             } else {
                 if (scene_changed)
-                    compose();
+                    compose_dmg(dmg_x, dmg_y, dmg_w, dmg_h);
                 /* Erase the old cursor, push any scene damage, draw the new
                  * cursor. Each flush re-overlays the pointer where it intersects. */
                 flush(old_cx, old_cy, WM_CURSOR_W, WM_CURSOR_H);

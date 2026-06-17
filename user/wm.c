@@ -470,15 +470,24 @@ void wm_draw_cursor(gfx_surface_t *screen, int px, int py)
     }
 }
 
-void wm_compose(wm_state_t *st, gfx_surface_t *screen)
+/* Composite only the windows (back-to-front, no desktop fill, no cursor) onto an
+ * already-prepared surface. Lets the windowserver supply a cached background (the
+ * static wallpaper + menu bar) instead of recomputing the per-pixel gradient on
+ * every frame; within any rectangle the output is identical to wm_compose's. */
+void wm_composite_windows(wm_state_t *st, gfx_surface_t *screen)
 {
-    desktop_render(screen);                   /* wallpaper + menu bar + dock */
     window_t *vis[WM_MAX_WINDOWS];
     int n = 0;
     for (int i = 0; i < WM_MAX_WINDOWS; i++)
         if (st->used[i] && st->win[i].visible)
             vis[n++] = &st->win[i];
     wm_composite(screen, vis, n);             /* windows, back-to-front; no cursor */
+}
+
+void wm_compose(wm_state_t *st, gfx_surface_t *screen)
+{
+    desktop_render(screen);                   /* wallpaper + menu bar + dock */
+    wm_composite_windows(st, screen);
 }
 
 void wm_present(wm_state_t *st, gfx_surface_t *screen)

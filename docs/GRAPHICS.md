@@ -195,9 +195,25 @@ Two invariants, deliberately simple at this stage:
   the old full-repaint frame) — only the amount of VRAM touched per event drops.
   `wm_present` (full scene + cursor in one pass) is kept for the host PNG renderer.
 
-  Still simple by design: the back buffer is recomposited whole on a scene change
-  (RAM, cache-friendly, cheap) rather than incrementally per window; per-window
-  back-buffer caching is a possible later upgrade.
+- **Cached background + clipped recompose (v1.1.x perf pass):** the static
+  background — the wallpaper gradient + menu bar — is rendered **once** into a
+  separate cache surface (`rebuild_bg`) and rebuilt only when the theme changes
+  (startup, `WM_RELOAD_SETTINGS`). `compose()` then *blits* the cache into the
+  back buffer instead of recomputing the per-pixel gradient on every event, which
+  used to dominate every drag frame. During a drag, `compose_dmg(rect)` refreshes
+  only the **damage rectangle** of the background before redrawing the windows, so
+  a drag step costs ≈ O(damage) rather than O(screen). Windows are still redrawn
+  in full (idempotent outside the rect, since the scene there is unchanged), and
+  only the damage rect is flushed, so the result stays **pixel-identical** to the
+  full recomposite (`verify_drag` still passes). `wm_composite_windows` composites
+  just the windows onto a caller-supplied background; `wm_compose` (desktop +
+  windows) is kept for the host PNG renderer.
+
+  Remaining levers (not yet done): an **FPS cap / mouse-event coalescing** (the
+  mouse helper can emit ~200 events/s but the compositor only needs ~60 fps) needs
+  a non-blocking `msgrecv` (`MSG_NOWAIT`) since the event loop currently blocks on
+  one mailbox; and **per-window surface caching** (skip redrawing windows that did
+  not change) is a further upgrade once the background cost is gone.
 
 **Keyboard pipeline** (closing the loop keyboard → windowserver → app → screen):
 the windowserver forks a small helper child that blocks on the console
