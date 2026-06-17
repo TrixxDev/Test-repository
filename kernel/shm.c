@@ -6,7 +6,7 @@
 #include "string.h"
 #include "process.h"
 
-#define SHM_MAX     16              /* one per window is plenty (WM_MAX_WINDOWS) */
+#define SHM_MAX     24              /* one per window + a spare for maximize realloc */
 #define SHM_VBASE   0xA0000000u     /* between the framebuffer map and the stack */
 #define SHM_SLOT    0x00A00000u     /* 10 MiB per object (fits 1920x1080x4)      */
 #define SHM_MAX_FR  (SHM_SLOT / 4096)

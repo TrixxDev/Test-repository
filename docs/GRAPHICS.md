@@ -281,8 +281,13 @@ Two invariants, deliberately simple at this stage:
   the most per-frame draw IPC). Verified: the Dock renders pixel-for-pixel as before
   and still launches apps on click; the `PAGE_SHARED` change is leak-free across 50+
   window create/destroy cycles in the stress test; 100 % host renders + `verify_drag`
-  are unaffected. (Decorated, resizable clients can adopt shared surfaces later;
-  that needs an SHM realloc on maximize, deferred.)
+  are unaffected. The **Terminal** is now converted too — a decorated, *resizable*
+  client — which exercises an **SHM realloc on maximize/restore**: the server creates
+  the new (bigger/smaller) SHM object before freeing the old (distinct ids; the
+  `SHM_MAX` pool keeps a spare), maps it as the new content, and passes the new id to
+  the app in `WM_RESIZE` (`flags`); the app re-maps and redraws. Verified live: the
+  Terminal types, copies/pastes (Ctrl+C/V), drags, closes and maximizes+restores with
+  no corruption. (The Finder and Viewer can adopt shared surfaces the same way next.)
 - **Display resolution — runtime mode switching:** the resolution is selectable in
   **Settings → Display** (800×600 / 1024×768 / 1280×720 / 1366×768 / 1920×1080),
   saved as `resolution=WxH` in `/disk/settings.cfg`. It works because the boot path

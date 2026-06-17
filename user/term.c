@@ -22,6 +22,8 @@ static char hist[MAXROWS][MAXCOLS];
 static int  nhist;
 static char input[MAXCOLS];
 static int  ilen;
+static gfx_surface_t surf;          /* shared content surface (mapped from server) */
+static int shm_id = -1;
 
 /* All layout metrics scale with the UI scale S (8x16 font, 12px margins, history
  * at y=40 stepping 18 — each multiplied by S/100). At S=100 these are the originals. */
@@ -58,27 +60,17 @@ static void set_str(wm_req_t *r, const char *s)
     r->str[i] = '\0';
 }
 
-static void draw_text(int x, int y, const char *s, uint32_t color)
-{
-    wm_req_t r;
-    memset(&r, 0, sizeof(r));
-    r.op = WM_DRAW_TEXT; r.win = win; r.x = x; r.y = y; r.color = color;
-    set_str(&r, s);
-    msgsend(wm, &r, sizeof(r));
-}
-
+/* Client-side rendering: draw straight into the shared surface, then tell the
+ * server to composite with a single WM_PRESENT (no per-element WM_DRAW_* IPC). */
 static void repaint(void)
 {
-    wm_req_t r;
-    memset(&r, 0, sizeof(r));
-    r.op = WM_DRAW_RECT; r.win = win; r.x = 0; r.y = 0; r.w = W; r.h = H;
-    r.color = GFX_RGB(0x1e, 0x1e, 0x28);
-    msgsend(wm, &r, sizeof(r));
-
+    if (!surf.pixels)
+        return;
     int mx = term_mx(), top = term_top(), lh = term_lh();
-    draw_text(mx, mx, "AuroraOS Terminal", GFX_RGB(0xa8, 0xb0, 0xff));
+    gfx_fill_rect(&surf, 0, 0, W, H, GFX_RGB(0x1e, 0x1e, 0x28));
+    gfx_draw_text_s(&surf, mx, mx, "AuroraOS Terminal", GFX_RGB(0xa8, 0xb0, 0xff), S);
     for (int i = 0; i < nhist; i++)
-        draw_text(mx, top + i * lh, hist[i], GFX_RGB(0xe6, 0xe6, 0xee));
+        gfx_draw_text_s(&surf, mx, top + i * lh, hist[i], GFX_RGB(0xe6, 0xe6, 0xee), S);
 
     char line[MAXCOLS + 16];
     int p = 0;
@@ -87,8 +79,9 @@ static void repaint(void)
     for (int i = 0; i < ilen && p < COLS + 8; i++) line[p++] = input[i];
     line[p++] = '_';
     line[p] = '\0';
-    draw_text(mx, top + nhist * lh, line, GFX_RGB(0x3a, 0xd0, 0x6a));
+    gfx_draw_text_s(&surf, mx, top + nhist * lh, line, GFX_RGB(0x3a, 0xd0, 0x6a), S);
 
+    wm_req_t r;
     memset(&r, 0, sizeof(r));
     r.op = WM_PRESENT;
     msgsend(wm, &r, sizeof(r));
@@ -142,7 +135,8 @@ int main(int argc, char **argv)
     wm_req_t r;
     wm_rep_t rep;
     memset(&r, 0, sizeof(r));
-    r.op = WM_CREATE; r.x = wx; r.y = wy; r.w = W; r.h = H; r.flags = WM_F_RESIZABLE;
+    r.op = WM_CREATE; r.x = wx; r.y = wy; r.w = W; r.h = H;
+    r.flags = WM_F_RESIZABLE | WM_F_SHM;        /* render client-side, zero-copy */
     set_str(&r, title);
     msgsend(wm, &r, sizeof(r));
     int from;
@@ -150,8 +144,16 @@ int main(int argc, char **argv)
         int n = msgrecv(&rep, sizeof(rep), &from);
         if (n >= (int)sizeof(rep) && from == wm) break;
     }
-    if (rep.status != 0 || rep.win <= 0) { fprintf(2, "term: create failed\n"); return 1; }
+    if (rep.status != 0 || rep.win <= 0 || rep.shm < 0) {
+        fprintf(2, "term: create failed\n"); return 1;
+    }
     win = rep.win;
+
+    void *px = shm_map(rep.shm);                 /* map the shared content surface */
+    if (!px) { fprintf(2, "term: shm map failed\n"); return 1; }
+    shm_id = rep.shm;
+    surf.pixels = (uint8_t *)px;
+    surf.width = W; surf.height = H; surf.pitch = W * 4; surf.bpp = 32;
 
     repaint();
     printf("[term] opened window %d\n", win);
@@ -167,8 +169,13 @@ int main(int argc, char **argv)
             printf("[term] window %d closed\n", win);
             return 0;
         }
-        if (k.op == WM_RESIZE) {
+        if (k.op == WM_RESIZE) {        /* maximize/restore: the server resized us */
             W = k.w; H = k.h;
+            if (k.flags >= 0) {         /* shared surface was reallocated: re-map it */
+                void *px = shm_map(k.flags);
+                if (px) { surf.pixels = (uint8_t *)px; shm_id = k.flags; }
+            }
+            surf.width = W; surf.height = H; surf.pitch = W * 4;
             recompute_grid();
             repaint();
             continue;
