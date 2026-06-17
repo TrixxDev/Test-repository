@@ -1,22 +1,47 @@
 /* Terminal.app: the first interactive AuroraOS GUI app. It asks the window
  * server for a window, then runs an event loop: keys forwarded by the window
  * server are echoed into a tiny shell-style transcript, and the window is
- * redrawn (full repaint) after each keystroke. Demonstrates the closed loop
+ * redrawn (full repaint) after each keystroke. It is resizable: the window
+ * server can maximize it, sending WM_RESIZE, and the column/row grid is
+ * recomputed from the new size. Demonstrates the closed loop
  * keyboard -> windowserver -> app -> redraw -> framebuffer. */
 #include "libc.h"
 #include "wm.h"
 
-#define W 460
-#define H 240
-#define COLS 56
-#define ROWS 9
+#define DEF_W   460
+#define DEF_H   240
+#define MAXCOLS 128         /* fullscreen at 8px/char (1024/8) fits within this */
+#define MAXROWS 48          /* fullscreen at 18px/row (768/18) fits within this */
 
 static int wm;
 static int win;
-static char hist[ROWS][COLS];
+static int W = DEF_W, H = DEF_H;    /* content size (updated on WM_RESIZE) */
+static int COLS, ROWS;             /* derived character grid               */
+static char hist[MAXROWS][MAXCOLS];
 static int  nhist;
-static char input[COLS];
+static char input[MAXCOLS];
 static int  ilen;
+
+/* Recompute the character grid from the pixel size (8x16 font, 12px margins,
+ * history at y=40 stepping 18). Keeps the transcript within the new bounds. */
+static void recompute_grid(void)
+{
+    COLS = (W - 24) / 8;
+    if (COLS < 8) COLS = 8;
+    if (COLS > MAXCOLS - 1) COLS = MAXCOLS - 1;
+    ROWS = (H - 40) / 18;
+    if (ROWS < 2) ROWS = 2;
+    if (ROWS > MAXROWS) ROWS = MAXROWS;
+
+    if (nhist > ROWS - 1) {                 /* shrunk: keep the most recent lines */
+        int drop = nhist - (ROWS - 1);
+        for (int i = 0; i + drop < nhist; i++)
+            memcpy(hist[i], hist[i + drop], MAXCOLS);
+        nhist = ROWS - 1;
+    }
+    if (ilen > COLS - 10) ilen = COLS - 10;
+    if (ilen < 0) ilen = 0;
+}
 
 static void set_str(wm_req_t *r, const char *s)
 {
@@ -46,7 +71,7 @@ static void repaint(void)
     for (int i = 0; i < nhist; i++)
         draw_text(12, 40 + i * 18, hist[i], GFX_RGB(0xe6, 0xe6, 0xee));
 
-    char line[COLS + 10];
+    char line[MAXCOLS + 16];
     int p = 0;
     const char *prompt = "aurora> ";
     while (prompt[p]) { line[p] = prompt[p]; p++; }
@@ -64,8 +89,9 @@ static void commit_line(void)
 {
     if (nhist >= ROWS - 1) {                 /* scroll up one line */
         for (int i = 0; i < ROWS - 1; i++)
-            memcpy(hist[i], hist[i + 1], COLS);
+            memcpy(hist[i], hist[i + 1], MAXCOLS);
         nhist = ROWS - 2;
+        if (nhist < 0) nhist = 0;
     }
     char *h = hist[nhist++];
     int p = 0;
@@ -99,10 +125,12 @@ int main(int argc, char **argv)
     }
     if (wm <= 0) { fprintf(2, "term: no window server\n"); return 1; }
 
+    recompute_grid();
+
     wm_req_t r;
     wm_rep_t rep;
     memset(&r, 0, sizeof(r));
-    r.op = WM_CREATE; r.x = wx; r.y = wy; r.w = W; r.h = H;
+    r.op = WM_CREATE; r.x = wx; r.y = wy; r.w = W; r.h = H; r.flags = WM_F_RESIZABLE;
     set_str(&r, title);
     msgsend(wm, &r, sizeof(r));
     int from;
@@ -116,8 +144,8 @@ int main(int argc, char **argv)
     repaint();
     printf("[term] opened window %d\n", win);
 
-    /* Event loop: keys arrive (forwarded by the window server) as WM_KEY; a
-     * WM_DESTROY means the user clicked the close button, so the app exits. */
+    /* Event loop: WM_KEY = a typed key, WM_RESIZE = the server changed our size
+     * (maximize/restore), WM_DESTROY = the close button was clicked. */
     for (;;) {
         wm_req_t k;
         int n = msgrecv(&k, sizeof(k), &from);
@@ -126,6 +154,12 @@ int main(int argc, char **argv)
         if (k.op == WM_DESTROY) {
             printf("[term] window %d closed\n", win);
             return 0;
+        }
+        if (k.op == WM_RESIZE) {
+            W = k.w; H = k.h;
+            recompute_grid();
+            repaint();
+            continue;
         }
         if (k.op != WM_KEY)
             continue;

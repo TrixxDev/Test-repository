@@ -12,9 +12,11 @@ filesystem stack, an interactive shell, pipes, a small libc, a userspace
 service model (init + daemons + message-passing IPC), and loopback sockets
 brokered by a userspace network daemon.
 
-It has moved well past a "teaching kernel" — **v1.0.0 is the first stabilized
-release**: a functional GUI operating system hardened by a memory/process/IPC
-stabilization audit (see [docs/STABILITY.md](docs/STABILITY.md)). It is an early
+It has moved well past a "teaching kernel" — **v1.0.0 was the first stabilized
+release** (a functional GUI OS hardened by a memory/process/IPC audit, see
+[docs/STABILITY.md](docs/STABILITY.md)); **v1.1.0** grows the desktop environment,
+starting with a complete window model — **minimize (window-shade) and maximize**
+(a `WM_RESIZE` resize protocol) on top of close/focus/drag. It is an early
 Unix-like execution environment that looks like a platform of services, with the
 first slice of its macOS-like visual stack: a framebuffer, a 2D library with an
 8×16 font, and a **userspace window server** with an event loop that takes
@@ -31,7 +33,7 @@ permission model — uid + rwx — but no login/groups). With the stabilization 
 done, the next step is the **10.0 Desktop Environment** milestone (system menu,
 settings, window minimize/maximize), then networking (virtio-net → TCP).
 
-- **Current version:** v1.0.0
+- **Current version:** v1.1.0
 - **Size:** ~6,800 lines of C / assembly (plus a generated 8×16 font header)
   across kernel + drivers + fs + libc + userland.
 - **Target:** i686 protected mode, Multiboot1, booted directly by
@@ -57,7 +59,7 @@ settings, window minimize/maximize), then networking (virtio-net → TCP).
 | Sockets / poll | ✅ (8A) | Kernel `struct socket` (AF_LOOPBACK), `socket`/`poll`; `netd` brokers bind/connect/accept over IPC; `sock_link` joins endpoints. |
 | Userland | ✅ | mini libc; `init`, `logger`, `netd`, `sh`, `cat`, `grep`, `hello`, `orphan`, `echosrv`, `echocli`, `save`, `wserver`, `term`, `dock`, `files` (Finder), `viewer` (Text Viewer), `wmstress` (WS self-test). |
 | Networking (NIC/IP) | ⏳ | Loopback done (8A); Ethernet/ARP/IP/UDP/TCP is 8B. |
-| Graphics | ✅ (9.0–9.8) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** (damage-driven compositor) + **keyboard & mouse pipelines** + interactive Terminals + a **standalone Dock process** + a **Finder (`Aurora Files`)** + a **Text Viewer** (surfaces, z-order, focus, window IPC, **cursor + click-to-focus + title-bar dragging + close button + pointer forwarding + Dock click-to-launch + `readdir` file browsing + text file rendering & scroll**). **Live-confirmed in QEMU** (`make verify-gui`, `make demo-focus`, `make demo-drag`, `make demo-close`, `make demo-dock`, `make demo-files`, `make demo-view`). Architecture audit → 10.0 Desktop Environment next. |
+| Graphics | ✅ (9.0–9.8) | Linear framebuffer (Multiboot **or** Bochs-VBE via PCI); 2D library (+ **8×16 text**); desktop; **event-driven userspace `windowserver`** (damage-driven compositor) + **keyboard & mouse pipelines** + interactive Terminals + a **standalone Dock process** + a **Finder (`Aurora Files`)** + a **Text Viewer** (surfaces, z-order, focus, window IPC, **cursor + click-to-focus + title-bar dragging + close button + minimize/maximize + pointer forwarding + Dock click-to-launch + `readdir` file browsing + text file rendering & scroll**). **Live-confirmed in QEMU** (`make verify-gui`, `make demo-focus`, `make demo-drag`, `make demo-close`, `make demo-dock`, `make demo-files`, `make demo-view`, `make demo-max`, `make demo-min`). Desktop environment (system menu, settings, clipboard) next. |
 | Security / multi-user | 🟡 (8A.5) | uid (root vs user, `getuid`/`setuid`/`uid_of`); rwx + owner on VFS nodes enforced at open/exec; service registry permissions; privileged ports (<1024) root-only. No login/groups yet. |
 
 ## What it looks like
@@ -108,6 +110,8 @@ make demo-close     # click the front Terminal's red close button (window exits)
 make demo-dock      # click the Dock's Terminal icon -> the Dock launches a Terminal
 make demo-files     # open the Finder from the Dock, list /disk, launch TERM.ELF from it
 make demo-view      # open the Finder, double-click ABOUT.TXT -> the Viewer renders + scrolls it
+make demo-max       # click a Terminal's green light -> maximize it to fill the screen
+make demo-min       # click a Terminal's yellow light -> window-shade it to its title bar
 make stress         # window-server leak/limit self-test (heap stays flat; see docs/STABILITY.md)
 make screenshot     # render the desktop to aurora_desktop.png (no QEMU needed)
 make screenshot-wm  # render the compositor (two windows) to aurora_windows.png

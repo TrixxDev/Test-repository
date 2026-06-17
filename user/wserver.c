@@ -226,8 +226,9 @@ int main(int argc, char **argv)
                 x = (screen.width  - req.w) / 2;
                 y =  screen.height - req.h - 16;
             }
+            int resizable = (req.flags & WM_F_RESIZABLE) != 0;
             void *px = (req.w > 0 && req.h > 0) ? malloc((size_t)req.w * req.h * 4) : 0;
-            int id = px ? wm_create(&st, x, y, req.w, req.h, req.str, px, from, !dock) : -1;
+            int id = px ? wm_create(&st, x, y, req.w, req.h, req.str, px, from, !dock, resizable) : -1;
             if (id <= 0 && px)
                 free(px);               /* slot full / bad size: don't leak the buffer */
             if (id > 0 && dock) {
@@ -335,33 +336,51 @@ int main(int argc, char **argv)
             /* Chrome interactions (raise / drag / close) apply only to ordinary
              * decorated windows; the Dock just receives the pointer event below. */
             if (press && hit > 0 && wm_is_decorated(&st, hit)) {
-                int id = hit;
-                {
-                    wm_raise(&st, id);              /* click-to-focus first */
-                    if (wm_in_close_button(&st, id, st.cursor_x, st.cursor_y)) {
-                        int bx, by, bw, bh;
-                        wm_window_bounds(&st, id, &bx, &by, &bw, &bh);
-                        int owner = wm_owner_of(&st, id);
-                        destroy_window(id);         /* frees the content buffer too */
+                int id = hit, cx = st.cursor_x, cy = st.cursor_y;
+                wm_raise(&st, id);                  /* click-to-focus first */
+
+                int bx, by, bw, bh;                 /* footprint before any change */
+                if (wm_window_bounds(&st, id, &bx, &by, &bw, &bh))
+                    ADD_DMG(bx, by, bw, bh);
+
+                if (wm_in_close_button(&st, id, cx, cy)) {
+                    int owner = wm_owner_of(&st, id);
+                    destroy_window(id);             /* frees the content buffer too */
+                    if (owner > 0) {                /* tell the app to exit */
+                        wm_req_t bye;
+                        memset(&bye, 0, sizeof(bye));
+                        bye.op = WM_DESTROY; bye.win = id;
+                        msgsend(owner, &bye, sizeof(bye));
+                    }
+                } else if (wm_in_min_button(&st, id, cx, cy)) {
+                    wm_toggle_shade(&st, id);       /* window-shade collapse/expand */
+                    if (wm_window_bounds(&st, id, &bx, &by, &bw, &bh))
                         ADD_DMG(bx, by, bw, bh);
-                        if (owner > 0) {            /* tell the app to exit */
-                            wm_req_t bye;
-                            memset(&bye, 0, sizeof(bye));
-                            bye.op = WM_DESTROY;
-                            bye.win = id;
-                            msgsend(owner, &bye, sizeof(bye));
-                        }
-                    } else {
-                        int bx, by, bw, bh;        /* raise damaged this window */
-                        if (wm_window_bounds(&st, id, &bx, &by, &bw, &bh))
-                            ADD_DMG(bx, by, bw, bh);
-                        if (wm_in_titlebar(&st, id, st.cursor_x, st.cursor_y)) {
-                            drag.active   = 1;
-                            drag.window_id = id;
-                            drag.offset_x = st.cursor_x - wm_window_x(&st, id);
-                            drag.offset_y = st.cursor_y - wm_window_y(&st, id);
+                } else if (wm_in_max_button(&st, id, cx, cy)) {
+                    int nw, nh;                     /* maximize/restore: resize the surface */
+                    if (wm_toggle_max(&st, id, screen.width, screen.height, &nw, &nh)) {
+                        void *npx = malloc((size_t)nw * nh * 4);
+                        if (npx) {
+                            memset(npx, 0, (size_t)nw * nh * 4);
+                            void *old = wm_content_ptr(&st, id);
+                            wm_set_content(&st, id, npx, nw, nh);
+                            if (old) free(old);
+                            int owner = wm_owner_of(&st, id);
+                            if (owner > 0) {        /* ask the app to redraw at the new size */
+                                wm_req_t rz;
+                                memset(&rz, 0, sizeof(rz));
+                                rz.op = WM_RESIZE; rz.win = id; rz.w = nw; rz.h = nh;
+                                msgsend(owner, &rz, sizeof(rz));
+                            }
                         }
                     }
+                    if (wm_window_bounds(&st, id, &bx, &by, &bw, &bh))
+                        ADD_DMG(bx, by, bw, bh);
+                } else if (wm_in_titlebar(&st, id, cx, cy)) {
+                    drag.active   = 1;
+                    drag.window_id = id;
+                    drag.offset_x = cx - wm_window_x(&st, id);
+                    drag.offset_y = cy - wm_window_y(&st, id);
                 }
             }
 

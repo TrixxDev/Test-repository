@@ -37,6 +37,10 @@ typedef struct {
     int            visible;
     int            owner;       /* pid of the app that owns the window (for input) */
     int            decorated;   /* 1 = title bar + shadow chrome; 0 = borderless (Dock) */
+    int            resizable;   /* 1 = the app handles WM_RESIZE (maximize works)  */
+    int            shaded;      /* 1 = window-shaded (collapsed to its title bar)   */
+    int            maximized;   /* 1 = filling the screen (saved geometry in s*)    */
+    int            sx, sy, sw, sh;  /* geometry to restore from maximize           */
     const char    *title;
     gfx_surface_t *content;     /* the app's content surface (w x h, packed) */
 } window_t;
@@ -61,9 +65,10 @@ typedef struct {
 void wm_state_init(wm_state_t *st);
 /* Register a window owned by `owner` (pid); `pixels` is a caller-owned w*h*4
  * content buffer. `decorated` = 1 for a normal window (title bar + shadow), 0
- * for a borderless window (the Dock draws its own chrome). Returns the id. */
+ * for a borderless window (the Dock draws its own chrome). `resizable` = 1 if the
+ * app handles WM_RESIZE (so it can be maximized). Returns the id. */
 int  wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
-               void *pixels, int owner, int decorated);
+               void *pixels, int owner, int decorated, int resizable);
 /* 1 if window `id` has chrome (title bar/shadow); 0 if borderless / unknown. */
 int  wm_is_decorated(wm_state_t *st, int id);
 /* Top-left of window `id`'s *content* on screen (chrome accounted for). Returns
@@ -79,8 +84,22 @@ int  wm_focus_owner(wm_state_t *st);
 int  wm_window_at(wm_state_t *st, int x, int y);
 /* Is (x, y) inside window `id`'s title bar? (for click-to-focus / dragging) */
 int  wm_in_titlebar(wm_state_t *st, int id, int x, int y);
-/* Is (x, y) on window `id`'s close button (the red traffic light)? */
+/* Is (x, y) on window `id`'s close (red) / minimize (yellow) / maximize (green)
+ * traffic-light button? */
 int  wm_in_close_button(wm_state_t *st, int id, int x, int y);
+int  wm_in_min_button(wm_state_t *st, int id, int x, int y);
+int  wm_in_max_button(wm_state_t *st, int id, int x, int y);
+/* Toggle window-shade (collapse to/expand from the title bar). Returns the new
+ * shaded state, or -1 if `id` is unknown. */
+int  wm_toggle_shade(wm_state_t *st, int id);
+/* Toggle maximize for a *resizable* window. On success returns 1 and writes the
+ * new content size to *w,*h (the server reallocs the surface to it and sends the
+ * app WM_RESIZE); returns 0 if the window is unknown or not resizable. */
+int  wm_toggle_max(wm_state_t *st, int id, int screen_w, int screen_h, int *w, int *h);
+/* Replace window `id`'s content surface (after the server reallocs it). */
+int  wm_set_content(wm_state_t *st, int id, void *pixels, int w, int h);
+/* Clear the maximized flag without moving (e.g. when the window is dragged). */
+void wm_clear_maximized(wm_state_t *st, int id);
 /* Top-left of window `id` (title bar included); for computing a drag offset. */
 int  wm_window_x(wm_state_t *st, int id);
 int  wm_window_y(wm_state_t *st, int id);
@@ -125,8 +144,9 @@ void wm_present(wm_state_t *st, gfx_surface_t *screen);
 #define WM_SERVICE "wm"
 
 /* WM_CREATE flags (req.flags). */
-#define WM_F_DOCK  1     /* borderless, pinned bottom-center, always on top,
-                          * excluded from keyboard focus, receives WM_POINTER  */
+#define WM_F_DOCK       1   /* borderless, pinned bottom-center, always on top,
+                             * excluded from keyboard focus, receives WM_POINTER */
+#define WM_F_RESIZABLE  2   /* the app handles WM_RESIZE, so it can be maximized  */
 
 enum {
     WM_CREATE = 1,   /* app -> server: new window (w,h,title,flags); reply = id */
@@ -143,6 +163,7 @@ enum {
     WM_POINTER,      /* server -> app: pointer over the app's window
                         (req.x,req.y = content-local; req.w = button bitmask)  */
     WM_STAT,         /* app -> server: log live-window count + heap top (debug) */
+    WM_RESIZE,       /* server -> app: your content is now req.w x req.h; redraw */
 };
 
 typedef struct {

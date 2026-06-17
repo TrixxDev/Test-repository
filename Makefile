@@ -173,7 +173,7 @@ screenshot-wm:
 # live framebuffer to a PNG via the QEMU monitor — proves the GUI on actual
 # hardware emulation without needing a display. `verify-gui` types into the
 # Terminal first to also prove the keyboard pipeline.
-.PHONY: live-shot verify-gui demo-focus demo-drag demo-close demo-dock demo-files demo-view stress
+.PHONY: live-shot verify-gui demo-focus demo-drag demo-close demo-dock demo-files demo-view demo-max demo-min stress
 live-shot: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live.png
 verify-gui: $(KERNEL) $(DISK)
@@ -212,6 +212,18 @@ demo-view: $(KERNEL) $(DISK)
 	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_view.png \
 	    --mouse "move:72,-324;click;wait:2;move:90,194;click;click;wait:2" \
 	    --keys pgdn
+# Phase 10.1: click the "Terminal" window's green (maximize) light -> the window
+# server reallocs its surface to fill the screen and sends WM_RESIZE; the app
+# redraws. (Its buttons at (200,150) are left of Terminal 2, so the target is
+# unambiguous regardless of which window booted on top.)
+demo-max: $(KERNEL) $(DISK)
+	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_max.png \
+	    --mouse "move:260,220;click;wait:1"
+# Phase 10.1: click the "Terminal" window's yellow (minimize) light -> window-shade
+# (collapse to the title bar); a second click would expand it again.
+demo-min: $(KERNEL) $(DISK)
+	python3 tools/screendump.py $(KERNEL) $(DISK) aurora_live_min.png \
+	    --mouse "move:278,220;click;wait:1"
 # Stabilization audit: click the Dock's diagnostics icon (E) to run the window
 # server stress / leak self-test; the serial log shows the heap top (brk) staying
 # flat across 50 create/destroy cycles and a graceful window-table limit.

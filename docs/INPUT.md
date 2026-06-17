@@ -88,6 +88,15 @@ server branches on `op`.)
     (keeps `cursor - offset` under the grabbed point), clamped so a 40px graspable
     strip always stays on-screen and the title bar never slides above `WM_MENUBAR_H`;
   - **release** clears `drag.active`.
+- **10.1 — Minimize + Maximize. DONE (v1.1.0).** The yellow and green title-bar
+  lights are now live. **Yellow = window-shade**: `wm_toggle_shade` collapses the
+  window to its title bar (content hidden, hit area + bounds shrink to the bar);
+  a second click expands it. **Green = maximize/restore**: only for windows that
+  opted in with `WM_F_RESIZABLE`. `wm_toggle_max` saves the geometry and computes
+  the full-screen content size; the server **reallocs the content surface**
+  (it owns the buffer) and sends the app a **`WM_RESIZE {w,h}`** message; the app
+  (Terminal/Finder/Viewer) recomputes its layout and redraws. Restore reverses it.
+  Proof: `make demo-max` / `make demo-min`.
 - **9.5 — Close button. DONE.** A **press** on the red title-bar light
   (`wm_in_close_button`, the left traffic light at `(x+16, y+14)`, drawn with a
   small dark "×") destroys the window (`wm_destroy`) and sends its `owner` a

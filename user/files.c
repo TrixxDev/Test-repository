@@ -13,8 +13,8 @@
 #include "libc.h"
 #include "wm.h"
 
-#define W        380
-#define H        420
+#define DEF_W    380
+#define DEF_H    420
 #define HEADER_H 26
 #define ROW_H    20
 #define LIST_Y   HEADER_H
@@ -23,6 +23,7 @@
 
 static int wm;
 static int win;
+static int W = DEF_W, H = DEF_H;    /* content size (updated on WM_RESIZE) */
 
 static char          path[256] = "/disk";
 static struct dirent ents[MAX_ENTS];
@@ -185,7 +186,7 @@ int main(int argc, char **argv)
 
     wm_req_t r; wm_rep_t rep;
     memset(&r, 0, sizeof(r));
-    r.op = WM_CREATE; r.x = 160; r.y = 110; r.w = W; r.h = H;
+    r.op = WM_CREATE; r.x = 160; r.y = 110; r.w = W; r.h = H; r.flags = WM_F_RESIZABLE;
     { const char *t = "Aurora Files"; int i = 0; while (t[i]) { r.str[i] = t[i]; i++; } r.str[i] = 0; }
     msgsend(wm, &r, sizeof(r));
     int from;
@@ -207,6 +208,7 @@ int main(int argc, char **argv)
         int n = msgrecv(&ev, sizeof(ev), &from);
         if (n < (int)sizeof(ev)) continue;
         if (ev.op == WM_DESTROY) { printf("[files] closed\n"); return 0; }
+        if (ev.op == WM_RESIZE) { W = ev.w; H = ev.h; redraw(); continue; }
         if (ev.op != WM_POINTER) continue;
 
         int press = (ev.w & 1) && !(prev_buttons & 1);

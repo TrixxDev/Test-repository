@@ -43,7 +43,8 @@ void wm_draw_window(gfx_surface_t *screen, const window_t *win)
         return;
     }
 
-    int total_h = ch + WM_TITLEBAR_H;
+    /* When window-shaded the window collapses to just its title bar. */
+    int total_h = win->shaded ? WM_TITLEBAR_H : ch + WM_TITLEBAR_H;
 
     uint32_t title_bg = GFX_RGB(0xec, 0xec, 0xf0);
     uint32_t white    = GFX_RGB(0xff, 0xff, 0xff);
@@ -74,8 +75,10 @@ void wm_draw_window(gfx_surface_t *screen, const window_t *win)
         gfx_draw_text(screen, x + (cw - tw) / 2, y + 6, win->title, GFX_RGB(0x33, 0x33, 0x3a));
     }
 
-    /* The window's content surface (packed, pitch == width*4). */
-    gfx_blit(screen, x, y + WM_TITLEBAR_H, (const uint32_t *)win->content->pixels, cw, ch);
+    /* The window's content surface (packed, pitch == width*4) — hidden when
+     * window-shaded. */
+    if (!win->shaded)
+        gfx_blit(screen, x, y + WM_TITLEBAR_H, (const uint32_t *)win->content->pixels, cw, ch);
 }
 
 void wm_composite(gfx_surface_t *screen, window_t *windows[], int n)
@@ -127,7 +130,7 @@ void wm_state_init(wm_state_t *st)
 }
 
 int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
-              void *pixels, int owner, int decorated)
+              void *pixels, int owner, int decorated, int resizable)
 {
     for (int i = 0; i < WM_MAX_WINDOWS; i++) {
         if (st->used[i])
@@ -144,6 +147,9 @@ int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
         st->win[i].visible = 1;
         st->win[i].owner = owner;
         st->win[i].decorated = decorated;
+        st->win[i].resizable = resizable;
+        st->win[i].shaded = 0;
+        st->win[i].maximized = 0;
         st->win[i].title = st->titles[i];
         st->win[i].content = &st->surf[i];
         return st->win[i].id;
@@ -166,11 +172,14 @@ int wm_focus_owner(wm_state_t *st)
 }
 
 /* A decorated window's frame is its content box plus the title bar on top; a
- * borderless window is just its content box. */
+ * borderless window is just its content box. A shaded window is only its bar. */
 static int frame_hit(const window_t *w, int x, int y)
 {
     int cw = w->content->width;
-    int total_h = w->content->height + (w->decorated ? WM_TITLEBAR_H : 0);
+    int total_h;
+    if (!w->decorated)     total_h = w->content->height;
+    else if (w->shaded)    total_h = WM_TITLEBAR_H;
+    else                   total_h = w->content->height + WM_TITLEBAR_H;
     return x >= w->x && x < w->x + cw && y >= w->y && y < w->y + total_h;
 }
 
@@ -196,16 +205,69 @@ int wm_in_titlebar(wm_state_t *st, int id, int x, int y)
            y >= w->y && y < w->y + WM_TITLEBAR_H;
 }
 
-/* The close button is the red traffic light at (x+16, y+14), radius 6; accept a
- * slightly larger hit radius so it is comfortable to click. */
-int wm_in_close_button(wm_state_t *st, int id, int x, int y)
+/* Traffic-light hit tests: red close (x+16), yellow minimize (x+34), green
+ * maximize (x+52), all at y+14 with a comfortable radius. */
+static int in_light(wm_state_t *st, int id, int cxoff, int x, int y)
 {
     int s = slot_of(st, id);
     if (s < 0 || !st->win[s].decorated)
         return 0;
-    int cx = st->win[s].x + 16, cy = st->win[s].y + 14;
+    int cx = st->win[s].x + cxoff, cy = st->win[s].y + 14;
     int dx = x - cx, dy = y - cy;
     return dx * dx + dy * dy <= 9 * 9;
+}
+
+int wm_in_close_button(wm_state_t *st, int id, int x, int y) { return in_light(st, id, 16, x, y); }
+int wm_in_min_button(wm_state_t *st, int id, int x, int y)   { return in_light(st, id, 34, x, y); }
+int wm_in_max_button(wm_state_t *st, int id, int x, int y)   { return in_light(st, id, 52, x, y); }
+
+int wm_toggle_shade(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    if (s < 0)
+        return -1;
+    st->win[s].shaded = !st->win[s].shaded;
+    return st->win[s].shaded;
+}
+
+int wm_toggle_max(wm_state_t *st, int id, int screen_w, int screen_h, int *w, int *h)
+{
+    int s = slot_of(st, id);
+    if (s < 0 || !st->win[s].resizable)
+        return 0;
+    window_t *win = &st->win[s];
+    win->shaded = 0;                         /* maximizing always un-shades */
+    if (!win->maximized) {
+        win->sx = win->x; win->sy = win->y;
+        win->sw = win->content->width; win->sh = win->content->height;
+        win->x = 0; win->y = WM_MENUBAR_H;
+        *w = screen_w;
+        *h = screen_h - WM_MENUBAR_H - WM_TITLEBAR_H;
+        win->maximized = 1;
+    } else {
+        win->x = win->sx; win->y = win->sy;
+        *w = win->sw; *h = win->sh;
+        win->maximized = 0;
+    }
+    return 1;
+}
+
+void wm_clear_maximized(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    if (s >= 0)
+        st->win[s].maximized = 0;
+}
+
+int wm_set_content(wm_state_t *st, int id, void *pixels, int w, int h)
+{
+    int s = slot_of(st, id);
+    if (s < 0)
+        return -1;
+    st->surf[s].pixels = (uint8_t *)pixels;
+    st->surf[s].width = w; st->surf[s].height = h;
+    st->surf[s].pitch = w * 4; st->surf[s].bpp = 32;
+    return 0;
 }
 
 int wm_is_decorated(wm_state_t *st, int id)
@@ -288,12 +350,15 @@ int wm_window_bounds(wm_state_t *st, int id, int *bx, int *by, int *bw, int *bh)
     int ch = st->win[s].content->height;
     *bx = st->win[s].x;
     *by = st->win[s].y;
-    if (st->win[s].decorated) {
-        *bw = cw + 4;
-        *bh = ch + WM_TITLEBAR_H + 6;
-    } else {
+    if (!st->win[s].decorated) {
         *bw = cw;
         *bh = ch;
+    } else if (st->win[s].shaded) {
+        *bw = cw + 4;
+        *bh = WM_TITLEBAR_H + 6;
+    } else {
+        *bw = cw + 4;
+        *bh = ch + WM_TITLEBAR_H + 6;
     }
     return 1;
 }

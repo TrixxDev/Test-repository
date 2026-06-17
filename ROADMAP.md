@@ -180,6 +180,13 @@
   мёртвых владельцев, проверка владельца в `WM_DESTROY`; подтверждены reap
   процессов (нет zombie), корректный лимит окон, дроп при переполнении mailbox,
   закрытие/перезапуск Finder. Проверка: `make stress` + `tools/verify_drag.py`.
+- [x] **10.1 minimize + maximize → AuroraOS v1.1.0**: жёлтая кнопка —
+  window-shade (сворачивание в заголовок), зелёная — maximize/restore через
+  resize-протокол (`WM_F_RESIZABLE` + `WM_RESIZE`: сервер переаллоцирует
+  surface, приложение перерисовывается). Terminal/Finder/Viewer стали
+  resize-aware. Проверка: `make demo-max` / `make demo-min`.
+- [ ] **10.2–10.4 (остаток v1.1)**: системное меню Aurora, Settings, буфер
+  обмена (`WM_CLIPBOARD_SET/GET`).
 - [ ] потом (когда десктоп «живой»): client-side surfaces, shared memory,
   анимации, сеть (virtio-net/TCP)
 

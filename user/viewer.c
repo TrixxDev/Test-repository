@@ -13,14 +13,15 @@
 
 #define VIEWER_MAX_FILE 65536
 #define MAX_LINES       4096
-#define W      500
-#define H      360
+#define DEF_W  500
+#define DEF_H  360
 #define ROW_H  18
 #define PAD_X  12
 #define PAD_Y  8
 
 static int wm;
 static int win;
+static int W = DEF_W, H = DEF_H;    /* content size (updated on WM_RESIZE) */
 
 static char  fbuf[VIEWER_MAX_FILE + 1];
 static int   flen;
@@ -137,7 +138,7 @@ int main(int argc, char **argv)
 
     wm_req_t r; wm_rep_t rep;
     memset(&r, 0, sizeof(r));
-    r.op = WM_CREATE; r.x = 430; r.y = 130; r.w = W; r.h = H;
+    r.op = WM_CREATE; r.x = 430; r.y = 130; r.w = W; r.h = H; r.flags = WM_F_RESIZABLE;
     for (int i = 0; title[i] && i < 47; i++) r.str[i] = title[i];
     msgsend(wm, &r, sizeof(r));
     int from;
@@ -157,6 +158,14 @@ int main(int argc, char **argv)
         int n = msgrecv(&ev, sizeof(ev), &from);
         if (n < (int)sizeof(ev)) continue;
         if (ev.op == WM_DESTROY) { printf("[viewer] closed\n"); return 0; }
+        if (ev.op == WM_RESIZE) {            /* maximize/restore: refit the text */
+            W = ev.w; H = ev.h;
+            int rows = visible_rows();
+            int maxtop = nlines > rows ? nlines - rows : 0;
+            top = clampi(top, 0, maxtop);
+            redraw();
+            continue;
+        }
         if (ev.op != WM_KEY) continue;
 
         int rows = visible_rows();

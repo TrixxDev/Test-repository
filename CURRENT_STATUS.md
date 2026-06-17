@@ -3,9 +3,14 @@
 Phase-by-phase status of the project. Forward plan: [NEXT_STEPS.md](NEXT_STEPS.md).
 Caveats: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
-**Current version: v1.0.0** — the first stabilized release. A full GUI stack
-(window server, Dock, Finder, Viewer, Terminal) over a Unix-like kernel, hardened
-by a memory/process/IPC **stabilization audit** (see
+**Current version: v1.1.0** — the desktop environment grows. On top of the
+stabilized v1.0.0 base, the **window model is complete**: windows can be
+**minimized** (window-shade: collapse to the title bar) and **maximized**
+(the server reallocs the surface to fill the screen and sends `WM_RESIZE`; the
+app redraws — Terminal, Finder and Viewer are resize-aware), alongside the
+existing close / focus / drag. The v1.0.0 base remains a full GUI stack (window
+server, Dock, Finder, Viewer, Terminal) over a Unix-like kernel, hardened by a
+memory/process/IPC **stabilization audit** (see
 [docs/STABILITY.md](docs/STABILITY.md)): the window content-buffer leak is fixed
 (heap proven flat across stress rounds), apps are reaped with no zombies, the
 window table fails gracefully when full, dead apps' windows are reaped, and the
@@ -73,7 +78,8 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 | 9.7 | **Finder** (`user/files.c`, `Aurora Files`): lists `/disk` via the `readdir` syscall, click-to-select, click-again-to-open (enter dir / exec `.ELF`) | v0.9.10 | ✅ live-confirmed in QEMU (`make demo-files`) |
 | 9.8 | **Text Viewer** (`user/viewer.c`): `open`/`read`/`close` + 8×16 font, arrow/PgUp/PgDn scroll (keyboard now decodes extended scancodes) | v0.9.11 | ✅ live-confirmed in QEMU (`make demo-view`) |
 | 9.9 | **Stabilization audit**: fix window-buffer leak (heap proven flat), free-on-full, dead-owner window reaping, destroy ownership check; verify zombies/limits/IPC | v1.0.0 | ✅ `make stress` + [docs/STABILITY.md](docs/STABILITY.md) |
-| 10.0 | **Desktop Environment milestone** (consolidate window server + Dock + Finder + Viewer + Terminal; system menu, settings, window min/max) | — | ⏳ NEXT |
+| 10.1 | **Window controls**: minimize (window-shade) + maximize (resize protocol: `WM_RESIZE`, `WM_F_RESIZABLE`, server reallocs the surface; apps resize-aware) | v1.1.0 | ✅ live-confirmed (`make demo-max`/`make demo-min`) |
+| 10.2–10.4 | System menu (Aurora) · Settings · Clipboard (`WM_CLIPBOARD_*`) | — | ⏳ NEXT (rest of v1.1) |
 | 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after the desktop milestone |
 | 10.1 | Aurora Assistant (userspace `aurorad`) + more desktop apps | — | ⏳ later |
 
@@ -158,6 +164,14 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
   codes (`include/keys.h`) that flow through the existing char pipeline →
   `WM_KEY`. **Confirmed live**: `make demo-view` opens the Finder, double-clicks
   `ABOUT.TXT`, and the Viewer shows it scrolled by PgDn (`aurora_live_view.png`).
+- Window controls (10.1, v1.1.0): the title-bar traffic lights are live — red
+  closes (9.5), **yellow window-shades** (collapse to/expand from the title bar),
+  **green maximizes/restores**. Maximize uses a resize protocol: a window opts in
+  with `WM_F_RESIZABLE`; on the green click the server reallocs the content surface
+  to fill the screen and sends the app `WM_RESIZE {w,h}`, and the app (Terminal,
+  Finder, Viewer) recomputes its layout and redraws. **Confirmed live**: `make
+  demo-max` fills the screen with a Terminal (`aurora_live_max.png`); `make
+  demo-min` collapses one to its title bar (`aurora_live_min.png`).
 - Stabilization (v1.0.0): `make stress` (`user/wmstress.c`, launched from the
   Dock's diagnostics icon) hammers the window server — 2×50 create/destroy cycles
   leave the server heap top (`brk`) **identical** between rounds (no leak), and a

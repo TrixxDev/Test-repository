@@ -186,23 +186,24 @@ intentionally **after** the visual stack for a desktop-first OS.
 
 ## Suggested immediate next action
 
-The stabilization audit is **done** (v1.0.0, see
-[docs/STABILITY.md](docs/STABILITY.md)): window/process/IPC leaks fixed and
-verified, limits graceful, Finder close/relaunch clean. The foundation is solid,
-so it is safe to build on top again.
+**v1.1.0 is done for window controls (10.1):** minimize (window-shade) + maximize
+(the `WM_RESIZE` resize protocol), with Terminal/Finder/Viewer resize-aware. The
+window model is now complete (close · focus · drag · minimize · maximize).
 
-**Begin 10.0 — Desktop Environment.** Consolidate the existing pieces (window
-server + Dock + Finder + Viewer + Terminal) into a coherent desktop and add the
-first "environment" polish, each as the same `app → IPC → windowserver` clients:
+**Continue v1.1 — the rest of the desktop environment**, each as the same
+`app → IPC → windowserver` client, in this order:
 
-- **Window controls:** minimize / maximize (the yellow/green title-bar lights are
-  drawn but inert — wire them, reusing the close-button hit-test pattern).
-- **A real Aurora menu / system menu** in the menu bar (currently static labels).
-- **Settings** app (wallpaper, clock) over the VFS, and a clipboard for copy/paste
-  between Terminal and Viewer.
-- Optional: client-side **shared-memory surfaces** to replace server-side draw
-  commands (a performance/architecture upgrade once several apps exist).
+- **10.2 System menu (Aurora):** make the menu bar interactive — click "Aurora"
+  for a dropdown (About / Settings / Restart Window Server / Shutdown). Needs
+  menu-bar hit-testing + a dropdown surface in the windowserver.
+- **10.3 Settings** app: wallpaper / accent color, plus a read-only "System"
+  pane (memory usage via the `WM_STAT`-style data, running processes). Over IPC +
+  the VFS.
+- **10.4 Clipboard:** `WM_CLIPBOARD_SET` / `WM_CLIPBOARD_GET` — the windowserver
+  holds one string; Terminal "copy line" → Viewer/Terminal "paste". Small, and
+  the first real cross-process data sharing through the WM.
 
-Networking (**8B**: virtio-net → ARP → IPv4 → UDP → TCP → DNS) comes *after* the
-10.0 desktop milestone, per the agreed desktop-first priority. Then Phase 10.1
-(Aurora Assistant as a userspace `aurorad`).
+Deliberately deferred (per the agreed priority): client-side **shared-memory
+surfaces** (architectural rework, low payoff now) and **networking** (8B:
+virtio-net → TCP — large error surface). Finish the desktop experience first;
+networking and the Aurora Assistant come in v2.0.

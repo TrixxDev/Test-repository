@@ -24,7 +24,7 @@ int main(int argc, char **argv)
 
     /* "Aurora Files" window (the windowserver allocates each content surface). */
     int files = wm_create(&st, 150, 110, 360, 240, "Aurora Files",
-                          calloc((size_t)360 * 240, 4), 0, 1);
+                          calloc((size_t)360 * 240, 4), 0, 1, 0);
     wm_clear(&st, files, GFX_RGB(0xff, 0xff, 0xff));
     wm_draw_rect(&st, files, 0, 0, 116, 240, GFX_RGB(0xf1, 0xf1, 0xf5));
     wm_draw_rect(&st, files, 116, 0, 1, 240, GFX_RGB(0xdd, 0xdd, 0xe2));
@@ -38,7 +38,7 @@ int main(int argc, char **argv)
 
     /* "Terminal" window — same content the term.c app sends over IPC. */
     int term = wm_create(&st, 300, 210, 430, 200, "Terminal",
-                         calloc((size_t)430 * 200, 4), 0, 1);
+                         calloc((size_t)430 * 200, 4), 0, 1, 0);
     wm_draw_rect(&st, term, 0, 0, 430, 200, GFX_RGB(0x1e, 0x1e, 0x28));
     const char *lines[] = { "AuroraOS Terminal", "aurora> id", "uid=1000 pid=9",
                             "aurora> hello", "Hello AuroraOS", "aurora> _" };
