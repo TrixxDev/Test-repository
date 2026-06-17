@@ -391,6 +391,45 @@ static void notify_scale(void)
         deliver(wm_owner_of(&st, ids[i]), &s, sizeof(s));
 }
 
+/* Reallocate window `id`'s content surface to nw x nh (a shared SHM object if the
+ * window uses one — created before the old is freed so they get distinct ids; the
+ * SHM_MAX pool keeps a spare — otherwise a plain buffer), resize its cached
+ * presentation surface, and tell the owner to re-map + redraw via WM_RESIZE (the
+ * new shm id is in flags, or -1 when not shared). Shared by maximize/restore and
+ * app-requested resize. */
+static void resize_window(int id, int nw, int nh)
+{
+    int oldsid = wm_shm_id(&st, id), nsid = -1;
+    void *npx;
+    if (oldsid >= 0) {
+        nsid = shm_create(nw * nh * 4);
+        npx = (nsid >= 0) ? shm_map(nsid) : 0;
+    } else {
+        npx = malloc((size_t)nw * nh * 4);
+        if (npx) memset(npx, 0, (size_t)nw * nh * 4);
+    }
+    if (!npx)
+        return;
+    void *old = wm_content_ptr(&st, id);
+    wm_set_content(&st, id, npx, nw, nh);
+    if (oldsid >= 0) { wm_set_shm(&st, id, nsid); shm_destroy(oldsid); }
+    else if (old)    { free(old); }
+    void *opp = wm_present_ptr(&st, id);
+    int fw, fh;
+    wm_present_footprint(nw, nh, &fw, &fh);
+    void *ppx = malloc((size_t)fw * fh * 4);
+    wm_set_present(&st, id, ppx, fw, fh);        /* NULL -> immediate path */
+    if (opp) free(opp);
+    wm_mark_dirty(&st, id);
+    int owner = wm_owner_of(&st, id);
+    if (owner > 0) {
+        wm_req_t rz;
+        memset(&rz, 0, sizeof(rz));
+        rz.op = WM_RESIZE; rz.win = id; rz.w = nw; rz.h = nh; rz.flags = nsid;
+        msgsend(owner, &rz, sizeof(rz));
+    }
+}
+
 /* Launch a program detached (double-fork so it reparents to init for reaping). */
 static void wm_spawn(char **argv)
 {
@@ -856,45 +895,8 @@ int main(int argc, char **argv)
                     mark_window(id);
                 } else if (wm_in_max_button(&st, id, cx, cy)) {
                     int nw, nh;                     /* maximize/restore: resize the surface */
-                    if (wm_toggle_max(&st, id, screen.width, screen.height, &nw, &nh)) {
-                        /* Shared-surface windows reallocate their SHM (create the new
-                         * object before freeing the old so they get distinct ids/slots);
-                         * ordinary windows realloc a plain buffer. */
-                        int oldsid = wm_shm_id(&st, id), nsid = -1;
-                        void *npx;
-                        if (oldsid >= 0) {
-                            nsid = shm_create(nw * nh * 4);
-                            npx = (nsid >= 0) ? shm_map(nsid) : 0;
-                        } else {
-                            npx = malloc((size_t)nw * nh * 4);
-                            if (npx) memset(npx, 0, (size_t)nw * nh * 4);
-                        }
-                        if (npx) {
-                            void *old = wm_content_ptr(&st, id);
-                            wm_set_content(&st, id, npx, nw, nh);
-                            if (oldsid >= 0) {
-                                wm_set_shm(&st, id, nsid);
-                                shm_destroy(oldsid);   /* release the old SHM object */
-                            } else if (old) {
-                                free(old);
-                            }
-                            /* resize the cached presentation surface too */
-                            void *opp = wm_present_ptr(&st, id);
-                            int fw, fh;
-                            wm_present_footprint(nw, nh, &fw, &fh);
-                            void *ppx = malloc((size_t)fw * fh * 4);
-                            wm_set_present(&st, id, ppx, fw, fh);  /* NULL -> immediate */
-                            if (opp) free(opp);
-                            int owner = wm_owner_of(&st, id);
-                            if (owner > 0) {        /* ask the app to redraw at the new size */
-                                wm_req_t rz;
-                                memset(&rz, 0, sizeof(rz));
-                                rz.op = WM_RESIZE; rz.win = id; rz.w = nw; rz.h = nh;
-                                rz.flags = nsid;    /* new shm id to re-map (-1 if not shared) */
-                                msgsend(owner, &rz, sizeof(rz));
-                            }
-                        }
-                    }
+                    if (wm_toggle_max(&st, id, screen.width, screen.height, &nw, &nh))
+                        resize_window(id, nw, nh);
                     mark_window(id);
                 } else if (wm_in_titlebar(&st, id, cx, cy)) {
                     drag.active   = 1;
