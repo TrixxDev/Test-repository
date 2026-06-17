@@ -222,6 +222,9 @@ enum {
     WM_TICK,         /* render ticker -> server: a frame is due (render if dirty) */
     WM_SCALE,        /* server -> app: the UI scale changed; re-query ui_scale()
                         and re-lay-out + repaint your content                    */
+    WM_CLIPBOARD_SET,/* app -> server: store req.str as the clipboard text       */
+    WM_CLIPBOARD_GET,/* app -> server: request the clipboard; server replies with
+                        the same op and the text in req.str                      */
 };
 
 typedef struct {

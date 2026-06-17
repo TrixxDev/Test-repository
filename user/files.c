@@ -219,6 +219,16 @@ int main(int argc, char **argv)
         if (ev.op == WM_DESTROY) { printf("[files] closed\n"); return 0; }
         if (ev.op == WM_RESIZE) { W = ev.w; H = ev.h; redraw(); continue; }
         if (ev.op == WM_SCALE)  { S = ui_scale(); redraw(); continue; }
+        if (ev.op == WM_KEY) {                  /* Ctrl+C: copy the selected name */
+            if (ev.x == 3 && selected >= 0 && selected < nents) {
+                wm_req_t r; memset(&r, 0, sizeof(r));
+                r.op = WM_CLIPBOARD_SET;
+                int i = 0; for (; ents[selected].name[i] && i < 47; i++) r.str[i] = ents[selected].name[i];
+                r.str[i] = '\0';
+                msgsend(wm, &r, sizeof(r));
+            }
+            continue;
+        }
         if (ev.op != WM_POINTER) continue;
 
         int press = (ev.w & 1) && !(prev_buttons & 1);

@@ -107,7 +107,7 @@ def mouse_btn(s, down):
     time.sleep(0.05)
 
 
-def do_mouse(qmp_sock, script):
+def do_mouse(qmp_sock, script, mon_sock=None):
     for step in [s.strip() for s in script.split(";") if s.strip()]:
         if step.startswith("move:"):
             dx, dy = step[5:].split(",")
@@ -121,6 +121,8 @@ def do_mouse(qmp_sock, script):
             mouse_btn(qmp_sock, False)
         elif step.startswith("wait:"):
             time.sleep(float(step[5:]))     # let a launched app settle mid-script
+        elif step.startswith("key:") and mon_sock is not None:
+            mon_cmd(mon_sock, "sendkey " + step[4:])   # interleave keys with clicks
         else:
             sys.stderr.write("ignoring unknown mouse step: %r\n" % step)
         time.sleep(0.1)
@@ -161,7 +163,7 @@ def main():
         drain(s)
         if args.mouse:                          # position/click first ...
             q = qmp_open(qmps)
-            do_mouse(q, args.mouse)
+            do_mouse(q, args.mouse, s)          # `key:` steps interleave via monitor
             q.close()
             time.sleep(0.4)
         if args.keys:                           # ... then type into the focused window

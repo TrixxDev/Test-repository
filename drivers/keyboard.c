@@ -28,6 +28,7 @@ static const char keymap_shift[128] = {
 };
 
 static int shift_down;
+static int ctrl_down;        /* left/right Control held (for Ctrl+key combos) */
 static int extended;        /* set by the 0xE0 prefix; next byte is an ext. key */
 
 /* Map an extended (0xE0-prefixed) make code to a KEY_* code, or 0 if unhandled. */
@@ -81,12 +82,15 @@ static void on_key(registers_t *regs)
         uint8_t released = scancode & 0x7F;
         if (!extended && (released == 0x2A || released == 0x36))
             shift_down = 0;
+        if (released == 0x1D)   /* left or right Control (0xE0-prefixed) released */
+            ctrl_down = 0;
         extended = 0;           /* consume the extended release too */
         return;
     }
 
     if (extended) {             /* an extended make: arrows, PgUp/PgDn, Home/End */
         extended = 0;
+        if (scancode == 0x1D) { ctrl_down = 1; return; }   /* right Control */
         char k = extended_key(scancode);
         if (k)
             kbuf_push(k);       /* no echo for control keys */
@@ -97,11 +101,20 @@ static void on_key(registers_t *regs)
         shift_down = 1;
         return;
     }
+    if (scancode == 0x1D) {     /* left Control */
+        ctrl_down = 1;
+        return;
+    }
 
     char c = shift_down ? keymap_shift[scancode] : keymap[scancode];
     if (c) {
-        kputchar(c);        /* local echo */
-        kbuf_push(c);
+        if (ctrl_down && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+            c = (char)((c | 0x20) - 'a' + 1);   /* Ctrl+letter -> 1..26, no echo */
+            kbuf_push(c);
+        } else {
+            kputchar(c);        /* local echo */
+            kbuf_push(c);
+        }
     }
 }
 

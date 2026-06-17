@@ -15,6 +15,7 @@ static gfx_surface_t screen;    /* the live framebuffer (slow VRAM) */
 static gfx_surface_t back;      /* off-screen scene, no cursor (fast RAM)  */
 static gfx_surface_t bg;        /* cached static background: wallpaper + menu bar */
 static int           dock_win = -1;   /* the borderless Dock window, if any */
+static char          clipboard[48];   /* bounded shared clipboard (last writer wins) */
 
 /* Accumulated frame state. Input handlers update the scene and *record damage*
  * but never paint; a fixed-cadence WM_TICK consumes this and renders one frame.
@@ -763,6 +764,24 @@ int main(int argc, char **argv)
             printf("[wm] stat: live=%d brk=0x%x\n",
                    wm_window_count(&st), (unsigned)(uintptr_t)sbrk(0));
             break;
+        case WM_CLIPBOARD_SET: {
+            /* Store the text (bounded, last-writer-wins). */
+            int i = 0;
+            for (; req.str[i] && i < (int)sizeof(clipboard) - 1; i++)
+                clipboard[i] = req.str[i];
+            clipboard[i] = '\0';
+            break;
+        }
+        case WM_CLIPBOARD_GET: {
+            /* Reply with the clipboard text in the same message shape. */
+            wm_req_t rep;
+            memset(&rep, 0, sizeof(rep));
+            rep.op = WM_CLIPBOARD_GET;
+            for (int i = 0; clipboard[i] && i < (int)sizeof(rep.str) - 1; i++)
+                rep.str[i] = clipboard[i];
+            msgsend(from, &rep, sizeof(rep));
+            break;
+        }
         case WM_RELOAD_SETTINGS:
             /* Settings changed /disk/settings.cfg: re-apply the theme + scale and
              * repaint. The wallpaper/accent may have changed, so refresh the

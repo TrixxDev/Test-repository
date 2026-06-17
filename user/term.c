@@ -179,10 +179,27 @@ int main(int argc, char **argv)
             repaint();
             continue;
         }
+        if (k.op == WM_CLIPBOARD_GET) { /* paste reply: insert the clipboard text */
+            for (int i = 0; k.str[i] && ilen < COLS - 10 && ilen < MAXCOLS - 1; i++)
+                input[ilen++] = k.str[i];
+            repaint();
+            continue;
+        }
         if (k.op != WM_KEY)
             continue;
         int c = k.x;
-        if (c == '\n' || c == '\r')      commit_line();
+        if (c == 3) {                    /* Ctrl+C: copy the current input line */
+            wm_req_t r; memset(&r, 0, sizeof(r));
+            r.op = WM_CLIPBOARD_SET;
+            input[ilen] = '\0';
+            set_str(&r, input);
+            msgsend(wm, &r, sizeof(r));
+        } else if (c == 22) {            /* Ctrl+V: request a paste from the server */
+            wm_req_t r; memset(&r, 0, sizeof(r));
+            r.op = WM_CLIPBOARD_GET;
+            msgsend(wm, &r, sizeof(r));
+        }
+        else if (c == '\n' || c == '\r') commit_line();
         else if (c == '\b')              { if (ilen > 0) ilen--; }
         else if (c >= 32 && c < 127 && ilen < COLS - 10) input[ilen++] = (char)c;
         repaint();

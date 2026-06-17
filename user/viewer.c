@@ -188,6 +188,15 @@ int main(int argc, char **argv)
         int rows = visible_rows();
         int maxtop = nlines > rows ? nlines - rows : 0;
         int c = ev.x, old = top;
+        if (c == 3) {                       /* Ctrl+C: copy the top visible line */
+            wm_req_t r; memset(&r, 0, sizeof(r));
+            r.op = WM_CLIPBOARD_SET;
+            const char *ln = &fbuf[line_off[top]];
+            int i = 0; for (; ln[i] && i < 47; i++) r.str[i] = ln[i];
+            r.str[i] = '\0';
+            msgsend(wm, &r, sizeof(r));
+            continue;
+        }
         switch (c) {
         case KEY_DOWN: case 'j': case '\n': top++;            break;
         case KEY_UP:   case 'k':            top--;            break;

@@ -32,7 +32,8 @@ keys), with a **double-buffered, damage-driven compositor** that repaints only t
 rectangles that change rather than the whole screen on every event. It is **not**
 yet a daily-driver OS (no external networking yet — loopback only; a basic
 permission model — uid + rwx — but no login/groups). The desktop environment is
-nearly complete; the last v1.1 piece is a clipboard (10.4), after which come
+nearly complete (UI scaling, runtime display-resolution switching, shared-memory
+window surfaces and a shared clipboard are all in); after which come
 networking (virtio-net → TCP) and shared-memory surfaces in v2.0.
 
 - **Current version:** v1.1.2

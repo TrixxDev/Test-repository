@@ -113,7 +113,15 @@ server branches on `op`.)
   accent, writes them to `/disk/settings.cfg` (just the VFS), and sends the
   windowserver `WM_RELOAD_SETTINGS`; the server re-reads the file (also at boot)
   and re-themes the desktop. A System pane shows `sysinfo`. Proof: `make
-  demo-settings`. **10.4 Clipboard** (`WM_CLIPBOARD_*`) is the last v1.1 piece.
+  demo-settings`.
+- **10.4 — Clipboard. DONE.** The window server holds a small bounded, last-writer-wins
+  text clipboard. Apps copy with `WM_CLIPBOARD_SET` (text in `req.str`) and paste with
+  `WM_CLIPBOARD_GET` (the server replies with the same op + the text). The keyboard
+  driver now tracks **Control** (`drivers/keyboard.c`): `Ctrl`+letter yields control
+  codes 1–26, so **Ctrl+C / Ctrl+V** flow through the normal `WM_KEY` pipeline.
+  The Terminal copies its input line and pastes into it; the Finder copies the
+  selected file name; the Viewer copies the top visible line. Cross-app verified
+  (Finder → Ctrl+C → Terminal → Ctrl+V).
 - **9.5 — Close button. DONE.** A **press** on the red title-bar light
   (`wm_in_close_button`, the left traffic light at `(x+16, y+14)`, drawn with a
   small dark "×") destroys the window (`wm_destroy`) and sends its `owner` a
