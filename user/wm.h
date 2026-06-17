@@ -44,6 +44,7 @@ typedef struct {
     int            maximized;   /* 1 = filling the screen (saved geometry in s*)    */
     int            sx, sy, sw, sh;  /* geometry to restore from maximize           */
     int            dirty;       /* 1 = the cached presentation surface needs a rebuild */
+    int            shm_id;      /* shared-surface id (server owns it), or -1 */
     const char    *title;
     gfx_surface_t *content;     /* the app's content surface (w x h, packed) */
     gfx_surface_t *present;     /* cached composed window (chrome+content), or NULL */
@@ -128,6 +129,12 @@ int  wm_window_of_owner(wm_state_t *st, int owner);
  * or NULL; the server frees it on destroy so closing a window leaks nothing. */
 void *wm_content_ptr(wm_state_t *st, int id);
 
+/* Shared-surface id of window `id` (-1 if its content is an ordinary malloc'd
+ * buffer); set it after creating a WM_F_SHM window. The server uses it to free the
+ * shared object (shm_destroy) instead of free() on destroy. */
+int  wm_shm_id(wm_state_t *st, int id);
+void wm_set_shm(wm_state_t *st, int id, int shm_id);
+
 /* ---- per-window surface caching ----
  * Each decorated window's fully-composed pixels (shadow + chrome + content) are
  * cached in a server-owned presentation surface, so a drag/move just *blits* it
@@ -191,6 +198,9 @@ void wm_present(wm_state_t *st, gfx_surface_t *screen);
 #define WM_F_DOCK       1   /* borderless, pinned bottom-center, always on top,
                              * excluded from keyboard focus, receives WM_POINTER */
 #define WM_F_RESIZABLE  2   /* the app handles WM_RESIZE, so it can be maximized  */
+#define WM_F_SHM        4   /* content is a shared-memory surface: the server
+                             * allocates it, the client maps the id from the reply
+                             * and renders into it directly (no WM_DRAW_* IPC)     */
 
 enum {
     WM_CREATE = 1,   /* app -> server: new window (w,h,title,flags); reply = id */
@@ -226,4 +236,5 @@ typedef struct {
 typedef struct {
     int status;            /* 0 = ok, <0 = error */
     int win;               /* assigned window id (on WM_CREATE) */
+    int shm;               /* shared-surface id to map (WM_F_SHM), else -1 */
 } wm_rep_t;

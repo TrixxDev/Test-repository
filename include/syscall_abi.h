@@ -47,6 +47,9 @@
                         /*   set>=100 from root updates it; else reads   */
 #define SYS_FBMODE  34  /* fb_set_mode(w, h) -> 1/0 (root only); resize   */
                         /*   the display at runtime (Bochs-VBE path)      */
+#define SYS_SHMGET  35  /* shm_create(size) -> id / -1 (shared surface)   */
+#define SYS_SHMMAP  36  /* shm_map(id) -> user vaddr / 0                  */
+#define SYS_SHMDEL  37  /* shm_destroy(id) -> 0 / -1                      */
 
 /* ---- system info (SYS_SYSINFO) ---- */
 struct sysinfo {
@@ -83,7 +86,7 @@ struct dirent {
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
 
-#define SYS_MAX    35   /* one past the last valid syscall number    */
+#define SYS_MAX    38   /* one past the last valid syscall number    */
 
 /* ---- socket layer (AF_LOOPBACK only for now) ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

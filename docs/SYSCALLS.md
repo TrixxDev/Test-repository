@@ -40,6 +40,9 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 32 | `sleep` | `msleep(int ms) -> 0` | Block the calling thread for ~`ms` milliseconds (10 ms granularity; PIT is 100 Hz). Backed by a PIT-driven sleeper queue in the scheduler (no busy-wait). Used by the window server's fixed-cadence render ticker. |
 | 33 | `uiscale` | `ui_scale() -> pct`, `ui_scale_set(pct)` | Read or publish the UI scale (percent, 100..200). `set` >= 100 from **root** updates the kernel's canonical value (the window server publishes the user's Settings → Display choice); any other call just reads it. GUI apps query it (`ui_scale()`) to lay out their content to match the scaled chrome. |
 | 34 | `fbmode` | `fb_set_mode(w, h) -> 1/0` | Change the display resolution at runtime (**root only**; Bochs-VBE path). Re-runs the VBE mode-set and re-maps the (same physical) framebuffer at the new geometry; the window server then re-maps it (`fb_map`), resizes its buffers and repaints. Returns 0 if unsupported (e.g. a fixed GRUB framebuffer). |
+| 35 | `shmget` | `shm_create(size) -> id/-1` | Allocate a shared-memory object of `size` bytes (whole frames). The creator owns its lifetime; used by the window server for zero-copy window surfaces. |
+| 36 | `shmmap` | `shm_map(id) -> vaddr/0` | Map shared object `id` into the caller at its fixed slot address (same address in every mapper). Both the server and the client map the same id. Frames carry `PAGE_SHARED`, so a mapper's exit unmaps but never frees them. |
+| 37 | `shmdel` | `shm_destroy(id) -> 0/-1` | Unmap object `id` from the caller and release its frames (the server, on window destroy). A creator's exit also releases its objects. |
 
 ## Notes
 

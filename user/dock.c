@@ -54,34 +54,9 @@ static const struct {
     { 'S', GFX_RGB(0xa8, 0x6f, 0xff), 0               },  /* Settings */
 };
 
+static gfx_surface_t surf;      /* the shared content surface (mapped from the server) */
+
 static void wsend(wm_req_t *r) { msgsend(wm, r, sizeof(*r)); }
-
-static void rrect(int x, int y, int w, int h, int radius, uint32_t color)
-{
-    wm_req_t r;
-    memset(&r, 0, sizeof(r));
-    r.op = WM_DRAW_ROUND_RECT; r.win = win;
-    r.x = x; r.y = y; r.w = w; r.h = h; r.flags = radius; r.color = color;
-    wsend(&r);
-}
-
-static void rect(int x, int y, int w, int h, uint32_t color)
-{
-    wm_req_t r;
-    memset(&r, 0, sizeof(r));
-    r.op = WM_DRAW_RECT; r.win = win;
-    r.x = x; r.y = y; r.w = w; r.h = h; r.color = color;
-    wsend(&r);
-}
-
-static void text(int x, int y, const char *s, uint32_t color)
-{
-    wm_req_t r;
-    memset(&r, 0, sizeof(r));
-    r.op = WM_DRAW_TEXT; r.win = win; r.x = x; r.y = y; r.color = color;
-    int i = 0; while (s[i] && i < 47) { r.str[i] = s[i]; i++; } r.str[i] = '\0';
-    wsend(&r);
-}
 
 static int icon_x(int i) { return off_x() + pad() + i * (icon_sz() + gap()); }
 
@@ -101,20 +76,25 @@ static void redraw(int hover)
 {
     int sz = icon_sz(), iy = off_y() + pad();
     int fw = 8 * S / 100, fh = 16 * S / 100;
-    /* Clear the whole (max-size) surface to the color key, then draw the rounded
-     * panel for the current scale, bottom-center within it; the corners + surplus
-     * stay keyed so the wallpaper shows through (no alpha needed). */
-    rect(0, 0, max_w(), max_h(), WM_COLOR_KEY);
-    rrect(off_x(), off_y(), dock_w(), dock_h(), 22 * S / 100, GFX_RGB(0x22, 0x22, 0x2c));
+    /* Client-side rendering: draw straight into the shared surface (no per-shape
+     * WM_DRAW_* IPC) and tell the server to composite with one WM_PRESENT. Clear
+     * the whole (max-size) surface to the color key, then draw the rounded panel
+     * for the current scale, bottom-center within it; the corners + surplus stay
+     * keyed so the wallpaper shows through (no alpha needed). */
+    gfx_fill_rect(&surf, 0, 0, max_w(), max_h(), WM_COLOR_KEY);
+    gfx_fill_round_rect(&surf, off_x(), off_y(), dock_w(), dock_h(), 22 * S / 100,
+                        GFX_RGB(0x22, 0x22, 0x2c));
 
     for (int i = 0; i < ICONS; i++) {
         int ix = icon_x(i);
         if (i == hover)                 /* hover: a light tile behind the icon */
-            rrect(ix - 4 * S / 100, iy - 4 * S / 100, sz + 8 * S / 100, sz + 8 * S / 100,
-                  16 * S / 100, GFX_RGB(0x3c, 0x3c, 0x48));
-        rrect(ix, iy, sz, sz, 14 * S / 100, slots[i].color);
+            gfx_fill_round_rect(&surf, ix - 4 * S / 100, iy - 4 * S / 100,
+                                sz + 8 * S / 100, sz + 8 * S / 100, 16 * S / 100,
+                                GFX_RGB(0x3c, 0x3c, 0x48));
+        gfx_fill_round_rect(&surf, ix, iy, sz, sz, 14 * S / 100, slots[i].color);
         char ch[2] = { slots[i].label, 0 };
-        text(ix + (sz - fw) / 2, iy + (sz - fh) / 2, ch, GFX_RGB(0xff, 0xff, 0xff));
+        gfx_draw_text_s(&surf, ix + (sz - fw) / 2, iy + (sz - fh) / 2, ch,
+                        GFX_RGB(0xff, 0xff, 0xff), S);
     }
 
     wm_req_t r;
@@ -181,7 +161,7 @@ int main(int argc, char **argv)
     wm_rep_t rep;
     memset(&r, 0, sizeof(r));
     r.op = WM_CREATE; r.x = 0; r.y = 0; r.w = max_w(); r.h = max_h();
-    r.flags = WM_F_DOCK;
+    r.flags = WM_F_DOCK | WM_F_SHM;     /* render client-side into a shared surface */
     { const char *t = "Dock"; int i = 0; while (t[i]) { r.str[i] = t[i]; i++; } r.str[i] = 0; }
     wsend(&r);
     int from;
@@ -189,8 +169,19 @@ int main(int argc, char **argv)
         int n = msgrecv(&rep, sizeof(rep), &from);
         if (n >= (int)sizeof(rep) && from == wm) break;
     }
-    if (rep.status != 0 || rep.win <= 0) { fprintf(2, "dock: create failed\n"); return 1; }
+    if (rep.status != 0 || rep.win <= 0 || rep.shm < 0) {
+        fprintf(2, "dock: create failed\n"); return 1;
+    }
     win = rep.win;
+
+    /* Map the shared content surface the server allocated for us and draw into it. */
+    void *px = shm_map(rep.shm);
+    if (!px) { fprintf(2, "dock: shm map failed\n"); return 1; }
+    surf.pixels = (uint8_t *)px;
+    surf.width  = max_w();
+    surf.height = max_h();
+    surf.pitch  = max_w() * 4;
+    surf.bpp    = 32;
 
     int hover = -1, prev_buttons = 0;
     redraw(hover);

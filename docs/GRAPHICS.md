@@ -262,6 +262,27 @@ Two invariants, deliberately simple at this stage:
   surfaces (so apps render into the cache directly) and a virtio-gpu/vsync path —
   both deferred.
 
+- **Shared-memory surfaces — zero-copy client rendering:** a GUI client can render
+  straight into the buffer the server composites from, instead of sending a
+  `WM_DRAW_*` message per shape. A small kernel SHM pool (`kernel/shm.c`) backs each
+  surface with physical frames that can be mapped into more than one address space
+  at the same virtual address (`shm_create`/`shm_map`/`shm_destroy`, syscalls
+  35–37). On `WM_CREATE` with `WM_F_SHM` the server allocates the content surface as
+  an SHM object, maps it as the window's content, and returns the id; the client
+  maps the same id and draws into it with the gfx library, then sends a single
+  `WM_PRESENT` (damage only). The compositor path is otherwise unchanged — it blits
+  from the content surface as before, so per-window caching, color-key transparency
+  and damage all still apply. **Lifecycle (no double free):** shared frames' PTEs
+  carry a `PAGE_SHARED` bit, so `vmm_destroy_address_space` *unmaps* but never frees
+  them when a mapper exits; the frames are released exactly once — by the server's
+  `shm_destroy` on window destroy, or by `shm_release_pid` if the creator dies. The
+  **Dock** is the first client converted (fixed-size, borderless — no resize/maximize
+  complications, and it redrew the whole panel + icons on every hover, so it emitted
+  the most per-frame draw IPC). Verified: the Dock renders pixel-for-pixel as before
+  and still launches apps on click; the `PAGE_SHARED` change is leak-free across 50+
+  window create/destroy cycles in the stress test; 100 % host renders + `verify_drag`
+  are unaffected. (Decorated, resizable clients can adopt shared surfaces later;
+  that needs an SHM realloc on maximize, deferred.)
 - **Display resolution — runtime mode switching:** the resolution is selectable in
   **Settings → Display** (800×600 / 1024×768 / 1280×720 / 1366×768 / 1920×1080),
   saved as `resolution=WxH` in `/disk/settings.cfg`. It works because the boot path

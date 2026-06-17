@@ -80,6 +80,11 @@ user/wserver.elf: user/wserver.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) $
 	$(CC) $(UCFLAGS) -c user/wserver.c -o user/wserver.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/wserver.o $(WM_OBJ) $(LIBC_OBJ) -o $@
 
+# the Dock renders client-side into a shared surface, so it links the gfx library.
+user/dock.elf: user/dock.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) user/gfx_u.o user/user.ld
+	$(CC) $(UCFLAGS) -c user/dock.c -o user/dock.o
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/dock.o user/gfx_u.o $(LIBC_OBJ) -o $@
+
 $(EMBEDDED): user/init.elf tools/bin2c.py
 	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
 

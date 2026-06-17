@@ -336,9 +336,12 @@ static void destroy_window(int id)
 {
     void *px = wm_content_ptr(&st, id);
     void *pp = wm_present_ptr(&st, id);     /* cached presentation surface, if any */
+    int  sid = wm_shm_id(&st, id);          /* shared content surface, if any */
     wm_destroy(&st, id);
-    if (px)
-        free(px);
+    if (sid >= 0)
+        shm_destroy(sid);                   /* shared content: release the SHM object */
+    else if (px)
+        free(px);                           /* ordinary content buffer */
     if (pp)
         free(pp);
     if (id == dock_win)
@@ -664,10 +667,26 @@ int main(int argc, char **argv)
                 y =  screen.height - req.h - 16;
             }
             int resizable = (req.flags & WM_F_RESIZABLE) != 0;
-            void *px = (req.w > 0 && req.h > 0) ? malloc((size_t)req.w * req.h * 4) : 0;
+            int shm = (req.flags & WM_F_SHM) != 0;
+            /* Content buffer: a shared-memory surface (client renders into it
+             * directly, zero-copy) or an ordinary server-owned buffer. */
+            int sid = -1;
+            void *px = 0;
+            if (req.w > 0 && req.h > 0) {
+                if (shm) {
+                    sid = shm_create(req.w * req.h * 4);
+                    if (sid >= 0) px = shm_map(sid);
+                } else {
+                    px = malloc((size_t)req.w * req.h * 4);
+                }
+            }
             int id = px ? wm_create(&st, x, y, req.w, req.h, req.str, px, from, !dock, resizable) : -1;
-            if (id <= 0 && px)
-                free(px);               /* slot full / bad size: don't leak the buffer */
+            if (id <= 0) {              /* slot full / bad size: don't leak the buffer */
+                if (sid >= 0) shm_destroy(sid);
+                else if (px)  free(px);
+            } else if (sid >= 0) {
+                wm_set_shm(&st, id, sid);
+            }
             if (id > 0 && dock) {
                 wm_set_top(&st, id);    /* the Dock floats above ordinary windows */
                 dock_win = id;
@@ -679,7 +698,7 @@ int main(int argc, char **argv)
                 if (ppx)                /* on OOM, present stays NULL -> immediate path */
                     wm_set_present(&st, id, ppx, fw, fh);
             }
-            wm_rep_t rep = { id > 0 ? 0 : -1, id };
+            wm_rep_t rep = { id > 0 ? 0 : -1, id, id > 0 ? sid : -1 };
             msgsend(from, &rep, sizeof(rep));
             break;
         }

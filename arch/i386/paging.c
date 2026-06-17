@@ -190,8 +190,8 @@ void vmm_destroy_address_space(uint32_t pd_phys)
         uint32_t pt_frame = pd_user[i] & 0xFFFFF000;
         uint32_t *pt = (uint32_t *)vmm_temp_map(pt_frame);
         for (int j = 0; j < 1024; j++)
-            if (pt[j] & PAGE_PRESENT)
-                pmm_free_frame(pt[j] & 0xFFFFF000);
+            if ((pt[j] & PAGE_PRESENT) && !(pt[j] & PAGE_SHARED))
+                pmm_free_frame(pt[j] & 0xFFFFF000);   /* shared frames: owned by SHM */
         vmm_temp_unmap();
         pmm_free_frame(pt_frame);
     }

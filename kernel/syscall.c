@@ -6,6 +6,7 @@
 #include "fb.h"
 #include "mouse.h"
 #include "io.h"
+#include "shm.h"
 
 /* Convention: eax = syscall number, ebx/ecx/edx = arguments. The return value
  * is written back into regs->eax (restored to the user's eax by the stub). */
@@ -163,6 +164,18 @@ void syscall_handler(registers_t *regs)
             break;
         }
         regs->eax = (uint32_t)fb_set_mode((uint32_t)regs->ebx, (uint32_t)regs->ecx);
+        break;
+
+    case SYS_SHMGET:
+        regs->eax = (uint32_t)shm_create((uint32_t)regs->ebx);
+        break;
+
+    case SYS_SHMMAP:
+        regs->eax = shm_map((int)regs->ebx);
+        break;
+
+    case SYS_SHMDEL:
+        regs->eax = (uint32_t)shm_destroy((int)regs->ebx);
         break;
 
     case SYS_HALT:

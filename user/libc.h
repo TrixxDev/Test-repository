@@ -54,6 +54,10 @@ static inline void *fb_map(unsigned *info)               { return (void *)_sysca
 static inline int   fb_active(void)                      { return _syscall(SYS_FBACTIVE, 0, 0, 0); }
 /* Change the display resolution at runtime (root/window server; Bochs-VBE path). */
 static inline int   fb_set_mode(int w, int h)           { return _syscall(SYS_FBMODE, w, h, 0); }
+/* Shared-memory surfaces: create (server), map (server + client), destroy (server). */
+static inline int   shm_create(int size)                { return _syscall(SYS_SHMGET, size, 0, 0); }
+static inline void *shm_map(int id)                     { return (void *)_syscall(SYS_SHMMAP, id, 0, 0); }
+static inline int   shm_destroy(int id)                 { return _syscall(SYS_SHMDEL, id, 0, 0); }
 /* Block for one pointer event; fills info[0..2] = {dx, dy, buttons}. */
 static inline int   mouse_read(int *info)                { return _syscall(SYS_MOUSE, (int)info, 0, 0); }
 /* Read directory `path` entry `index` into *out: 1 = filled, 0 = past end, -1 err. */

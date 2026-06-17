@@ -190,6 +190,7 @@ int wm_create(wm_state_t *st, int x, int y, int w, int h, const char *title,
         st->win[i].shaded = 0;
         st->win[i].maximized = 0;
         st->win[i].dirty = 1;               /* needs a first surface build */
+        st->win[i].shm_id = -1;             /* ordinary buffer unless set shared */
         st->win[i].title = st->titles[i];
         st->win[i].content = &st->surf[i];
         st->psurf[i].pixels = (uint8_t *)0; /* server attaches a buffer via wm_set_present */
@@ -373,6 +374,19 @@ void *wm_content_ptr(wm_state_t *st, int id)
 {
     int s = slot_of(st, id);
     return s < 0 ? (void *)0 : st->surf[s].pixels;
+}
+
+int wm_shm_id(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    return s < 0 ? -1 : st->win[s].shm_id;
+}
+
+void wm_set_shm(wm_state_t *st, int id, int shm_id)
+{
+    int s = slot_of(st, id);
+    if (s >= 0)
+        st->win[s].shm_id = shm_id;
 }
 
 /* ---- per-window surface caching ---- */

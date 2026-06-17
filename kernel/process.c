@@ -11,6 +11,7 @@
 #include "pipe.h"
 #include "socket.h"
 #include "uaccess.h"
+#include "shm.h"
 
 #define MAX_PROCS    32
 #define USTACK_TOP   0xC0000000u
@@ -957,6 +958,7 @@ void process_exit(int code)
     /* Drop any pending messages and named-service registrations. */
     unregister_pid(p->pid);
     mailbox_clear(p);
+    shm_release_pid(p->pid);            /* free any shared-memory objects it owns */
 
     vmm_switch_address_space(vmm_kernel_directory());
     vmm_destroy_address_space(p->pd_phys);

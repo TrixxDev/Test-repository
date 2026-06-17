@@ -5,6 +5,11 @@
 #define PAGE_PRESENT 0x1
 #define PAGE_WRITE   0x2
 #define PAGE_USER    0x4
+/* OS-available PTE bit (bit 9): marks a frame as shared memory owned by the SHM
+ * subsystem, not by this address space. vmm_destroy_address_space unmaps but does
+ * NOT free such frames, so tearing down one mapper never frees memory another
+ * mapper (or the SHM owner) still uses. */
+#define PAGE_SHARED  0x200
 
 /* Set up the kernel page directory, identity-map low memory, enable paging. */
 void paging_init(void);
