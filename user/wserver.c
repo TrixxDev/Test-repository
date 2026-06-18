@@ -296,6 +296,15 @@ static void mark_window(int id)
         mark_dmg(x, y, w, h);
 }
 
+/* ---- display backend frame boundaries ----
+ * Bracket the production of one frame. With the software/RAM framebuffer the
+ * mapped LFB is scanned out directly, so flushing is implicit and these stay
+ * no-ops. A future VirtIO GPU backend hooks resource-transfer / flush /
+ * page-flip / vblank-wait here, so render_frame (below) never has to change —
+ * the GPU becomes a backend swap, not a compositor rewrite. */
+static void video_begin_frame(void) { /* RAM backend: nothing to acquire */ }
+static void video_end_frame(void)   { /* RAM backend: the LFB is already live */ }
+
 /* Paint one frame from the accumulated dirty state. Driven by WM_TICK at a fixed
  * cadence, fully decoupled from the input rate: a fast mouse stream only updates
  * state + records damage, and nothing reaches the framebuffer until the next
@@ -307,6 +316,8 @@ static void render_frame(void)
     int cursor_moved = (st.cursor_x != rendered_cx || st.cursor_y != rendered_cy);
     if (!g_full_dirty && !g_scene_dirty && !cursor_moved)
         return;
+
+    video_begin_frame();
 
     /* Rebuild any window whose content/state changed since the last frame; a
      * plain drag/move dirties nothing here, so it stays a pure blit. */
@@ -323,6 +334,8 @@ static void render_frame(void)
             flush(g_dmg_x, g_dmg_y, g_dmg_w, g_dmg_h);
         flush(st.cursor_x, st.cursor_y, WM_CURSOR_W, WM_CURSOR_H);   /* draw new cursor */
     }
+    video_end_frame();
+
     rendered_cx = st.cursor_x;
     rendered_cy = st.cursor_y;
     g_full_dirty = g_scene_dirty = 0;

@@ -7,12 +7,19 @@
 #pragma once
 #include <stdint.h>
 
+/* Where a surface's pixels live. Today everything is plain RAM scanned out of the
+ * linear framebuffer (SURFACE_RAM == 0, so a zero-initialized surface is RAM by
+ * default). A future VirtIO GPU / GL backend tags its surfaces here, so the
+ * compositor can branch on the backend instead of being rewritten. */
+enum { SURFACE_RAM = 0, SURFACE_VIRTIO_GPU = 1, SURFACE_GL = 2 };
+
 typedef struct {
     uint8_t *pixels;    /* base address of the pixel buffer            */
     int      width;     /* pixels                                      */
     int      height;    /* pixels                                      */
     int      pitch;     /* bytes per scanline                          */
     int      bpp;       /* bits per pixel (32 supported)               */
+    int      backend;   /* SURFACE_RAM (default) / SURFACE_VIRTIO_GPU / SURFACE_GL */
 } gfx_surface_t;
 
 #define GFX_RGB(r, g, b) (((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b))
