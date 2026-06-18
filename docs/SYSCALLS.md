@@ -13,14 +13,14 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 5  | `exec`   | `exec(const char *path, char **argv)` | Replace the process image. No return on success. |
 | 6  | `wait`   | `wait(int *status, int flags) -> pid` | Reap an exited child. Blocks unless `flags & WNOHANG` (then `0` if none ready). `-1` if no children. |
 | 7  | `open`   | `open(const char *path, int flags) -> fd` | Open a VFS path. `flags` is the access mode (`O_RDONLY`/`O_WRONLY`/`O_RDWR`); the open is permission-checked (`VFS_R`/`VFS_W`). |
-| 8  | `read`   | `read(int fd, void *buf, uint len) -> n` | Read; `0` = EOF. May block (console/pipe). |
-| 9  | `write`  | `write(int fd, const void *buf, uint len) -> n` | Write. |
+| 8  | `read`   | `read(int fd, void *buf, uint len) -> n` | Read; `0` = EOF. May block (console/pipe). Requires the fd was opened readable; `buf` is validated to lie in user space. |
+| 9  | `write`  | `write(int fd, const void *buf, uint len) -> n` | Write. Requires the fd was opened writable; `buf` is validated to lie in user space. |
 | 10 | `close`  | `close(int fd)` | Close a descriptor. |
 | 11 | `getpid` | `getpid() -> pid` | Current process id. |
 | 12 | `pipe`   | `pipe(int fd[2]) -> 0/-1` | Create a pipe (`fd[0]` read, `fd[1]` write). |
 | 13 | `dup2`   | `dup2(int oldfd, int newfd) -> newfd` | Duplicate a descriptor onto `newfd`. |
 | 14 | `sbrk`   | `sbrk(int incr) -> old_brk` | Grow the user heap; returns the previous break. |
-| 15 | `msgsend`| `msgsend(int pid, const void *buf, int len) -> 0/-1` | Send an IPC message to a process. |
+| 15 | `msgsend`| `msgsend(int pid, const void *buf, int len) -> 0/-1` | Send an IPC message to a process. `len` is clamped to `MSG_MAX` and `buf` is validated to lie in user space; the mailbox is bounded (`MBOX_LIMIT`) and `from` is stamped by the kernel (not forgeable). |
 | 16 | `msgrecv`| `msgrecv(void *buf, int len, int *from) -> n` | Block until a message arrives; returns length, sets sender pid. OR `MSG_NOWAIT` into `len` (libc `msgrecv_nb`) to return `-1` immediately when the mailbox is empty instead of blocking — lets a single-mailbox event loop drain a burst. |
 | 17 | `register` | `register(const char *name, uint mode) -> 0/-1` | Register the current pid under a service name with a permission `mode` (libc `svc_register` defaults to `0644`). Re-registering a name is allowed only for its owner or root. |
 | 18 | `lookup` | `lookup(const char *name) -> pid/-1` | Resolve a service name to a pid. Requires "read" permission on the service (`-1` if denied or absent). |

@@ -49,13 +49,25 @@ static uint32_t fat_next(uint32_t cluster)
     return val & 0x0FFFFFFF;
 }
 
+/* A data cluster is valid iff it is in [2, 1 + count_clusters]; reject anything
+ * else so cluster_lba() can never address outside the data region (a corrupt FAT
+ * entry or stray first-cluster otherwise reads/writes off the disk). */
+static int cluster_valid(uint32_t cluster)
+{
+    return cluster >= 2 && cluster < 2 + fat.count_clusters;
+}
+
 static int read_cluster(uint32_t cluster, uint8_t *buf)
 {
+    if (!cluster_valid(cluster))
+        return -1;
     return ata_read_sectors(cluster_lba(cluster), fat.sec_per_clus, buf);
 }
 
 static int write_cluster(uint32_t cluster, const uint8_t *buf)
 {
+    if (!cluster_valid(cluster))
+        return -1;
     return ata_write_sectors(cluster_lba(cluster), fat.sec_per_clus, buf);
 }
 
@@ -177,7 +189,7 @@ static int fat_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf)
 {
     if (off >= node->size)
         return 0;
-    if (off + size > node->size)
+    if (size > node->size - off)            /* clamp without off+size overflow */
         size = node->size - off;
 
     uint32_t clus_bytes = (uint32_t)fat.bytes_per_sec * fat.sec_per_clus;
@@ -210,8 +222,9 @@ static vfs_node_t *dir_scan(vfs_node_t *dir, const char *match83,
     uint8_t cbuf[CLUSTER_MAX];
     uint32_t cluster = dir->inode;
     int index = 0;
+    uint32_t guard = fat.count_clusters + 1;    /* a chain can't exceed all clusters */
 
-    while (cluster >= 2 && cluster < FAT_EOC) {
+    while (cluster >= 2 && cluster < FAT_EOC && guard--) {
         if (read_cluster(cluster, cbuf) != 0)
             break;
         for (uint32_t o = 0; o < clus_bytes; o += 32) {
@@ -300,6 +313,8 @@ static int fat_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_
         return -1;
     if (size == 0)
         return 0;
+    if (size > 0xFFFFFFFFu - off)           /* off + size would overflow */
+        return -1;
 
     uint32_t clus_bytes = (uint32_t)fat.bytes_per_sec * fat.sec_per_clus;
     uint32_t end = off + size;

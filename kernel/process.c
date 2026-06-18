@@ -76,6 +76,11 @@ static int fd_install_role(process_t *p, vfs_node_t *node, int role)
             f->offset = 0;
             f->refcount = 1;
             f->role = role;
+            /* Default access by role; sys_open refines a regular file to its
+             * open mode (O_RDONLY/WRONLY/RDWR). */
+            f->access = (role == FD_PIPE_R) ? VFS_R
+                      : (role == FD_PIPE_W) ? VFS_W
+                      : (VFS_R | VFS_W);    /* FD_SOCKET, FD_NORMAL */
             p->fds[fd] = f;
             return fd;
         }
@@ -97,6 +102,7 @@ static void open_standard_streams(process_t *p)
         f->offset = 0;
         f->refcount = 1;
         f->role = FD_NORMAL;
+        f->access = VFS_R | VFS_W;       /* console is readable + writable */
         p->fds[fd] = f;
     }
 }
@@ -224,7 +230,10 @@ int sys_open(const char *path, int flags)
     if (flags & O_TRUNC)
         node->size = 0;     /* logical truncate; the next write persists it */
 
-    return fd_install(process_current(), node);
+    int fd = fd_install(process_current(), node);
+    if (fd >= 0)
+        process_current()->fds[fd]->access = want;  /* enforce the open mode */
+    return fd;
 }
 
 /* Enumerate one directory entry. Returns 1 if *out was filled, 0 past the last
@@ -273,6 +282,12 @@ int sys_read(int fd, void *buf, uint32_t len)
     if (fd < 0 || fd >= MAX_FDS || !p->fds[fd])
         return -1;
     file_t *f = p->fds[fd];
+    if (!(f->access & VFS_R))               /* fd not opened for reading */
+        return -1;
+    if (len && !is_user_addr((uint32_t)buf, len)) {
+        kprintf("[syscall] sys_read: invalid user buffer 0x%x (len=%u)\n", (uint32_t)buf, len);
+        return -1;
+    }
     int n = vfs_read(f->node, f->offset, len, (uint8_t *)buf);
     if (n > 0)
         f->offset += (uint32_t)n;
@@ -285,9 +300,11 @@ int sys_write(int fd, const void *buf, uint32_t len)
     if (fd < 0 || fd >= MAX_FDS || !p->fds[fd])
         return -1;
     file_t *f = p->fds[fd];
+    if (!(f->access & VFS_W))               /* fd not opened for writing */
+        return -1;
 
     /* Validate user buffer pointer before copying */
-    if (!is_user_addr((uint32_t)buf, len)) {
+    if (len && !is_user_addr((uint32_t)buf, len)) {
         kprintf("[syscall] sys_write: invalid user buffer 0x%x (len=%u)\n", (uint32_t)buf, len);
         return -1;
     }
@@ -397,6 +414,8 @@ int sys_msgsend(int pid, const void *buf, int len)
         return -1;
     if (len > MSG_MAX)
         len = MSG_MAX;
+    if (len && !is_user_addr((uint32_t)buf, (size_t)len))
+        return -1;                          /* reject a kernel/garbage buffer */
 
     process_t *dst = find_proc(pid);
     if (!dst)
@@ -435,6 +454,13 @@ int sys_msgrecv(void *buf, int len, int *from)
     int nowait = (len & MSG_NOWAIT) != 0;   /* high bit of len = don't block */
     len &= ~MSG_NOWAIT;
     process_t *p = process_current();
+
+    if (len < 0)
+        return -1;
+    if (len && !is_user_addr((uint32_t)buf, (size_t)len))
+        return -1;                          /* reject a kernel/garbage buffer */
+    if (from && !is_user_addr((uint32_t)from, sizeof(int)))
+        return -1;
 
     __asm__ volatile("cli");
     if (p->mbox_head == NULL && nowait) {

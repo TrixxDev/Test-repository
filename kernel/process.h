@@ -31,6 +31,7 @@ typedef struct file {
     uint32_t    offset;
     int         refcount;
     int         role;       /* FD_NORMAL / FD_PIPE_R / FD_PIPE_W */
+    int         access;     /* VFS_R / VFS_W bits this fd was opened with */
 } file_t;
 
 typedef struct process {
