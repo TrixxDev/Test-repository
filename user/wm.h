@@ -44,6 +44,8 @@ typedef struct {
     int            shaded;      /* 1 = window-shaded (collapsed to its title bar)   */
     int            maximized;   /* 1 = filling the screen (saved geometry in s*)    */
     int            sx, sy, sw, sh;  /* geometry to restore from maximize           */
+    int            fullscreen;  /* 1 = covering the whole framebuffer, no chrome    */
+    int            fs_x, fs_y, fs_w, fs_h;  /* geometry to restore from fullscreen  */
     int            dirty;       /* 1 = the cached presentation surface needs a rebuild */
     int            shm_id;      /* shared-surface id (server owns it), or -1 */
     const char    *title;
@@ -114,6 +116,18 @@ int  wm_toggle_shade(wm_state_t *st, int id);
  * new content size to *w,*h (the server reallocs the surface to it and sends the
  * app WM_RESIZE); returns 0 if the window is unknown or not resizable. */
 int  wm_toggle_max(wm_state_t *st, int id, int screen_w, int screen_h, int *w, int *h);
+/* Toggle true fullscreen for a decorated window: it covers the whole framebuffer
+ * with no chrome/menubar/dock. On success returns 1 and writes the target content
+ * size to *w,*h (full screen on enter, the saved size on exit); the server reallocs
+ * the surface and sends WM_RESIZE, exactly like maximize. Returns 0 if `id` is not
+ * an eligible (decorated) window. */
+int  wm_toggle_fullscreen(wm_state_t *st, int id, int screen_w, int screen_h, int *w, int *h);
+/* Id of the (single) fullscreen window, or -1. The compositor draws only this. */
+int  wm_fullscreen_id(wm_state_t *st);
+/* 1 if window `id` is fullscreen. */
+int  wm_is_fullscreen(wm_state_t *st, int id);
+/* Blit the fullscreen window `id`'s content over the whole `screen` (no chrome). */
+void wm_draw_fullscreen(wm_state_t *st, gfx_surface_t *screen, int id);
 /* Replace window `id`'s content surface (after the server reallocs it). */
 int  wm_set_content(wm_state_t *st, int id, void *pixels, int w, int h);
 /* Clear the maximized flag without moving (e.g. when the window is dragged). */

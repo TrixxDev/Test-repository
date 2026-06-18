@@ -296,6 +296,51 @@ int wm_toggle_max(wm_state_t *st, int id, int screen_w, int screen_h, int *w, in
     return 1;
 }
 
+int wm_toggle_fullscreen(wm_state_t *st, int id, int screen_w, int screen_h, int *w, int *h)
+{
+    int s = slot_of(st, id);
+    if (s < 0 || !st->win[s].resizable)      /* the app must handle WM_RESIZE */
+        return 0;
+    window_t *win = &st->win[s];
+    win->shaded = 0;
+    if (!win->fullscreen) {
+        win->maximized = 0;                  /* fullscreen supersedes maximize */
+        win->fs_x = win->x; win->fs_y = win->y;
+        win->fs_w = win->content->width; win->fs_h = win->content->height;
+        win->x = 0; win->y = 0;              /* content covers the whole framebuffer */
+        *w = screen_w; *h = screen_h;
+        win->fullscreen = 1;
+    } else {
+        win->x = win->fs_x; win->y = win->fs_y;
+        *w = win->fs_w; *h = win->fs_h;
+        win->fullscreen = 0;
+    }
+    return 1;
+}
+
+int wm_fullscreen_id(wm_state_t *st)
+{
+    for (int i = 0; i < WM_MAX_WINDOWS; i++)
+        if (st->used[i] && st->win[i].visible && st->win[i].fullscreen)
+            return st->win[i].id;
+    return -1;
+}
+
+int wm_is_fullscreen(wm_state_t *st, int id)
+{
+    int s = slot_of(st, id);
+    return (s >= 0) ? st->win[s].fullscreen : 0;
+}
+
+void wm_draw_fullscreen(wm_state_t *st, gfx_surface_t *screen, int id)
+{
+    int s = slot_of(st, id);
+    if (s < 0 || !st->win[s].content)
+        return;
+    gfx_surface_t *c = st->win[s].content;
+    gfx_blit(screen, 0, 0, (const uint32_t *)c->pixels, c->width, c->height);
+}
+
 void wm_clear_maximized(wm_state_t *st, int id)
 {
     int s = slot_of(st, id);

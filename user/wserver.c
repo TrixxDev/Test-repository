@@ -46,7 +46,7 @@ typedef struct {
 #define MENU_W       200
 #define MENU_ITEM_H  26
 #define MENU_PAD     6
-#define MENU_N       4
+#define MENU_N       5
 
 /* The Aurora menu (chrome) scales with the desktop UI scale; sc() scales a base
  * literal, and the menu bar height comes from desktop_menubar_h(). At 100% these
@@ -143,6 +143,7 @@ static void load_settings(void)
 static const char *menu_items[MENU_N] = {
     "About AuroraOS",
     "Settings...",
+    "Enter Full Screen",
     "Close All Windows",
     "Shut Down",
 };
@@ -212,6 +213,12 @@ static void rebuild_bg(void)
  * Call only when the scene actually changes. */
 static void compose(void)
 {
+    int fs = wm_fullscreen_id(&st);
+    if (fs >= 0) {                       /* a fullscreen window owns the whole screen:
+                                          * no desktop, other windows, dock, or menu */
+        wm_draw_fullscreen(&st, &back, fs);
+        return;
+    }
     memcpy(back.pixels, bg.pixels, (size_t)back.pitch * back.height);
     wm_composite_windows(&st, &back);
     draw_menu(&back);
@@ -224,6 +231,8 @@ static void compose(void)
  * the damage rect is later flushed, the result there is identical to compose(). */
 static void compose_dmg(int rx, int ry, int rw, int rh)
 {
+    int fs = wm_fullscreen_id(&st);
+    if (fs >= 0) { wm_draw_fullscreen(&st, &back, fs); return; }
     if (rx < 0) { rw += rx; rx = 0; }
     if (ry < 0) { rh += ry; ry = 0; }
     if (rx + rw > back.width)  rw = back.width  - rx;
@@ -291,6 +300,10 @@ static void mark_dmg(int x, int y, int w, int h)
 /* Damage window `id`'s on-screen footprint (used before *and* after it changes). */
 static void mark_window(int id)
 {
+    if (wm_is_fullscreen(&st, id)) {        /* a fullscreen window owns the screen */
+        mark_full();
+        return;
+    }
     int x, y, w, h;
     if (wm_window_bounds(&st, id, &x, &y, &w, &h))
         mark_dmg(x, y, w, h);
@@ -465,8 +478,21 @@ static void do_shutdown(void)
     halt();                             /* no return */
 }
 
+/* Toggle true fullscreen for window `id` (Aurora menu / Esc): the app's content
+ * fills the framebuffer with no chrome, menu, or dock; the surface is reallocated
+ * (the app repaints via WM_RESIZE) and the whole screen is redrawn. */
+static void toggle_fullscreen(int id)
+{
+    int nw, nh;
+    if (!wm_toggle_fullscreen(&st, id, screen.width, screen.height, &nw, &nh))
+        return;
+    resize_window(id, nw, nh);          /* realloc content + send WM_RESIZE */
+    mark_full();
+}
+
 /* Run an Aurora-menu item. (0) About -> Viewer on ABOUT.TXT, (1) Settings,
- * (2) close every window but the Dock, (3) shut down. */
+ * (2) fullscreen the focused window, (3) close every window but the Dock,
+ * (4) shut down. */
 static void menu_action(int item)
 {
     if (item == 0) {
@@ -476,6 +502,11 @@ static void menu_action(int item)
         char *argv[] = { "/disk/SETTINGS.ELF", 0 };
         wm_spawn(argv);
     } else if (item == 2) {
+        int owner = wm_focus_owner(&st);            /* fullscreen the front window */
+        int id = (owner > 0) ? wm_window_of_owner(&st, owner) : -1;
+        if (id > 0)
+            toggle_fullscreen(id);
+    } else if (item == 3) {
         int id;
         while ((id = wm_first_window_except(&st, dock_win)) > 0) {
             int owner = wm_owner_of(&st, id);
@@ -487,7 +518,7 @@ static void menu_action(int item)
                 msgsend(owner, &bye, sizeof(bye));
             }
         }
-    } else if (item == 3) {
+    } else if (item == 4) {
         do_shutdown();                  /* no return */
     }
 }
@@ -824,9 +855,15 @@ int main(int argc, char **argv)
             break;
         }
         case WM_KEY: {
-            /* Deliver the key to the focused window's app (the app redraws via
-             * DRAW_* + PRESENT). If that app turns out to be dead, deliver()
-             * reaps its window(s) and we must recompose. */
+            /* Esc leaves fullscreen (the menubar is hidden then, so the menu can't
+             * be used to exit). Otherwise deliver the key to the focused window's
+             * app (it redraws via DRAW_* + PRESENT); if that app is dead, deliver()
+             * reaps its window(s) and we recompose. */
+            int fsid = wm_fullscreen_id(&st);
+            if (fsid >= 0 && req.x == 27) {
+                toggle_fullscreen(fsid);
+                break;
+            }
             int owner = wm_focus_owner(&st);
             if (deliver(owner, &req, sizeof(req)))
                 mark_full();
@@ -898,9 +935,15 @@ int main(int argc, char **argv)
             int press   =  (buttons & 1) && !(prev_buttons & 1);
             int release = !(buttons & 1) &&  (prev_buttons & 1);
 
+            /* While a window is fullscreen there is no menubar/chrome/dock: drop any
+             * drag and route the pointer straight to the fullscreen app (below). */
+            int fs = wm_fullscreen_id(&st);
+            if (fs >= 0)
+                drag.active = 0;
+
             /* --- Aurora system menu (chrome, above every window) --- */
             int menu_consumed = 0;
-            if (press && in_aurora_menu(st.cursor_x, st.cursor_y)) {
+            if (fs < 0 && press && in_aurora_menu(st.cursor_x, st.cursor_y)) {
                 menu_open = !menu_open;          /* toggle the dropdown */
                 menu_hover = -1;
                 mark_full(); menu_consumed = 1;
@@ -922,7 +965,7 @@ int main(int argc, char **argv)
             /* Chrome interactions (raise / drag / close) apply only to ordinary
              * decorated windows; the Dock just receives the pointer event below.
              * Skipped when the menu consumed the click. */
-            if (press && !menu_consumed && hit > 0 && wm_is_decorated(&st, hit)) {
+            if (fs < 0 && press && !menu_consumed && hit > 0 && wm_is_decorated(&st, hit)) {
                 int id = hit, cx = st.cursor_x, cy = st.cursor_y;
                 wm_raise(&st, id);                  /* click-to-focus first */
                 mark_window(id);                    /* footprint before any change */
@@ -973,7 +1016,19 @@ int main(int argc, char **argv)
              * If that app is dead, deliver() reaps its window (e.g. a killed Dock
              * vanishes the next time the cursor passes over where it was).
              * Skipped when the menu consumed this click. */
-            if (hit > 0 && !drag.active && !menu_consumed) {
+            if (fs >= 0) {
+                /* Fullscreen: content covers the screen at (0,0), no chrome offset,
+                 * so screen coords are already content-local. */
+                wm_req_t pe;
+                memset(&pe, 0, sizeof(pe));
+                pe.op  = WM_POINTER;
+                pe.win = fs;
+                pe.x   = st.cursor_x;
+                pe.y   = st.cursor_y;
+                pe.w   = buttons;
+                if (deliver(wm_owner_of(&st, fs), &pe, sizeof(pe)))
+                    mark_full();
+            } else if (hit > 0 && !drag.active && !menu_consumed) {
                 int ox, oy;
                 if (wm_content_origin(&st, hit, &ox, &oy)) {
                     wm_req_t pe;

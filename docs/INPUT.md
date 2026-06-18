@@ -125,10 +125,18 @@ server branches on `op`.)
   buffer as chrome, above all windows). A press on an item runs it and closes the
   menu; a press elsewhere just closes it; hovering highlights items. Actions:
   **About** → spawn the Viewer on `ABOUT.TXT`; **Settings** → spawn the settings
-  app (both via a windowserver double-`fork`+`exec`); **Close All Windows** →
-  destroy every window but the Dock; **Shut Down** → paint a final screen + the
-  `halt` syscall. Lives in the windowserver so it survives a dead Dock.
-  Proof: `make demo-menu`.
+  app (both via a windowserver double-`fork`+`exec`); **Enter Full Screen** →
+  fullscreen the focused window; **Close All Windows** → destroy every window but
+  the Dock; **Shut Down** → paint a final screen + the `halt` syscall. Lives in
+  the windowserver so it survives a dead Dock. Proof: `make demo-menu`.
+- **Full screen. DONE.** A resizable window can go true fullscreen (Aurora menu →
+  *Enter Full Screen*): the window server saves its geometry, reallocates the
+  content surface to the **whole framebuffer** (the app repaints via the usual
+  `WM_RESIZE`) and the compositor draws only that window — no title bar, menu bar,
+  Dock, desktop, or other windows (`wm_fullscreen_id`/`wm_draw_fullscreen`). The
+  menu bar is hidden, so **Esc** (intercepted by the server) exits and restores the
+  saved geometry + the desktop. Distinct from maximize (which keeps the chrome and
+  fills only the work area). Intended for a future browser / media player / game.
 - **10.3 — Settings. DONE (v1.1.2).** The Settings app (Aurora menu → Settings)
   takes pointer clicks (`WM_POINTER`) on its Desktop pane to choose a wallpaper +
   accent, writes them to `/disk/settings.cfg` (just the VFS), and sends the
