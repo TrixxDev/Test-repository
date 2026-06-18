@@ -290,7 +290,17 @@ int main(int argc, char **argv)
         int n = msgrecv(&ev, sizeof(ev), &from);
         if (n < (int)sizeof(ev)) continue;
         if (ev.op == WM_DESTROY) { printf("[settings] closed\n"); return 0; }
-        if (ev.op == WM_SCALE) { S = ui_scale(); relayout(); redraw(); continue; }
+        if (ev.op == WM_SCALE) {
+            /* The UI scale changed: re-lay-out to the new scaled size and ask the
+             * server to grow/shrink our window+surface to match, then redraw when
+             * it confirms (WM_RESIZE) — so the larger layout is never clipped. */
+            S = ui_scale(); relayout();
+            wm_req_t rr; memset(&rr, 0, sizeof(rr));
+            rr.op = WM_RESIZE_REQ; rr.w = W; rr.h = H;
+            msgsend(wm, &rr, sizeof(rr));
+            continue;
+        }
+        if (ev.op == WM_RESIZE) { W = ev.w; H = ev.h; redraw(); continue; }
         if (ev.op != WM_POINTER) continue;
         int press = (ev.w & 1) && !(prev & 1);
         prev = ev.w;

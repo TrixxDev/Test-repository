@@ -769,6 +769,24 @@ int main(int argc, char **argv)
             mark_window(req.win);
             break;
         }
+        case WM_RESIZE_REQ: {
+            /* An app asks to resize its own window (e.g. Settings growing on a
+             * UI-scale change). Clamp to the screen so a buggy app can't request a
+             * huge surface; resize_window reallocs and replies with WM_RESIZE. */
+            int id = wm_window_of_owner(&st, from);
+            int nw = req.w, nh = req.h;
+            if (nw < 1) nw = 1; else if (nw > screen.width)  nw = screen.width;
+            if (nh < 1) nh = 1; else if (nh > screen.height) nh = screen.height;
+            if (id > 0) {
+                int ox, oy, ow, oh;
+                int had = wm_window_bounds(&st, id, &ox, &oy, &ow, &oh);
+                resize_window(id, nw, nh);
+                if (had)
+                    mark_dmg(ox, oy, ow, oh);   /* repaint where it used to be */
+                mark_window(id);
+            }
+            break;
+        }
         case WM_DESTROY: {
             if (wm_owner_of(&st, req.win) != from)
                 break;                   /* an app may only destroy its own window */

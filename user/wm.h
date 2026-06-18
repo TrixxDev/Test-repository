@@ -228,6 +228,9 @@ enum {
     WM_CLIPBOARD_GET,/* app -> server: request the clipboard length; server replies
                         with the same op and the length in req.x (the app then
                         reads that many bytes from its clipboard mapping)         */
+    WM_RESIZE_REQ,   /* app -> server: please resize my window to req.w x req.h
+                        (server reallocs the surface and replies with WM_RESIZE).
+                        Appended last: never renumber existing ops.              */
 };
 
 typedef struct {
