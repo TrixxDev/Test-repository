@@ -33,6 +33,7 @@ static int   flen;
 static int   line_off[MAX_LINES];   /* byte offset of each line's start in fbuf */
 static int   nlines;
 static int   top;                   /* index of the first visible line          */
+static int   sel_line = -1;         /* selected line (Ctrl+C copies it), or -1   */
 
 static const char *fpath = "/disk/POEM.TXT";
 
@@ -66,7 +67,10 @@ static void redraw(void)
     for (int r = 0; r < rows; r++) {
         int li = top + r;
         if (li >= nlines) break;
-        text(px, py + r * rh, &fbuf[line_off[li]], GFX_RGB(0x1a, 0x1a, 0x22));
+        if (li == sel_line)                                /* selected line highlight */
+            rect(0, py + r * rh - 1, W, rh, GFX_RGB(0xd6, 0xe6, 0xff));
+        uint32_t fg = (li == sel_line) ? GFX_RGB(0x10, 0x2a, 0x6e) : GFX_RGB(0x1a, 0x1a, 0x22);
+        text(px, py + r * rh, &fbuf[line_off[li]], fg);
     }
     /* A slim scroll indicator on the right when the file overflows the window. */
     if (nlines > rows) {
@@ -192,15 +196,27 @@ int main(int argc, char **argv)
             redraw();
             continue;
         }
+        if (ev.op == WM_POINTER) {          /* click a line to select it */
+            static int prev_btn;
+            int press = (ev.w & 1) && !(prev_btn & 1);
+            prev_btn = ev.w;
+            if (press && ev.y >= pad_y()) {
+                int li = top + (ev.y - pad_y()) / row_h();
+                sel_line = (li >= 0 && li < nlines) ? li : -1;
+                redraw();
+            }
+            continue;
+        }
         if (ev.op != WM_KEY) continue;
 
         int rows = visible_rows();
         int maxtop = nlines > rows ? nlines - rows : 0;
         int c = ev.x, old = top;
-        if (c == 3) {                       /* Ctrl+C: copy the top visible line */
+        if (c == 3) {                       /* Ctrl+C: copy the selected (or top) line */
+            int li = (sel_line >= 0 && sel_line < nlines) ? sel_line : top;
             wm_req_t r; memset(&r, 0, sizeof(r));
             r.op = WM_CLIPBOARD_SET;
-            const char *ln = &fbuf[line_off[top]];
+            const char *ln = &fbuf[line_off[li]];
             int i = 0; for (; ln[i] && i < 47; i++) r.str[i] = ln[i];
             r.str[i] = '\0';
             msgsend(wm, &r, sizeof(r));

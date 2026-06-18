@@ -120,7 +120,8 @@ server branches on `op`.)
   driver now tracks **Control** (`drivers/keyboard.c`): `Ctrl`+letter yields control
   codes 1–26, so **Ctrl+C / Ctrl+V** flow through the normal `WM_KEY` pipeline.
   The Terminal copies its input line and pastes into it; the Finder copies the
-  selected file name; the Viewer copies the top visible line. Cross-app verified
+  selected file name; the Viewer lets you **click a line to select it** (it
+  highlights) and copies the selected (or top) line. Cross-app verified
   (Finder → Ctrl+C → Terminal → Ctrl+V).
 - **9.5 — Close button. DONE.** A **press** on the red title-bar light
   (`wm_in_close_button`, the left traffic light at `(x+16, y+14)`, drawn with a
