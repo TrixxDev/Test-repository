@@ -515,16 +515,17 @@ static void render_ticker(int server_pid)
  * server as a WM_MOUSE message (same single-source event-loop model as keys). */
 static void mouse_helper(int server_pid)
 {
-    int ev[3];                  /* {dx, dy, buttons} */
+    int ev[4];                  /* {x, y, buttons, absolute} */
     for (;;) {
         if (mouse_read(ev) != 0)
             continue;
         wm_req_t m;
         memset(&m, 0, sizeof(m));
         m.op = WM_MOUSE;
-        m.x = ev[0];            /* dx */
-        m.y = ev[1];            /* dy */
+        m.x = ev[0];            /* dx, or absolute x (0..0xFFFF) */
+        m.y = ev[1];            /* dy, or absolute y (0..0xFFFF) */
         m.w = ev[2];            /* button bitmask */
+        m.flags = ev[3];        /* 1 = x/y are absolute (vmmouse) */
         msgsend(server_pid, &m, sizeof(m));
     }
 }
@@ -690,9 +691,14 @@ int main(int argc, char **argv)
                 int n2 = msgrecv_nb(&nx, sizeof(nx), &nf);
                 if (n2 < (int)sizeof(nx))
                     break;                  /* mailbox empty (or short): stop */
-                if (nx.op == WM_MOUSE && nx.w == req.w) {
-                    req.x += nx.x;          /* same buttons: merge the motion */
-                    req.y += nx.y;
+                if (nx.op == WM_MOUSE && nx.w == req.w && nx.flags == req.flags) {
+                    if (req.flags) {        /* absolute: newest position wins */
+                        req.x = nx.x;
+                        req.y = nx.y;
+                    } else {                /* relative: accumulate the deltas */
+                        req.x += nx.x;
+                        req.y += nx.y;
+                    }
                     continue;
                 }
                 stash = nx; stash_from = nf; have_stash = 1;  /* handle next */
@@ -843,8 +849,15 @@ int main(int argc, char **argv)
             /* Update the pointer + window state and *record damage* only — the
              * next WM_TICK paints the frame. Nothing here touches the framebuffer,
              * so a ~200 Hz mouse stream never drives ~200 Hz compositing. */
-            st.cursor_x += req.x;
-            st.cursor_y += req.y;
+            if (req.flags) {
+                /* Absolute (vmmouse): scale 0..0xFFFF to the *current* mode so
+                 * the cursor lands on the host pointer at any resolution. */
+                st.cursor_x = req.x * (screen.width  - 1) / 0xFFFF;
+                st.cursor_y = req.y * (screen.height - 1) / 0xFFFF;
+            } else {
+                st.cursor_x += req.x;
+                st.cursor_y += req.y;
+            }
             if (st.cursor_x < 0) st.cursor_x = 0;
             if (st.cursor_y < 0) st.cursor_y = 0;
             if (st.cursor_x > screen.width - 1)  st.cursor_x = screen.width - 1;

@@ -39,6 +39,20 @@ static void idle_thread(void)
 extern const unsigned char user_elf[];
 extern const unsigned int  user_elf_len;
 
+/* True if `word` appears in the (space-separated) Multiboot command line. */
+static int cmdline_has_word(const multiboot_info_t *mb, const char *word)
+{
+    if (!(mb->flags & MULTIBOOT_FLAG_CMDLINE) || !mb->cmdline)
+        return 0;
+    for (const char *cl = (const char *)mb->cmdline; *cl; cl++) {
+        const char *a = cl, *b = word;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b)
+            return 1;
+    }
+    return 0;
+}
+
 static void banner(void)
 {
     terminal_setcolor(VGA_LIGHT_CYAN, VGA_BLACK);
@@ -69,7 +83,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     kprintf("[boot] interrupts...\n");     isr_install();
     kprintf("[boot] PIT timer...\n");      pit_install(100);
     kprintf("[boot] keyboard...\n");       keyboard_install();
-    kprintf("[boot] PS/2 mouse...\n");     mouse_install();
+    kprintf("[boot] PS/2 mouse...\n");     mouse_install(cmdline_has_word(mb, "abs"));
 
     kprintf("[boot] physical memory...\n");
     pmm_init(mb);

@@ -129,7 +129,7 @@ debug: $(KERNEL) $(DISK)
 run-vbe: $(KERNEL) $(DISK)
 	@echo "Hover inside the QEMU window to capture the mouse (Ctrl+Alt+G to toggle grab)."
 	qemu-system-i386 $(GUI_DISPLAY) -kernel $(KERNEL) -serial stdio -m 64M \
-	    -drive file=$(DISK),format=raw,if=ide -vga std -append vbe
+	    -drive file=$(DISK),format=raw,if=ide -vga std -append "vbe abs"
 
 # Build a GRUB rescue ISO (preferred "real boot": GRUB sets the Multiboot
 # framebuffer, so the desktop comes up with no cmdline flag). Needs grub-mkrescue

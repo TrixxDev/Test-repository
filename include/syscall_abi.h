@@ -36,8 +36,9 @@
 #define SYS_UIDOF   25  /* uid_of(pid)               -> uid / -1     */
 #define SYS_FBMAP   26  /* fb_map(uint info[3])      -> user vaddr/0 */
 #define SYS_FBACTIVE 27 /* fb_active()               -> 1 / 0        */
-#define SYS_MOUSE   28  /* mouse_read(int out[3])    -> 0 (blocks)   */
-                        /*   out = {dx, dy, buttons}                 */
+#define SYS_MOUSE   28  /* mouse_read(int out[4])    -> 0 (blocks)   */
+                        /*   out = {x, y, buttons, absolute}; if     */
+                        /*   absolute, x/y are 0..0xFFFF, else deltas*/
 #define SYS_READDIR 29  /* readdir(path, index, struct dirent *out)  */
                         /*   -> 1 (filled) / 0 (past end) / -1 (err) */
 #define SYS_HALT    30  /* halt() -> no return (root only); powers off */

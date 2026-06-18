@@ -133,10 +133,10 @@ void syscall_handler(registers_t *regs)
         break;
 
     case SYS_MOUSE: {
-        int *out = (int *)regs->ebx;        /* user [dx, dy, buttons] */
-        int dx = 0, dy = 0, btn = 0;
-        mouse_get(&dx, &dy, &btn);          /* blocks until a packet arrives */
-        if (out) { out[0] = dx; out[1] = dy; out[2] = btn; }
+        int *out = (int *)regs->ebx;        /* user [x, y, buttons, absolute] */
+        int x = 0, y = 0, btn = 0, abs = 0;
+        mouse_get(&x, &y, &btn, &abs);      /* blocks until a packet arrives */
+        if (out) { out[0] = x; out[1] = y; out[2] = btn; out[3] = abs; }
         regs->eax = 0;
         break;
     }

@@ -46,10 +46,31 @@ forwards `WM_KEY`). The mouse adds a second reader child that forwards
   (flags, dx, dy), sign-extends dx/dy, and pushes raw PS/2 deltas into a ring
   buffer. `mouse_get()` maps them to screen coords (`-dx`, `dy`; dy > 0 = down).
 - Userspace reads one event via the **`SYS_MOUSE` (28)** syscall
-  (`mouse_read(int out[3])` → `{dx, dy, buttons}`, blocking). The windowserver
-  adds deltas directly to `(cursor_x, cursor_y)`.
-- That is the **entire** kernel addition. Cursor, focus, drag and z-order changes
-  are all userspace, in the windowserver.
+  (`mouse_read(int out[4])` → `{x, y, buttons, absolute}`, blocking). For a
+  relative event the windowserver adds `x/y` to `(cursor_x, cursor_y)`; for an
+  absolute event it scales them onto the current mode (see below).
+- That is almost the **entire** kernel addition. Cursor, focus, drag and z-order
+  changes are all userspace, in the windowserver.
+
+### Absolute pointer (`abs` cmdline → QEMU/VMware "vmmouse")
+
+By default the mouse is **relative** (PS/2 deltas), which is correct on real
+hardware but means the guest cursor drifts from the host pointer — and the drift
+changes with resolution. When the kernel boots with **`abs`** on the command line
+(the `make run-vbe`/`gui` paths and `boot/grub.cfg` pass it), `mouse_install()`
+also enables the **vmmouse backdoor** (I/O port `0x5658`): it probes via the
+VMware version call, sends `READID`, drains the version handshake word (otherwise
+every 4-word event read is off by one), then requests absolute mode. The device
+has no IRQ of its own — QEMU still raises **IRQ12** with a throw-away PS/2 packet,
+so the same packet state-machine fires; on a complete packet the handler reads the
+absolute `(buttons, x, y, z)` out of the backdoor queue instead of using the PS/2
+deltas. `x/y` arrive in `0..0xFFFF`; the windowserver scales them to the live mode
+(`cursor_x = x * (screen.width-1) / 0xFFFF`), so **the guest cursor sits exactly
+on the host pointer at any resolution**. If the backdoor is absent (real hardware)
+or reports an error, it silently falls back to PS/2 relative. The headless test
+harness keeps the relative path (no `abs`), so scripted clicks are unaffected;
+`tools/screendump.py --append abs --mouse "abs:X,Y"` exercises the absolute path
+(verified centering + corners at 1024×768 and 800×600).
 
 ## Wire format (userspace protocol, extends wm.h)
 

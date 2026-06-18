@@ -102,6 +102,16 @@ def mouse_move(s, dx, dy, step=16):
         time.sleep(0.03)
 
 
+def mouse_abs(s, ax, ay):
+    """Move the absolute pointer (drives an absolute device like vmmouse).
+    ax/ay are in QEMU's 0..32767 axis range (0,0 = top-left)."""
+    send_events(s, [
+        {"type": "abs", "data": {"axis": "x", "value": int(ax)}},
+        {"type": "abs", "data": {"axis": "y", "value": int(ay)}},
+    ])
+    time.sleep(0.05)
+
+
 def mouse_btn(s, down):
     send_events(s, [{"type": "btn", "data": {"button": "left", "down": down}}])
     time.sleep(0.05)
@@ -112,6 +122,9 @@ def do_mouse(qmp_sock, script, mon_sock=None):
         if step.startswith("move:"):
             dx, dy = step[5:].split(",")
             mouse_move(qmp_sock, int(dx), int(dy))
+        elif step.startswith("abs:"):
+            ax, ay = step[4:].split(",")
+            mouse_abs(qmp_sock, int(ax), int(ay))
         elif step == "click":
             mouse_btn(qmp_sock, True)
             mouse_btn(qmp_sock, False)
@@ -135,6 +148,7 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--keys", default="", help="comma-separated QEMU keynames")
     ap.add_argument("--mouse", default="", help="';'-separated mouse steps")
+    ap.add_argument("--append", default="", help="extra kernel cmdline words (after 'vbe')")
     ap.add_argument("--delay", type=float, default=6.0, help="boot settle seconds")
     ap.add_argument("--serial", default="", help="write the serial log here too")
     args = ap.parse_args()
@@ -148,7 +162,7 @@ def main():
     qemu = [
         "qemu-system-i386", "-kernel", args.kernel, "-m", "64M",
         "-drive", "file=%s,format=raw,if=ide" % args.disk,
-        "-vga", "std", "-append", "vbe", "-display", "none",
+        "-vga", "std", "-append", ("vbe " + args.append).strip(), "-display", "none",
         "-serial", "file:" + serial,
         "-monitor", "unix:%s,server,nowait" % mon,
         "-qmp", "unix:%s,server,nowait" % qmps,
