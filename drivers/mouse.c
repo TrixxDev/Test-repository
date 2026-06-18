@@ -139,15 +139,21 @@ static void on_mouse(registers_t *regs)
             vmm_call(VMM_ABSPOINTER_STATUS, 0, &st, 0, 0, 0);
             if ((st & 0xFFFF0000u) == VMM_STATUS_ERROR) {
                 vmmouse_on = 0;     /* device error: drop back to PS/2 relative */
-            } else if ((st & 0xFFFFu) >= 4) {        /* one event == 4 words */
+                break;
+            }
+            /* Drain every queued event (each is exactly 4 words). Consuming the
+             * whole queue per IRQ keeps the cursor current under bursts and never
+             * leaves a partial (<4) remainder that could desync the next read. */
+            while ((st & 0xFFFFu) >= 4) {
                 vmm_call(VMM_ABSPOINTER_DATA, 4, &bt, &ax, &ay, 0);
                 int buttons = 0;                     /* vmmouse button bits */
                 if (bt & 0x20) buttons |= 1;         /* left   */
                 if (bt & 0x10) buttons |= 2;         /* right  */
                 if (bt & 0x08) buttons |= 4;         /* middle */
                 mbuf_push((int)(ax & 0xFFFFu), (int)(ay & 0xFFFFu), buttons, 1);
+                vmm_call(VMM_ABSPOINTER_STATUS, 0, &st, 0, 0, 0);
             }
-            break;                  /* word count 0..3: spurious, nothing to do */
+            break;
         }
         int dx = (int)packet[1] - ((f & 0x10) ? 256 : 0);   /* sign-extend X */
         int dy = (int)packet[2] - ((f & 0x20) ? 256 : 0);   /* sign-extend Y */

@@ -9,11 +9,16 @@ to `screendump` the actual framebuffer and converts the PPM to PNG.
 Usage:
     screendump.py <kernel.elf> <disk.img> <out.png>
                   [--keys h,e,l,l,o,spc,w,o,r,l,d]
-                  [--mouse "move:-200,150;click;move:120,0"]
-                  [--delay 6] [--serial FILE]
+                  [--mouse "move:-200,150;click;abs:16383,16383;wait:1;key:ret"]
+                  [--append abs] [--delay 6] [--serial FILE]
 
 Keyboard key names are QEMU monitor keynames (letters/digits as-is; `spc`, `ret`).
-Mouse steps (`;`-separated): `move:DX,DY` (relative), `click` (left), `down`, `up`.
+Mouse steps (`;`-separated):
+    move:DX,DY  relative motion (PS/2)        click / down / up  left button
+    abs:AX,AY   absolute pointer 0..32767     wait:SEC           pause mid-script
+    key:NAME    send a key (interleaved with clicks via the monitor)
+`--append WORDS` adds kernel cmdline words after `vbe` (e.g. `abs` for the
+absolute-pointer / vmmouse path that `abs:` steps drive).
 """
 import argparse
 import json

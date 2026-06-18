@@ -40,16 +40,13 @@ typedef struct {
  * The menu bar's "Aurora" title is the entry point for system actions. It lives
  * in the windowserver (not a separate process) so it works even if the Dock or
  * an app has died; the actions themselves launch ordinary processes. */
-#define MENUBAR_H    28             /* matches kernel/desktop.c MENUBAR_H */
 #define AURORA_X0    8
 #define AURORA_X1    96
 #define MENU_X       8
-#define MENU_Y       MENUBAR_H
 #define MENU_W       200
 #define MENU_ITEM_H  26
 #define MENU_PAD     6
 #define MENU_N       4
-#define MENU_H       (MENU_N * MENU_ITEM_H + 2 * MENU_PAD)
 
 /* The Aurora menu (chrome) scales with the desktop UI scale; sc() scales a base
  * literal, and the menu bar height comes from desktop_menubar_h(). At 100% these
