@@ -207,6 +207,7 @@ int main(int argc, char **argv)
     void *px = shm_map(rep.shm);                 /* map the shared content surface */
     if (!px) { fprintf(2, "files: shm map failed\n"); return 1; }
     shm_id = rep.shm;
+    clip_init(wm, rep.clip);                      /* map the shared clipboard */
     surf.pixels = (uint8_t *)px;
     surf.width = W; surf.height = H; surf.pitch = W * 4; surf.bpp = 32;
 
@@ -232,13 +233,8 @@ int main(int argc, char **argv)
         }
         if (ev.op == WM_SCALE)  { S = ui_scale(); redraw(); continue; }
         if (ev.op == WM_KEY) {                  /* Ctrl+C: copy the selected name */
-            if (ev.x == 3 && selected >= 0 && selected < nents) {
-                wm_req_t r; memset(&r, 0, sizeof(r));
-                r.op = WM_CLIPBOARD_SET;
-                int i = 0; for (; ents[selected].name[i] && i < 47; i++) r.str[i] = ents[selected].name[i];
-                r.str[i] = '\0';
-                msgsend(wm, &r, sizeof(r));
-            }
+            if (ev.x == 3 && selected >= 0 && selected < nents)
+                clip_set(ents[selected].name, (int)strlen(ents[selected].name));
             continue;
         }
         if (ev.op != WM_POINTER) continue;

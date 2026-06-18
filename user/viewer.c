@@ -163,6 +163,7 @@ int main(int argc, char **argv)
     void *px = shm_map(rep.shm);                 /* map the shared content surface */
     if (!px) { fprintf(2, "viewer: shm map failed\n"); return 1; }
     shm_id = rep.shm;
+    clip_init(wm, rep.clip);                      /* map the shared clipboard */
     surf.pixels = (uint8_t *)px;
     surf.width = W; surf.height = H; surf.pitch = W * 4; surf.bpp = 32;
 
@@ -214,12 +215,8 @@ int main(int argc, char **argv)
         int c = ev.x, old = top;
         if (c == 3) {                       /* Ctrl+C: copy the selected (or top) line */
             int li = (sel_line >= 0 && sel_line < nlines) ? sel_line : top;
-            wm_req_t r; memset(&r, 0, sizeof(r));
-            r.op = WM_CLIPBOARD_SET;
             const char *ln = &fbuf[line_off[li]];
-            int i = 0; for (; ln[i] && i < 47; i++) r.str[i] = ln[i];
-            r.str[i] = '\0';
-            msgsend(wm, &r, sizeof(r));
+            clip_set(ln, (int)strlen(ln));  /* full line — no longer 47-char capped */
             continue;
         }
         switch (c) {

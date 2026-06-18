@@ -33,7 +33,7 @@ USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
               user/wserver.elf user/term.elf user/dock.elf user/files.elf \
               user/viewer.elf user/wmstress.elf user/settings.elf
-LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o
+LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o user/libc/clip.o
 # Portable graphics/compositor code, built for userspace and linked into wserver.
 WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
 
@@ -58,7 +58,7 @@ UCFLAGS := --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
 user/crt0.o: user/crt0.S
 	$(CC) --target=$(TARGET) -m32 -ffreestanding -Iinclude -c user/crt0.S -o $@
 
-user/libc/%.o: user/libc/%.c user/libc.h
+user/libc/%.o: user/libc/%.c user/libc.h user/wm.h
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 # Depend on wm.h too: several apps (term, dock) share the window IPC struct, and

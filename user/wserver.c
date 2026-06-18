@@ -15,7 +15,8 @@ static gfx_surface_t screen;    /* the live framebuffer (slow VRAM) */
 static gfx_surface_t back;      /* off-screen scene, no cursor (fast RAM)  */
 static gfx_surface_t bg;        /* cached static background: wallpaper + menu bar */
 static int           dock_win = -1;   /* the borderless Dock window, if any */
-static char          clipboard[48];   /* bounded shared clipboard (last writer wins) */
+static int           clip_sid = -1;   /* shared clipboard surface id (server owns) */
+static int           clip_len = 0;    /* bytes currently in the clipboard (last writer wins) */
 
 /* Accumulated frame state. Input handlers update the scene and *record damage*
  * but never paint; a fixed-cadence WM_TICK consumes this and renders one frame.
@@ -641,6 +642,7 @@ int main(int argc, char **argv)
         return 1;
     }
     wm_state_init(&st);
+    clip_sid = shm_create(WM_CLIP_SIZE);   /* one shared clipboard buffer for all apps */
     st.cursor_on = 1;                /* the windowserver owns the pointer */
     st.cursor_x = screen.width / 2;
     st.cursor_y = screen.height / 2;
@@ -738,7 +740,7 @@ int main(int argc, char **argv)
                 if (ppx)                /* on OOM, present stays NULL -> immediate path */
                     wm_set_present(&st, id, ppx, fw, fh);
             }
-            wm_rep_t rep = { id > 0 ? 0 : -1, id, id > 0 ? sid : -1 };
+            wm_rep_t rep = { id > 0 ? 0 : -1, id, id > 0 ? sid : -1, clip_sid };
             msgsend(from, &rep, sizeof(rep));
             break;
         }
@@ -804,20 +806,21 @@ int main(int argc, char **argv)
                    wm_window_count(&st), (unsigned)(uintptr_t)sbrk(0));
             break;
         case WM_CLIPBOARD_SET: {
-            /* Store the text (bounded, last-writer-wins). */
-            int i = 0;
-            for (; req.str[i] && i < (int)sizeof(clipboard) - 1; i++)
-                clipboard[i] = req.str[i];
-            clipboard[i] = '\0';
+            /* The app wrote req.x bytes into the shared clipboard buffer; just
+             * record the length (bounded, last-writer-wins). */
+            int len = req.x;
+            if (len < 0) len = 0;
+            if (len > WM_CLIP_SIZE) len = WM_CLIP_SIZE;
+            clip_len = len;
             break;
         }
         case WM_CLIPBOARD_GET: {
-            /* Reply with the clipboard text in the same message shape. */
+            /* Reply with the current clipboard length; the app reads that many
+             * bytes from its own mapping of the shared clipboard buffer. */
             wm_req_t rep;
             memset(&rep, 0, sizeof(rep));
             rep.op = WM_CLIPBOARD_GET;
-            for (int i = 0; clipboard[i] && i < (int)sizeof(rep.str) - 1; i++)
-                rep.str[i] = clipboard[i];
+            rep.x = clip_len;
             msgsend(from, &rep, sizeof(rep));
             break;
         }

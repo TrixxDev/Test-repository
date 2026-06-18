@@ -152,6 +152,7 @@ int main(int argc, char **argv)
     void *px = shm_map(rep.shm);                 /* map the shared content surface */
     if (!px) { fprintf(2, "term: shm map failed\n"); return 1; }
     shm_id = rep.shm;
+    clip_init(wm, rep.clip);                      /* map the shared clipboard */
     surf.pixels = (uint8_t *)px;
     surf.width = W; surf.height = H; surf.pitch = W * 4; surf.bpp = 32;
 
@@ -186,9 +187,11 @@ int main(int argc, char **argv)
             repaint();
             continue;
         }
-        if (k.op == WM_CLIPBOARD_GET) { /* paste reply: insert the clipboard text */
-            for (int i = 0; k.str[i] && ilen < COLS - 10 && ilen < MAXCOLS - 1; i++)
-                input[ilen++] = k.str[i];
+        if (k.op == WM_CLIPBOARD_GET) { /* paste reply: insert clipboard (printable) */
+            const char *cb = clip_data();
+            int len = k.x;
+            for (int i = 0; cb && i < len && ilen < COLS - 10 && ilen < MAXCOLS - 1; i++)
+                if (cb[i] >= 32 && cb[i] < 127) input[ilen++] = cb[i];
             repaint();
             continue;
         }
@@ -196,15 +199,9 @@ int main(int argc, char **argv)
             continue;
         int c = k.x;
         if (c == 3) {                    /* Ctrl+C: copy the current input line */
-            wm_req_t r; memset(&r, 0, sizeof(r));
-            r.op = WM_CLIPBOARD_SET;
-            input[ilen] = '\0';
-            set_str(&r, input);
-            msgsend(wm, &r, sizeof(r));
+            clip_set(input, ilen);
         } else if (c == 22) {            /* Ctrl+V: request a paste from the server */
-            wm_req_t r; memset(&r, 0, sizeof(r));
-            r.op = WM_CLIPBOARD_GET;
-            msgsend(wm, &r, sizeof(r));
+            clip_request();
         }
         else if (c == '\n' || c == '\r') commit_line();
         else if (c == '\b')              { if (ilen > 0) ilen--; }

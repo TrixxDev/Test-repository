@@ -114,9 +114,13 @@ server branches on `op`.)
   windowserver `WM_RELOAD_SETTINGS`; the server re-reads the file (also at boot)
   and re-themes the desktop. A System pane shows `sysinfo`. Proof: `make
   demo-settings`.
-- **10.4 — Clipboard. DONE.** The window server holds a small bounded, last-writer-wins
-  text clipboard. Apps copy with `WM_CLIPBOARD_SET` (text in `req.str`) and paste with
-  `WM_CLIPBOARD_GET` (the server replies with the same op + the text). The keyboard
+- **10.4 — Clipboard. DONE.** Last-writer-wins text clipboard backed by a single
+  **shared-memory buffer** (`WM_CLIP_SIZE` = 4 KiB) the server creates at startup and
+  hands to each app in the `WM_CREATE` reply (`rep.clip`); the app maps it once and
+  reads/writes it directly (`user/libc/clip.c`), so copy/paste is not limited to the
+  IPC message size. Apps copy with `WM_CLIPBOARD_SET` (the length in `req.x`; the text
+  is already in the shared buffer) and paste with `WM_CLIPBOARD_GET` (the server
+  replies with the length, then the app reads the shared buffer). The keyboard
   driver now tracks **Control** (`drivers/keyboard.c`): `Ctrl`+letter yields control
   codes 1–26, so **Ctrl+C / Ctrl+V** flow through the normal `WM_KEY` pipeline.
   The Terminal copies its input line and pastes into it; the Finder copies the

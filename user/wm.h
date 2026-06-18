@@ -15,6 +15,7 @@
 #pragma once
 #include "gfx.h"
 
+#define WM_CLIP_SIZE   4096  /* shared clipboard buffer size (bytes), one page */
 #define WM_TITLEBAR_H  28    /* base height (at 100% UI scale); see wm_titlebar_h */
 #define WM_MENUBAR_H   28    /* must match desktop.c MENUBAR_H (drag y-clamp) */
 #define WM_MAX_WINDOWS 16
@@ -222,9 +223,11 @@ enum {
     WM_TICK,         /* render ticker -> server: a frame is due (render if dirty) */
     WM_SCALE,        /* server -> app: the UI scale changed; re-query ui_scale()
                         and re-lay-out + repaint your content                    */
-    WM_CLIPBOARD_SET,/* app -> server: store req.str as the clipboard text       */
-    WM_CLIPBOARD_GET,/* app -> server: request the clipboard; server replies with
-                        the same op and the text in req.str                      */
+    WM_CLIPBOARD_SET,/* app -> server: the app wrote req.x bytes into the shared
+                        clipboard buffer; the server records the length           */
+    WM_CLIPBOARD_GET,/* app -> server: request the clipboard length; server replies
+                        with the same op and the length in req.x (the app then
+                        reads that many bytes from its clipboard mapping)         */
 };
 
 typedef struct {
@@ -240,4 +243,11 @@ typedef struct {
     int status;            /* 0 = ok, <0 = error */
     int win;               /* assigned window id (on WM_CREATE) */
     int shm;               /* shared-surface id to map (WM_F_SHM), else -1 */
+    int clip;              /* shared clipboard shm id to map (size WM_CLIP_SIZE) */
 } wm_rep_t;
+
+/* ---- shared-clipboard client helpers (user/libc/clip.c) ---- */
+void        clip_init(int wm, int clip_sid);   /* map the shared clipboard buffer */
+void        clip_set(const char *s, int len);  /* copy `len` bytes into it + notify */
+void        clip_request(void);                /* ask the server for the length     */
+const char *clip_data(void);                   /* the mapped buffer (read after GET) */
