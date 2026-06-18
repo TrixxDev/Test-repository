@@ -177,11 +177,15 @@ int main(int argc, char **argv)
         if (n < (int)sizeof(ev)) continue;
         if (ev.op == WM_DESTROY) { printf("[viewer] closed\n"); return 0; }
         if (ev.op == WM_RESIZE) {            /* maximize/restore: refit the text */
-            W = ev.w; H = ev.h;
             if (ev.flags >= 0) {            /* shared surface reallocated: re-map */
                 void *p = shm_map(ev.flags);
-                if (p) { surf.pixels = (uint8_t *)p; shm_id = ev.flags; }
+                if (!p) continue;           /* map failed: keep old surface, no desync */
+                if (shm_id >= 0 && shm_id != ev.flags)
+                    shm_unmap(shm_id);      /* drop our ref to the previous surface */
+                shm_id = ev.flags;
+                surf.pixels = (uint8_t *)p;
             }
+            W = ev.w; H = ev.h;
             surf.width = W; surf.height = H; surf.pitch = W * 4;
             int rows = visible_rows();
             int maxtop = nlines > rows ? nlines - rows : 0;

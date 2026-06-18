@@ -266,28 +266,35 @@ Two invariants, deliberately simple at this stage:
   straight into the buffer the server composites from, instead of sending a
   `WM_DRAW_*` message per shape. A small kernel SHM pool (`kernel/shm.c`) backs each
   surface with physical frames that can be mapped into more than one address space
-  at the same virtual address (`shm_create`/`shm_map`/`shm_destroy`, syscalls
-  35–37). On `WM_CREATE` with `WM_F_SHM` the server allocates the content surface as
-  an SHM object, maps it as the window's content, and returns the id; the client
+  at the same virtual address (`shm_create`/`shm_map`/`shm_unmap`/`shm_grant`/
+  `shm_destroy`, syscalls 35–39). On `WM_CREATE` with `WM_F_SHM` the server allocates
+  the content surface as an SHM object, **grants the owning app map access**
+  (`shm_grant`), maps it as the window's content, and returns the id; the client
   maps the same id and draws into it with the gfx library, then sends a single
   `WM_PRESENT` (damage only). The compositor path is otherwise unchanged — it blits
   from the content surface as before, so per-window caching, color-key transparency
-  and damage all still apply. **Lifecycle (no double free):** shared frames' PTEs
-  carry a `PAGE_SHARED` bit, so `vmm_destroy_address_space` *unmaps* but never frees
-  them when a mapper exits; the frames are released exactly once — by the server's
-  `shm_destroy` on window destroy, or by `shm_release_pid` if the creator dies. The
-  **Dock** is the first client converted (fixed-size, borderless — no resize/maximize
-  complications, and it redrew the whole panel + icons on every hover, so it emitted
-  the most per-frame draw IPC). Verified: the Dock renders pixel-for-pixel as before
-  and still launches apps on click; the `PAGE_SHARED` change is leak-free across 50+
-  window create/destroy cycles in the stress test; 100 % host renders + `verify_drag`
-  are unaffected. The **Terminal** is now converted too — a decorated, *resizable*
-  client — which exercises an **SHM realloc on maximize/restore**: the server creates
-  the new (bigger/smaller) SHM object before freeing the old (distinct ids; the
-  `SHM_MAX` pool keeps a spare), maps it as the new content, and passes the new id to
-  the app in `WM_RESIZE` (`flags`); the app re-maps and redraws. Verified live: the
-  Terminal types, copies/pastes (Ctrl+C/V), drags, closes and maximizes+restores with
-  no corruption. (The Finder and Viewer can adopt shared surfaces the same way next.)
+  and damage all still apply.
+  **Lifecycle (reference-counted, no double free, no use-after-free):** each mapping
+  holds a reference; an object's frames are freed only once it has been destroyed
+  (`shm_destroy`, creator-only, or the creator exiting) **and** its reference count
+  reaches zero. A mapper's exit/exec drops its reference (`shm_release_proc`) without
+  freeing frames others still map — shared frames' PTEs also carry `PAGE_SHARED`, so
+  `vmm_destroy_address_space` skips them, and `fork` deep-copies them into private
+  frames (the child is not a mapper). **Access control (grant model):** `shm_map`
+  succeeds only for the creator, the granted client, or a public object — a process
+  cannot map another app's surface by guessing its (small) id; only the creator may
+  grant or destroy. The clipboard is created `SHM_PUBLIC` (shared by every app).
+  The **Dock**, **Terminal**, **Finder** and **Viewer** are all converted; the
+  resizable ones exercise an **SHM realloc on maximize/restore**: the server creates
+  the new SHM object, grants it to the app, swaps it in as the content and `shm_destroy`s
+  the old one (whose frames survive — the app still maps them — until the app remaps the
+  new id and `shm_unmap`s the old). This realloc-on-resize is the case the refcount
+  closes: the old surface is destroyed while the app is still drawing into it, yet the
+  frames live until the last mapper lets go. Verified live (Terminal maximize+restore,
+  drag, close, Ctrl+C/V) and headless by the `make stress` self-test, which runs 200
+  create/map/unmap/destroy cycles (no object leaked) and a cross-process grant +
+  destroy-while-mapped check (the child still reads the surface after the creator
+  destroys it; frames reclaimed only on the child's exit).
 - **Display resolution — runtime mode switching:** the resolution is selectable in
   **Settings → Display** (800×600 / 1024×768 / 1280×720 / 1366×768 / 1920×1080),
   saved as `resolution=WxH` in `/disk/settings.cfg`. It works because the boot path

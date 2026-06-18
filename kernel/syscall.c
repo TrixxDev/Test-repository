@@ -167,11 +167,19 @@ void syscall_handler(registers_t *regs)
         break;
 
     case SYS_SHMGET:
-        regs->eax = (uint32_t)shm_create((uint32_t)regs->ebx);
+        regs->eax = (uint32_t)shm_create((uint32_t)regs->ebx, (uint32_t)regs->ecx);
         break;
 
     case SYS_SHMMAP:
         regs->eax = shm_map((int)regs->ebx);
+        break;
+
+    case SYS_SHMUNMAP:
+        regs->eax = (uint32_t)shm_unmap((int)regs->ebx);
+        break;
+
+    case SYS_SHMGRANT:
+        regs->eax = (uint32_t)shm_grant((int)regs->ebx, (int)regs->ecx);
         break;
 
     case SYS_SHMDEL:

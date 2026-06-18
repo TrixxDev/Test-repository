@@ -56,6 +56,109 @@ static void stat(const char *label)
     for (volatile int d = 0; d < 400000; d++) ;   /* let the log line flush */
 }
 
+/* ---- Phase 3: SHM hardening self-test (Milestone 1.1.3a) ----
+ * Exercises the reference-counted, grant-gated shared-memory lifecycle directly
+ * (the kernel paths behind the window server's realloc-on-resize). Reports leaks
+ * via sysinfo's free-frame count and validates that a destroy-while-mapped object
+ * survives until its last mapper goes away (the resize use-after-free scenario). */
+#define SHM_TEST_SZ  (64 * 1024)    /* 16 frames per object */
+#define SHM_CYCLES   200
+#define SENTINEL     0x5A
+
+static unsigned free_frames(void)
+{
+    struct sysinfo si;
+    return sysinfo(&si) == 0 ? si.free_frames : 0;
+}
+
+static int shm_hardening_test(void)
+{
+    int fails = 0;
+
+    /* Warm up so any one-time kernel-heap growth is already done before we sample
+     * the free-frame baseline (otherwise the first create looks like a leak). */
+    for (int i = 0; i < 4; i++) { int id = shm_create(SHM_TEST_SZ, 0); if (id >= 0) shm_destroy(id); }
+
+    /* (a) create / map / touch / unmap / destroy in a tight loop: the free-frame
+     * count must return exactly to baseline (no leak across the new free path). */
+    unsigned base = free_frames();
+    for (int i = 0; i < SHM_CYCLES; i++) {
+        int id = shm_create(SHM_TEST_SZ, 0);
+        if (id < 0) { printf("[wmstress] shm: create failed at cycle %d\n", i); fails++; break; }
+        volatile unsigned char *p = (volatile unsigned char *)shm_map(id);
+        if (!p) { printf("[wmstress] shm: creator map failed\n"); fails++; shm_destroy(id); break; }
+        p[0] = 0xAB; p[SHM_TEST_SZ - 1] = 0xCD;     /* touch the first and last page */
+        shm_unmap(id);
+        shm_destroy(id);
+    }
+    unsigned after = free_frames();
+    /* free_frames is system-wide, so a stray frame or two of concurrent activity
+     * (logger/window-server heap growth) is noise; a real per-cycle leak would be
+     * thousands of frames. The meaningful assertion is that not even one object's
+     * worth of frames (SHM_TEST_SZ/4096) went missing. */
+    unsigned per_obj = SHM_TEST_SZ / 4096;
+    unsigned leaked  = (base > after) ? base - after : 0;
+    if (leaked >= per_obj) {
+        printf("[wmstress] shm LEAK: %u frames after %d cycles (>= one object)\n", leaked, SHM_CYCLES);
+        fails++;
+    } else {
+        printf("[wmstress] shm: %d create/map/unmap/destroy cycles, no object leaked "
+               "(free %u->%u, %u-frame noise)\n", SHM_CYCLES, base, after, leaked);
+    }
+
+    /* (b) negative paths: bad ids and use-after-destroy must be refused, not crash. */
+    if (shm_destroy(9999) != -1) { printf("[wmstress] shm: destroy(bad id) should fail\n"); fails++; }
+    if (shm_unmap(9999)  != -1)  { printf("[wmstress] shm: unmap(bad id) should fail\n");  fails++; }
+    { int id = shm_create(SHM_TEST_SZ, 0); shm_destroy(id);
+      if (shm_map(id) != 0) { printf("[wmstress] shm: map after destroy should fail\n"); fails++; } }
+
+    /* (c) cross-process grant + deferred free (the realloc-on-resize UAF case):
+     * the parent grants the object to the child; both map it; the parent destroys
+     * it while the child still maps it. The child must STILL read the sentinel
+     * (frames not freed early), and the frames are reclaimed only once the child
+     * exits — leaving the free-frame count back at its pre-test value. */
+    {
+        unsigned b2 = free_frames();
+        int id = shm_create(SHM_TEST_SZ, 0);
+        if (id < 0) { printf("[wmstress] shm: xproc create failed\n"); return fails + 1; }
+
+        int pid = fork();
+        if (pid == 0) {                                 /* ---- child ---- */
+            int from = 0, msg = 0;
+            msgrecv(&msg, sizeof(msg), &from);          /* wait for "go"; learn parent pid */
+            volatile unsigned char *cp = (volatile unsigned char *)shm_map(id);
+            int ok = (cp != 0);
+            int v1 = ok ? cp[0] : -1;                   /* read before the parent destroys */
+            int rdy = 1; msgsend(from, &rdy, sizeof(rdy));
+            int go2 = 0; msgrecv(&go2, sizeof(go2), &from);
+            int v2 = ok ? cp[0] : -1;                   /* read AFTER destroy (deferred free) */
+            int rep = (ok && v1 == SENTINEL && v2 == SENTINEL) ? 1 : 0;
+            msgsend(from, &rep, sizeof(rep));
+            _exit(0);
+        }
+        /* ---- parent ---- */
+        shm_grant(id, pid);
+        volatile unsigned char *pp = (volatile unsigned char *)shm_map(id);
+        if (pp) pp[0] = SENTINEL;
+        int go = 1; msgsend(pid, &go, sizeof(go));      /* child may map now (grant is done) */
+        int rdy = 0, from = 0; msgrecv(&rdy, sizeof(rdy), &from);   /* child has mapped */
+        shm_destroy(id);                                /* destroy while child maps -> deferred */
+        int go2 = 1; msgsend(pid, &go2, sizeof(go2));   /* child re-reads through its mapping */
+        int childok = 0; msgrecv(&childok, sizeof(childok), &from);
+        wait(0);                                        /* child exits -> last ref -> freed */
+
+        unsigned a2 = free_frames();
+        unsigned leaked2 = (b2 > a2) ? b2 - a2 : 0;
+        if (!childok) { printf("[wmstress] shm: child lost access after destroy (UAF risk!)\n"); fails++; }
+        else          { printf("[wmstress] shm: cross-proc grant + deferred-free OK\n"); }
+        if (leaked2 >= per_obj) { printf("[wmstress] shm xproc LEAK: %u frames (%u->%u)\n", leaked2, b2, a2); fails++; }
+        else                    { printf("[wmstress] shm: cross-proc frames reclaimed (%u->%u)\n", b2, a2); }
+    }
+
+    printf("[wmstress] shm hardening: %s\n", fails == 0 ? "PASS" : "FAIL");
+    return fails;
+}
+
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -96,6 +199,9 @@ int main(int argc, char **argv)
     for (int i = 0; i < got; i++)
         destroy_win(ids[i]);
     stat("after limit test (all destroyed)");
+
+    /* Phase 3: shared-memory hardening (refcount / grant / deferred free). */
+    shm_hardening_test();
 
     printf("[wmstress] done\n");
     return 0;

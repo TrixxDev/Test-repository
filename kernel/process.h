@@ -46,6 +46,7 @@ typedef struct process {
     registers_t saved_regs;         /* fork: child resumes from this frame */
     int      waiting;               /* parent is blocked in wait() */
     uint32_t user_brk;              /* top of the user heap (sbrk) */
+    uint32_t shm_mapped;            /* bitmask of shm ids this process maps (refcount) */
 
     /* message-passing mailbox */
     message_t *mbox_head, *mbox_tail;

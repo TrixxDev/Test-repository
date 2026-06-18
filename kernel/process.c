@@ -854,6 +854,9 @@ int do_fork(registers_t *regs)
     child->ppid    = parent->pid;
     child->uid     = parent->uid;
     child->user_brk = parent->user_brk;
+    /* shm_mapped stays 0 (from alloc_proc's memset): copy_user_space deep-copies
+     * the parent's shm pages into private frames (no PAGE_SHARED), so the child is
+     * not a real mapper and must not touch the shared objects' refcounts. */
 
     for (int fd = 0; fd < MAX_FDS; fd++) {
         child->fds[fd] = parent->fds[fd];
@@ -928,6 +931,7 @@ void do_exec(const char *path, char **argv, registers_t *regs)
     kfree(buf);
 
     uint32_t old_pd = p->pd_phys;
+    shm_release_proc(p);                /* the old image's shm mappings are gone */
     vmm_switch_address_space(vmm_kernel_directory());
     vmm_destroy_address_space(old_pd);
 
@@ -958,7 +962,7 @@ void process_exit(int code)
     /* Drop any pending messages and named-service registrations. */
     unregister_pid(p->pid);
     mailbox_clear(p);
-    shm_release_pid(p->pid);            /* free any shared-memory objects it owns */
+    shm_release_proc(p);                /* drop shm mappings + free objects it owns */
 
     vmm_switch_address_space(vmm_kernel_directory());
     vmm_destroy_address_space(p->pd_phys);

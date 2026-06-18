@@ -403,7 +403,7 @@ static void resize_window(int id, int nw, int nh)
     int oldsid = wm_shm_id(&st, id), nsid = -1;
     void *npx;
     if (oldsid >= 0) {
-        nsid = shm_create(nw * nh * 4);
+        nsid = shm_create(nw * nh * 4, 0);
         npx = (nsid >= 0) ? shm_map(nsid) : 0;
     } else {
         npx = malloc((size_t)nw * nh * 4);
@@ -424,6 +424,8 @@ static void resize_window(int id, int nw, int nh)
     wm_mark_dirty(&st, id);
     int owner = wm_owner_of(&st, id);
     if (owner > 0) {
+        if (nsid >= 0)
+            shm_grant(nsid, owner);     /* authorize the app to map the new surface */
         wm_req_t rz;
         memset(&rz, 0, sizeof(rz));
         rz.op = WM_RESIZE; rz.win = id; rz.w = nw; rz.h = nh; rz.flags = nsid;
@@ -643,7 +645,7 @@ int main(int argc, char **argv)
         return 1;
     }
     wm_state_init(&st);
-    clip_sid = shm_create(WM_CLIP_SIZE);   /* one shared clipboard buffer for all apps */
+    clip_sid = shm_create(WM_CLIP_SIZE, SHM_PUBLIC); /* shared clipboard: any app may map */
     st.cursor_on = 1;                /* the windowserver owns the pointer */
     st.cursor_x = screen.width / 2;
     st.cursor_y = screen.height / 2;
@@ -722,7 +724,7 @@ int main(int argc, char **argv)
             void *px = 0;
             if (req.w > 0 && req.h > 0) {
                 if (shm) {
-                    sid = shm_create(req.w * req.h * 4);
+                    sid = shm_create(req.w * req.h * 4, 0);
                     if (sid >= 0) px = shm_map(sid);
                 } else {
                     px = malloc((size_t)req.w * req.h * 4);
@@ -734,6 +736,7 @@ int main(int argc, char **argv)
                 else if (px)  free(px);
             } else if (sid >= 0) {
                 wm_set_shm(&st, id, sid);
+                shm_grant(sid, from);   /* let the owning app map its own surface */
             }
             if (id > 0 && dock) {
                 wm_set_top(&st, id);    /* the Dock floats above ordinary windows */

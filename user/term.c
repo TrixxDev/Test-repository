@@ -171,11 +171,16 @@ int main(int argc, char **argv)
             return 0;
         }
         if (k.op == WM_RESIZE) {        /* maximize/restore: the server resized us */
-            W = k.w; H = k.h;
             if (k.flags >= 0) {         /* shared surface was reallocated: re-map it */
                 void *px = shm_map(k.flags);
-                if (px) { surf.pixels = (uint8_t *)px; shm_id = k.flags; }
+                if (!px)                /* map failed: keep the old surface, don't desync */
+                    continue;
+                if (shm_id >= 0 && shm_id != k.flags)
+                    shm_unmap(shm_id);  /* drop our ref to the previous surface */
+                shm_id = k.flags;
+                surf.pixels = (uint8_t *)px;
             }
+            W = k.w; H = k.h;
             surf.width = W; surf.height = H; surf.pitch = W * 4;
             recompute_grid();
             repaint();
