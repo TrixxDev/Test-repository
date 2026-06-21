@@ -2,6 +2,7 @@
 #include "ipv4.h"
 #include "icmp.h"
 #include "udp.h"
+#include "tcp.h"
 #include "eth.h"
 #include "arp.h"
 #include "inet.h"
@@ -60,6 +61,9 @@ void ipv4_input(const void *packet, size_t len)
         break;
     case IPPROTO_UDP:
         udp_input(src, payload, plen);
+        break;
+    case IPPROTO_TCP:
+        tcp_input(src, payload, plen);
         break;
     default:
         break;

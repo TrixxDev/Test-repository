@@ -268,7 +268,34 @@ The transport is done and audited; everything below is protocol logic over
 | 6 | **IPv4** (`net/ipv4.c`) RX/TX + header checksum, **fragments dropped**; **ICMP** echo (`net/icmp.c`) | **`ping 10.0.2.2` — 4/4 replies** | ✅ |
 | 7 | **UDP** (`net/udp.c`) — `udp_send` / `udp_bind`, no sockets | **`nc -u` round-trip Aurora ↔ host** | ✅ |
 | 7.5 | **DNS** over UDP (`net/dns.c`) — typed `dns_query(name, type)` | **`example.com` → real A record** | ✅ |
-| 8 | **TCP** | the long pole — last, on purpose | next |
+| 8.1 | **TCP** connect (`net/tcp.c`) — handshake only, full TCB + state enum | **`connect 10.0.2.2:80` → ESTABLISHED** | ✅ |
+| 8.2 | TCP `send`/`recv` (data, no close) | `GET / HTTP/1.0` returns bytes | next |
+| 8.3 | TCP teardown (FIN / TIME_WAIT) | clean close | later |
+
+## Phase 8.1 — TCP handshake (client connect only)
+
+TCP is scoped hard for the first cut: **client `connect()` only**, no listen/
+accept, no data transfer, no retransmission / congestion control / SACK / window
+scaling / keepalive. But the **TCB** (`struct tcp_tcb`) and the **state enum**
+are the full RFC 793 shape from day one, so later phases never renumber or
+rewrite — only `CLOSED → SYN_SENT → ESTABLISHED` are reached now.
+
+`tcp_connect(dst, port)` picks an ephemeral port + ISS, sends a SYN, and enters
+`SYN_SENT`. `tcp_input` (dispatched from `ipv4_input` for `IPPROTO_TCP`) verifies
+the mandatory TCP checksum (pseudo-header + segment), matches the 4-tuple, and on
+a `SYN+ACK` acking our SYN records the peer's ISN, sends the final `ACK`, and
+moves to `ESTABLISHED`. An `RST` drops the connection to `CLOSED`.
+
+Verified through SLIRP (`tools/tcptest.py`, a host listener on :80):
+
+```
+[tcp] connect 10.0.2.2:80
+[tcp] state=ESTABLISHED -- HANDSHAKE OK
+```
+
+pcap: `SYN` → `SYN|ACK` → `ACK`. Because this isolated TCP sits on a proven
+L2–L3 base, a handshake failure can only be a TCP bug — not DMA, the driver, ARP
+or IPv4.
 
 ## Phase 7.5 — DNS (resolve a real name)
 

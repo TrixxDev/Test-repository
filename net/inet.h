@@ -30,6 +30,7 @@ static inline uint32_t ntohl(uint32_t x) { return htonl(x); }
 
 /* IPv4 protocol numbers. */
 #define IPPROTO_ICMP  1
+#define IPPROTO_TCP   6
 #define IPPROTO_UDP   17
 
 /* Monotonic milliseconds since boot (PIT is 100 Hz -> 10 ms/tick). */

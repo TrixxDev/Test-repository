@@ -7,6 +7,7 @@
 #include "icmp.h"
 #include "udp.h"
 #include "dns.h"
+#include "tcp.h"
 #include "virtio_net.h"
 #include "pit.h"
 #include "perf.h"
@@ -25,7 +26,7 @@ uint16_t inet_csum(const void *data, uint32_t len)
     return (uint16_t)~sum;
 }
 
-void net_init(void) { arp_init(); ipv4_init(); udp_init(); }
+void net_init(void) { arp_init(); ipv4_init(); udp_init(); tcp_init(); }
 
 /* Drain every pending RX frame up into the dispatcher. */
 void net_poll(void)
@@ -55,6 +56,7 @@ static int wait_resolved(uint32_t ip, uint8_t mac[6], unsigned timeout_ms)
 /* Phase 7: a UDP echo handler for the self-test. Logs the datagram and echoes
  * it back to the sender, so the host's nc sees a reply too. */
 #define UDP_TEST_PORT 9999
+#define TCP_TEST_PORT 80
 static volatile int udp_rx_count;
 static void udp_test_handler(uint32_t src, uint16_t sport, const void *data, size_t len)
 {
@@ -198,6 +200,18 @@ void net_selftest(void)
     } else {
         kprintf("[dns] %s: no answer (query sent; see pcap / network policy)\n", host);
     }
+
+    /* Phase 8.1: TCP three-way handshake (client connect only). Needs a TCP
+     * service reachable at 10.0.2.2:TCP_TEST_PORT (the tcptest.py harness, or any
+     * host listener); without one, SLIRP RSTs and the state goes to CLOSED. */
+    kprintf("[tcp] connect %u.%u.%u.%u:%d\n", OCTETS(IP_GATEWAY), TCP_TEST_PORT);
+    tcp_connect(IP_GATEWAY, TCP_TEST_PORT);
+    uint64_t cdl = net_now_ms() + 4000;
+    while (net_now_ms() < cdl &&
+           tcp_state() != TCP_ESTABLISHED && tcp_state() != TCP_CLOSED)
+        net_poll();
+    kprintf("[tcp] state=%s -- %s\n", tcp_state_name(tcp_state()),
+            tcp_state() == TCP_ESTABLISHED ? "HANDSHAKE OK" : "no connection");
 
     net_get_stats(&s1);
     kprintf("[net] ipv4 rx_ok=%u rx_drop=%u; stats rx=%u/%u tx=%u/%u drop=%u/%u err=%u/%u irq=%u\n",
