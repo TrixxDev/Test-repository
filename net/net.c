@@ -5,9 +5,11 @@
 #include "arp.h"
 #include "ipv4.h"
 #include "icmp.h"
+#include "udp.h"
 #include "virtio_net.h"
 #include "pit.h"
 #include "perf.h"
+#include "string.h"
 #include "kio.h"
 
 uint64_t net_now_ms(void) { return (uint64_t)pit_ticks() * 10; }
@@ -22,7 +24,7 @@ uint16_t inet_csum(const void *data, uint32_t len)
     return (uint16_t)~sum;
 }
 
-void net_init(void) { arp_init(); ipv4_init(); }
+void net_init(void) { arp_init(); ipv4_init(); udp_init(); }
 
 /* Drain every pending RX frame up into the dispatcher. */
 void net_poll(void)
@@ -48,6 +50,22 @@ static int wait_resolved(uint32_t ip, uint8_t mac[6], unsigned timeout_ms)
 
 #define OCTETS(ip) (unsigned)(((ip) >> 24) & 0xff), (unsigned)(((ip) >> 16) & 0xff), \
                    (unsigned)(((ip) >> 8) & 0xff),  (unsigned)((ip) & 0xff)
+
+/* Phase 7: a UDP echo handler for the self-test. Logs the datagram and echoes
+ * it back to the sender, so the host's nc sees a reply too. */
+#define UDP_TEST_PORT 9999
+static volatile int udp_rx_count;
+static void udp_test_handler(uint32_t src, uint16_t sport, const void *data, size_t len)
+{
+    char tmp[64];
+    unsigned n = (unsigned)len < sizeof(tmp) - 1 ? (unsigned)len : sizeof(tmp) - 1;
+    memcpy(tmp, data, n);
+    tmp[n] = '\0';
+    kprintf("[udp] rx %u bytes from %u.%u.%u.%u:%u: \"%s\"\n",
+            (unsigned)len, OCTETS(src), sport, tmp);
+    udp_rx_count++;
+    udp_send(src, UDP_TEST_PORT, sport, data, len);     /* echo back */
+}
 
 /* Phase 6 milestone: ping `dst` `count` times, reporting RTT per reply. Drives
  * the whole stack (Ethernet/ARP/IPv4/ICMP/checksum) in one round-trip each. */
@@ -149,6 +167,20 @@ void net_selftest(void)
 
     /* Phase 6: ping the gateway. The headline milestone. */
     net_ping(IP_GATEWAY, 4);
+
+    /* Phase 7: UDP. Fire a datagram at the host (10.0.2.2:9999) and listen for a
+     * reply on the same port. With `nc -u -l 9999` (or the udptest harness) on
+     * the host, this proves both UDP TX and RX through SLIRP's NAT. */
+    udp_bind(UDP_TEST_PORT, udp_test_handler);
+    const char hello[] = "hello from aurora\n";
+    kprintf("[udp] send \"hello from aurora\" -> %u.%u.%u.%u:%u\n",
+            OCTETS(IP_GATEWAY), UDP_TEST_PORT);
+    udp_send(IP_GATEWAY, UDP_TEST_PORT, UDP_TEST_PORT, hello, sizeof(hello) - 1);
+    uint64_t udl = net_now_ms() + 4000;
+    while (net_now_ms() < udl)
+        net_poll();
+    kprintf("[udp] %d datagram(s) received -- %s\n", udp_rx_count,
+            udp_rx_count ? "UDP RX OK" : "no reply (TX is proven via pcap)");
 
     net_get_stats(&s1);
     kprintf("[net] ipv4 rx_ok=%u rx_drop=%u; stats rx=%u/%u tx=%u/%u drop=%u/%u err=%u/%u irq=%u\n",

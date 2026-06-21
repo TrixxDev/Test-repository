@@ -266,9 +266,31 @@ The transport is done and audited; everything below is protocol logic over
 | 4 | **Ethernet** dispatch (`net/eth.c`) — split frames by EtherType → ARP / IPv4 | frames routed by type | ✅ |
 | 5 | **ARP** cache (`net/arp.c`, EMPTY/PENDING/RESOLVED, 60 s TTL) + reply to requests | host can `arp` us; we resolve the gateway | ✅ |
 | 6 | **IPv4** (`net/ipv4.c`) RX/TX + header checksum, **fragments dropped**; **ICMP** echo (`net/icmp.c`) | **`ping 10.0.2.2` — 4/4 replies** | ✅ |
-| 7 | **UDP** | `nc -u` round-trip Aurora ↔ host | next |
-| — | **DNS** (over UDP) | `ping openai.com` resolves a name | after UDP |
+| 7 | **UDP** (`net/udp.c`) — `udp_send` / `udp_bind`, no sockets | **`nc -u` round-trip Aurora ↔ host** | ✅ |
+| — | **DNS** (over UDP) | `ping openai.com` resolves a name | next |
 | 8 | **TCP** | the long pole — last, on purpose | later |
+
+## Phase 7 — UDP (datagrams, no sockets yet)
+
+Two calls, exactly the minimal surface: `udp_send(dst, src_port, dst_port,
+payload, len)` fires a datagram (next hop via `ipv4_send` → `arp_resolve`), and
+`udp_bind(port, handler)` registers a callback for an inbound port. `udp_input`
+demuxes by destination port to the bound handler. UDP checksums are optional over
+IPv4 (RFC 768), so TX sends 0 ("not computed") and RX skips verification — the
+substrate DNS/NTP/syslog will sit on. User-visible sockets come later.
+
+Verified through SLIRP's NAT with `tools/udptest.py` (a host listener on 9999 —
+equivalent to `nc -u -l 9999`):
+
+```
+[host] <- guest: b'hello from aurora\n'
+[host] -> guest: reply from host
+[udp] rx 16 bytes from 10.0.2.2:9999: "reply from host"
+[udp] 1 datagram(s) received -- UDP RX OK
+```
+
+pcap shows UDP 9999→9999 out (TX), in (RX), and the guest's echo — both
+directions over a single NAT mapping, no `hostfwd` needed.
 
 ## Phase 6 — IPv4 + ICMP (the ping milestone)
 

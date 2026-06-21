@@ -1,6 +1,7 @@
 /* IPv4 RX validation + TX assembly — see ipv4.h. */
 #include "ipv4.h"
 #include "icmp.h"
+#include "udp.h"
 #include "eth.h"
 #include "arp.h"
 #include "inet.h"
@@ -58,7 +59,7 @@ void ipv4_input(const void *packet, size_t len)
         icmp_input(src, payload, plen);
         break;
     case IPPROTO_UDP:
-        /* Phase 7: udp_input(src, payload, plen); */
+        udp_input(src, payload, plen);
         break;
     default:
         break;
