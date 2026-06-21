@@ -26,6 +26,13 @@ static int g_scene_dirty = 0;         /* partial damage accumulated in g_dmg_*  
 static int g_dmg_x, g_dmg_y, g_dmg_w, g_dmg_h;
 static int rendered_cx, rendered_cy;  /* where the cursor was last drawn to VRAM */
 
+/* ---- perf overlay (Ctrl+P) ---- */
+static int      perf_overlay = 0;             /* HUD visible? */
+static unsigned perf_frame_us, perf_compose_us, perf_blit_us;  /* last frame, microseconds */
+static int      perf_damage_pct;              /* % of the screen flushed last frame */
+static int      perf_fps, perf_frames;        /* frames rendered; FPS over a 1 s window */
+static unsigned perf_fps_mark;                /* start of the current FPS window (us) */
+
 /* Drag state: set when the user presses the left button inside a title bar, and
  * cleared on release. While active, each pointer motion re-places the window so
  * that the grabbed point stays under the cursor (offset bookkeeping). */
@@ -318,6 +325,62 @@ static void mark_window(int id)
 static void video_begin_frame(void) { /* RAM backend: nothing to acquire */ }
 static void video_end_frame(void)   { /* RAM backend: the LFB is already live */ }
 
+/* ---- perf overlay rendering (Ctrl+P) ---- */
+static void puts_at(char *dst, int *p, const char *s)
+{
+    while (*s && *p < 63) dst[(*p)++] = *s++;
+}
+static void putu_at(char *dst, int *p, unsigned v)
+{
+    char t[12]; int n = 0;
+    do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (n > 0 && *p < 63) dst[(*p)++] = t[--n];
+}
+static void perf_line_ms(char *dst, const char *label, unsigned us)
+{
+    int p = 0;
+    puts_at(dst, &p, label);
+    putu_at(dst, &p, us / 1000);
+    if (p < 63) dst[p++] = '.';
+    putu_at(dst, &p, (us % 1000) / 100);
+    puts_at(dst, &p, " ms");
+    dst[p] = '\0';
+}
+static void perf_line_int(char *dst, const char *label, int v, const char *suf)
+{
+    int p = 0;
+    puts_at(dst, &p, label);
+    putu_at(dst, &p, (unsigned)v);
+    puts_at(dst, &p, suf);
+    dst[p] = '\0';
+}
+
+/* Draw the HUD straight onto the framebuffer (like the cursor), so it never
+ * inflates the compose/blit numbers it reports. */
+static void draw_perf_overlay(void)
+{
+    int w = 170, h = 140;
+    int x = screen.width - w - 8;
+    int y = desktop_menubar_h() + 8;
+    uint32_t edge = GFX_RGB(0x3a, 0x42, 0x66);
+    gfx_fill_rect(&screen, x, y, w, h, GFX_RGB(0x0e, 0x11, 0x1c));
+    gfx_fill_rect(&screen, x, y, w, 1, edge);
+    gfx_fill_rect(&screen, x, y + h - 1, w, 1, edge);
+    gfx_fill_rect(&screen, x, y, 1, h, edge);
+    gfx_fill_rect(&screen, x + w - 1, y, 1, h, edge);
+
+    int tx = x + 11, ty = y + 10;
+    uint32_t hd = GFX_RGB(0x9f, 0xb8, 0xff), v = GFX_RGB(0xe6, 0xea, 0xf6);
+    char b[64];
+    gfx_draw_text(&screen, tx, ty, "Performance", hd);            ty += 21;
+    perf_line_int(b, "FPS:     ", perf_fps, "");                  gfx_draw_text(&screen, tx, ty, b, v); ty += 18;
+    perf_line_ms (b, "Frame:   ", perf_frame_us);                 gfx_draw_text(&screen, tx, ty, b, v); ty += 18;
+    perf_line_ms (b, "Compose: ", perf_compose_us);              gfx_draw_text(&screen, tx, ty, b, v); ty += 18;
+    perf_line_ms (b, "Blit:    ", perf_blit_us);                 gfx_draw_text(&screen, tx, ty, b, v); ty += 18;
+    perf_line_int(b, "Damage:  ", perf_damage_pct, " %");         gfx_draw_text(&screen, tx, ty, b, v); ty += 18;
+    perf_line_int(b, "Windows: ", wm_window_count(&st), "");      gfx_draw_text(&screen, tx, ty, b, v);
+}
+
 /* Paint one frame from the accumulated dirty state. Driven by WM_TICK at a fixed
  * cadence, fully decoupled from the input rate: a fast mouse stream only updates
  * state + records damage, and nothing reaches the framebuffer until the next
@@ -327,32 +390,62 @@ static void video_end_frame(void)   { /* RAM backend: the LFB is already live */
 static void render_frame(void)
 {
     int cursor_moved = (st.cursor_x != rendered_cx || st.cursor_y != rendered_cy);
-    if (!g_full_dirty && !g_scene_dirty && !cursor_moved)
+    int dirty = g_full_dirty || g_scene_dirty || cursor_moved;
+    if (!dirty && !perf_overlay)
         return;
 
-    video_begin_frame();
+    if (dirty) {
+        unsigned t0 = perf_us();
+        video_begin_frame();
 
-    /* Rebuild any window whose content/state changed since the last frame; a
-     * plain drag/move dirties nothing here, so it stays a pure blit. */
-    wm_refresh_surfaces(&st);
+        /* Rebuild any window whose content/state changed since the last frame; a
+         * plain drag/move dirties nothing here, so it stays a pure blit. */
+        wm_refresh_surfaces(&st);
 
-    if (g_full_dirty) {
-        compose();
-        flush(0, 0, screen.width, screen.height);
-    } else {
-        if (g_scene_dirty)
-            compose_dmg(g_dmg_x, g_dmg_y, g_dmg_w, g_dmg_h);
-        flush(rendered_cx, rendered_cy, WM_CURSOR_W, WM_CURSOR_H);   /* erase old cursor */
-        if (g_scene_dirty)
-            flush(g_dmg_x, g_dmg_y, g_dmg_w, g_dmg_h);
-        flush(st.cursor_x, st.cursor_y, WM_CURSOR_W, WM_CURSOR_H);   /* draw new cursor */
+        int flushed;                    /* pixels copied to VRAM this frame */
+        unsigned tc;
+        if (g_full_dirty) {
+            compose();
+            tc = perf_us();
+            flush(0, 0, screen.width, screen.height);
+            flushed = screen.width * screen.height;
+        } else {
+            if (g_scene_dirty)
+                compose_dmg(g_dmg_x, g_dmg_y, g_dmg_w, g_dmg_h);
+            tc = perf_us();
+            flush(rendered_cx, rendered_cy, WM_CURSOR_W, WM_CURSOR_H);   /* erase old cursor */
+            if (g_scene_dirty)
+                flush(g_dmg_x, g_dmg_y, g_dmg_w, g_dmg_h);
+            flush(st.cursor_x, st.cursor_y, WM_CURSOR_W, WM_CURSOR_H);   /* draw new cursor */
+            flushed = 2 * WM_CURSOR_W * WM_CURSOR_H +
+                      (g_scene_dirty ? g_dmg_w * g_dmg_h : 0);
+        }
+        unsigned t1 = perf_us();
+        video_end_frame();
+
+        perf_compose_us = tc - t0;      /* surface rebuild + compositing  */
+        perf_blit_us    = t1 - tc;      /* copy to the (slow) framebuffer */
+        perf_frame_us   = t1 - t0;
+        int total = screen.width * screen.height;
+        perf_damage_pct = total ? (int)((long)flushed * 100 / total) : 0;
+        if (perf_damage_pct > 100) perf_damage_pct = 100;
+        perf_frames++;
+
+        rendered_cx = st.cursor_x;
+        rendered_cy = st.cursor_y;
+        g_full_dirty = g_scene_dirty = 0;
+        g_dmg_w = g_dmg_h = 0;
     }
-    video_end_frame();
 
-    rendered_cx = st.cursor_x;
-    rendered_cy = st.cursor_y;
-    g_full_dirty = g_scene_dirty = 0;
-    g_dmg_w = g_dmg_h = 0;
+    if (perf_overlay) {                 /* FPS over a 1 s window, then draw the HUD */
+        unsigned now = perf_us();
+        if (now - perf_fps_mark >= 1000000u) {
+            perf_fps = perf_frames;
+            perf_frames = 0;
+            perf_fps_mark = now;
+        }
+        draw_perf_overlay();
+    }
 }
 
 /* Destroy a window and free the content buffer the server malloc'd for it, so
@@ -855,6 +948,12 @@ int main(int argc, char **argv)
             break;
         }
         case WM_KEY: {
+            if (req.x == 16) {           /* Ctrl+P: toggle the performance overlay */
+                perf_overlay = !perf_overlay;
+                if (perf_overlay) { perf_fps_mark = perf_us(); perf_frames = 0; }
+                mark_full();             /* draw it now / erase it on toggle-off */
+                break;
+            }
             /* Esc leaves fullscreen (the menubar is hidden then, so the menu can't
              * be used to exit). Otherwise deliver the key to the focused window's
              * app (it redraws via DRAW_* + PRESENT); if that app is dead, deliver()
