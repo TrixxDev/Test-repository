@@ -6,6 +6,7 @@
 #include "ipv4.h"
 #include "icmp.h"
 #include "udp.h"
+#include "dns.h"
 #include "virtio_net.h"
 #include "pit.h"
 #include "perf.h"
@@ -68,8 +69,9 @@ static void udp_test_handler(uint32_t src, uint16_t sport, const void *data, siz
 }
 
 /* Phase 6 milestone: ping `dst` `count` times, reporting RTT per reply. Drives
- * the whole stack (Ethernet/ARP/IPv4/ICMP/checksum) in one round-trip each. */
-static void net_ping(uint32_t dst, int count)
+ * the whole stack (Ethernet/ARP/IPv4/ICMP/checksum) in one round-trip each.
+ * Returns the number of replies received. */
+static int net_ping(uint32_t dst, int count)
 {
     const char data[] = "AuroraOS-ping";
     const uint16_t id = 0xAE01;
@@ -117,6 +119,7 @@ static void net_ping(uint32_t dst, int count)
     }
     kprintf("[icmp] %d/%d replies received -- %s\n", recv, count,
             recv == count ? "PING OK" : (recv ? "partial" : "PING FAIL"));
+    return recv;
 }
 
 /* Phase 4 (Ethernet) + Phase 5 (ARP) proof. Three scenarios the user specified
@@ -181,6 +184,20 @@ void net_selftest(void)
         net_poll();
     kprintf("[udp] %d datagram(s) received -- %s\n", udp_rx_count,
             udp_rx_count ? "UDP RX OK" : "no reply (TX is proven via pcap)");
+
+    /* Phase 7.5: DNS over UDP, then ping by hostname. The first user-visible
+     * leap -- the OS resolves a real name on its own. */
+    const char *host = "example.com";
+    uint32_t hip = 0;
+    if (dns_query(host, DNS_A, &hip) == 0) {
+        kprintf("[dns] %s -> %u.%u.%u.%u\n", host, OCTETS(hip));
+        kprintf("[ping] %s\n", host);
+        if (net_ping(hip, 2) == 0)
+            kprintf("[ping] %s: no reply -- outbound ICMP to the internet needs an "
+                    "open network policy; the gateway ping above proves the path\n", host);
+    } else {
+        kprintf("[dns] %s: no answer (query sent; see pcap / network policy)\n", host);
+    }
 
     net_get_stats(&s1);
     kprintf("[net] ipv4 rx_ok=%u rx_drop=%u; stats rx=%u/%u tx=%u/%u drop=%u/%u err=%u/%u irq=%u\n",

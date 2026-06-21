@@ -267,8 +267,31 @@ The transport is done and audited; everything below is protocol logic over
 | 5 | **ARP** cache (`net/arp.c`, EMPTY/PENDING/RESOLVED, 60 s TTL) + reply to requests | host can `arp` us; we resolve the gateway | ✅ |
 | 6 | **IPv4** (`net/ipv4.c`) RX/TX + header checksum, **fragments dropped**; **ICMP** echo (`net/icmp.c`) | **`ping 10.0.2.2` — 4/4 replies** | ✅ |
 | 7 | **UDP** (`net/udp.c`) — `udp_send` / `udp_bind`, no sockets | **`nc -u` round-trip Aurora ↔ host** | ✅ |
-| — | **DNS** (over UDP) | `ping openai.com` resolves a name | next |
-| 8 | **TCP** | the long pole — last, on purpose | later |
+| 7.5 | **DNS** over UDP (`net/dns.c`) — typed `dns_query(name, type)` | **`example.com` → real A record** | ✅ |
+| 8 | **TCP** | the long pole — last, on purpose | next |
+
+## Phase 7.5 — DNS (resolve a real name)
+
+`dns_query(name, type, &ip)` sends a recursion-desired query to the SLIRP DNS
+server (10.0.2.3:53), which forwards to the host's resolver, and parses the
+answer (skipping the echoed question and any CNAME records, handling name
+compression). The API takes a record **type** (`DNS_A`/`DNS_AAAA`/`DNS_CNAME`)
+from day one so adding AAAA later won't change callers — only A is parsed today.
+
+```
+[dns] example.com -> 104.20.23.154        # real A record from the internet
+[ping] example.com
+[icmp] PING 104.20.23.154 : 2 packets ...
+```
+
+This is the first user-visible leap: the OS resolves a real name on its own.
+Pinging the resolved address additionally needs **outbound ICMP to the
+internet**, which depends on the environment's network policy (the on-link
+gateway ping proves the ICMP path regardless).
+
+> Note: the net stack currently lives in the kernel for bring-up. As TCP and
+> user-facing networking arrive, resolution/transport move behind the existing
+> `netd` boundary (see Phase 8A) so TCP is not hard-wired into the kernel.
 
 ## Phase 7 — UDP (datagrams, no sockets yet)
 
