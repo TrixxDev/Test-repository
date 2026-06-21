@@ -8,7 +8,7 @@ CC      := clang
 LD      := ld.lld
 TARGET  := i686-elf
 
-INCLUDES := -Iinclude -Iarch/i386 -Idrivers -Ilib -Ikernel -Ifs
+INCLUDES := -Iinclude -Iarch/i386 -Idrivers -Ilib -Ikernel -Ifs -Inet
 
 CFLAGS  := --target=$(TARGET) -m32 -ffreestanding -nostdlib \
            -fno-pic -fno-pie -fno-stack-protector \
@@ -37,9 +37,9 @@ LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc
 # Portable graphics/compositor code, built for userspace and linked into wserver.
 WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
 
-C_SRC := $(shell find kernel arch drivers lib fs -name '*.c')
+C_SRC := $(shell find kernel arch drivers lib fs net -name '*.c')
 C_SRC := $(sort $(C_SRC) $(EMBEDDED))
-S_SRC := $(shell find kernel arch drivers lib fs -name '*.S')
+S_SRC := $(shell find kernel arch drivers lib fs net -name '*.S')
 OBJ   := $(C_SRC:.c=.o) $(S_SRC:.S=.o)
 
 .PHONY: all run debug run-vbe iso gui clean

@@ -239,37 +239,6 @@ static void rx_fill(void)
     outw(io_base + R_QUEUE_NOTIFY, RX_QUEUE);
 }
 
-/* Phase 3 proof: ARP-who-has 10.0.2.2 (the SLIRP gateway) to elicit a reply. */
-static void arp_probe(void)
-{
-    uint8_t a[42];
-    int n = 0;
-    for (int i = 0; i < 6; i++) a[n++] = 0xFF;   /* eth dst: broadcast */
-    for (int i = 0; i < 6; i++) a[n++] = mac[i]; /* eth src: us         */
-    a[n++] = 0x08; a[n++] = 0x06;                /* ethertype: ARP      */
-    a[n++] = 0x00; a[n++] = 0x01;                /* htype: Ethernet     */
-    a[n++] = 0x08; a[n++] = 0x00;                /* ptype: IPv4         */
-    a[n++] = 6; a[n++] = 4;                      /* hlen, plen          */
-    a[n++] = 0x00; a[n++] = 0x01;                /* oper: request       */
-    for (int i = 0; i < 6; i++) a[n++] = mac[i]; /* sender HW           */
-    a[n++] = 10; a[n++] = 0; a[n++] = 2; a[n++] = 15;   /* sender IP 10.0.2.15 */
-    for (int i = 0; i < 6; i++) a[n++] = 0x00;   /* target HW (unknown) */
-    a[n++] = 10; a[n++] = 0; a[n++] = 2; a[n++] = 2;    /* target IP 10.0.2.2  */
-    net_send_frame(a, n);
-
-    uint8_t rb[1600];
-    for (int spin = 0; spin < 40000000; spin++) {
-        int r = net_recv_frame(rb, sizeof(rb));
-        if (r >= 14) {
-            kprintf("[net] rx %d bytes src=%x:%x:%x:%x:%x:%x type=0x%x%x\n",
-                    r, rb[6], rb[7], rb[8], rb[9], rb[10], rb[11], rb[12], rb[13]);
-            return;
-        }
-        barrier();
-    }
-    kprintf("[net] no frame received (rx timeout)\n");
-}
-
 void virtio_net_init(void)
 {
     memset(&stats, 0, sizeof(stats));
@@ -305,11 +274,5 @@ void virtio_net_init(void)
     kprintf("[net] virtio-net up: io=0x%x irq=%d mac=%x:%x:%x:%x:%x:%x feat=0x%x\n",
             io_base, dev.irq, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
             host_features);
-
-    arp_probe();
-
-    kprintf("[net] stats rx=%d/%d tx=%d/%d drop=%d/%d err=%d/%d irq=%d\n",
-            stats.rx_packets, stats.rx_bytes, stats.tx_packets, stats.tx_bytes,
-            stats.rx_dropped, stats.tx_dropped, stats.rx_errors, stats.tx_errors,
-            stats.rx_irqs);
+    /* Protocol bring-up + traffic now live in the net layer (net_selftest). */
 }

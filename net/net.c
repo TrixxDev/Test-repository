@@ -1,0 +1,89 @@
+/* Network glue: time base, the RX pump, and the Phase 4/5 self-test. */
+#include "netstack.h"
+#include "inet.h"
+#include "eth.h"
+#include "arp.h"
+#include "virtio_net.h"
+#include "pit.h"
+#include "kio.h"
+
+uint64_t net_now_ms(void) { return (uint64_t)pit_ticks() * 10; }
+
+void net_init(void) { arp_init(); }
+
+/* Drain every pending RX frame up into the dispatcher. */
+void net_poll(void)
+{
+    uint8_t frame[1600];
+    int n;
+    while ((n = net_recv_frame(frame, sizeof(frame))) > 0)
+        eth_input(frame, (size_t)n);
+}
+
+/* Poll the wire until `ip` resolves in the cache, or `timeout_ms` elapses. */
+static int wait_resolved(uint32_t ip, uint8_t mac[6], unsigned timeout_ms)
+{
+    uint64_t deadline = net_now_ms() + timeout_ms;
+    while (net_now_ms() < deadline) {
+        net_poll();
+        if (arp_lookup(ip, mac))
+            return 1;
+        __asm__ volatile("" ::: "memory");
+    }
+    return 0;
+}
+
+#define OCTETS(ip) (unsigned)(((ip) >> 24) & 0xff), (unsigned)(((ip) >> 16) & 0xff), \
+                   (unsigned)(((ip) >> 8) & 0xff),  (unsigned)((ip) & 0xff)
+
+/* Phase 4 (Ethernet) + Phase 5 (ARP) proof. Three scenarios the user specified
+ * must pass before IPv4:
+ *   1. who-has the gateway -> reply learned;
+ *   2. a repeat lookup is served from the cache without touching the wire;
+ *   3. after expiry the entry is gone and a fresh request goes out.
+ * Scenario 3 forces expiry via a test hook rather than sleeping 60 s. */
+void net_selftest(void)
+{
+    if (!virtio_net_present()) {
+        kprintf("[net] selftest skipped (no NIC)\n");
+        return;
+    }
+
+    uint8_t mac[6];
+    struct net_stats s0, s1;
+
+    /* (1) Resolve the gateway. */
+    kprintf("[arp] (1) who-has %u.%u.%u.%u\n", OCTETS(IP_GATEWAY));
+    arp_resolve(IP_GATEWAY, mac);
+    if (!wait_resolved(IP_GATEWAY, mac, 2000)) {
+        kprintf("[arp] (1) FAIL: no reply (timeout)\n");
+        return;
+    }
+    kprintf("[arp] (1) resolved -> %x:%x:%x:%x:%x:%x\n",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    /* (2) Repeat: must come from the cache with no extra TX. */
+    net_get_stats(&s0);
+    int hit = arp_lookup(IP_GATEWAY, mac);
+    int r2  = arp_resolve(IP_GATEWAY, mac);
+    net_get_stats(&s1);
+    kprintf("[arp] (2) cache lookup=%d resolve=%d, tx %u->%u (%s)\n",
+            hit, r2, s0.tx_packets, s1.tx_packets,
+            (hit && r2 && s0.tx_packets == s1.tx_packets) ? "cache hit, no wire" : "FAIL");
+
+    /* (3) Force expiry: the entry must vanish and a fresh request go out. */
+    arp_test_expire_all();
+    int stale = arp_lookup(IP_GATEWAY, mac);    /* expect 0 */
+    net_get_stats(&s0);
+    arp_resolve(IP_GATEWAY, mac);               /* should send a new request */
+    int ok = wait_resolved(IP_GATEWAY, mac, 2000);
+    net_get_stats(&s1);
+    kprintf("[arp] (3) post-expiry lookup=%d, re-resolved=%d, tx %u->%u (%s)\n",
+            stale, ok, s0.tx_packets, s1.tx_packets,
+            (stale == 0 && ok && s1.tx_packets > s0.tx_packets) ? "expired -> re-asked" : "FAIL");
+
+    net_get_stats(&s1);
+    kprintf("[arp] cache entries=%d; stats rx=%u/%u tx=%u/%u drop=%u/%u err=%u/%u irq=%u\n",
+            arp_cache_count(), s1.rx_packets, s1.rx_bytes, s1.tx_packets, s1.tx_bytes,
+            s1.rx_dropped, s1.tx_dropped, s1.rx_errors, s1.tx_errors, s1.rx_irqs);
+}
