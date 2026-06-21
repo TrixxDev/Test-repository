@@ -12,6 +12,7 @@
 #include "socket.h"
 #include "uaccess.h"
 #include "shm.h"
+#include "virtio_net.h"
 
 #define MAX_PROCS    32
 #define USTACK_TOP   0xC0000000u
@@ -173,6 +174,17 @@ int sys_sysinfo(struct sysinfo *out)
     si.procs       = (unsigned)process_count();
     si.uptime_ms   = pit_ticks() * 10;          /* PIT runs at 100 Hz */
     memcpy(out, &si, sizeof(si));
+    return 0;
+}
+
+/* Copy the network interface counters out to user space. */
+int sys_netstat(struct net_stats *out)
+{
+    if (!is_user_addr((uint32_t)out, sizeof(*out)))
+        return -1;
+    struct net_stats ns;
+    net_get_stats(&ns);
+    memcpy(out, &ns, sizeof(ns));
     return 0;
 }
 

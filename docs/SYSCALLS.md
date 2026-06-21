@@ -45,6 +45,8 @@ return). Numbers are defined in `include/syscall_abi.h` and dispatched in
 | 37 | `shmdel` | `shm_destroy(id) -> 0/-1` | **Creator only.** Unmap object `id` from the caller, mark it destroyed, and free its frames once no address space still maps it (deferred free). A creator's exit destroys its objects the same way. |
 | 38 | `shmunmap` | `shm_unmap(id) -> 0/-1` | Drop the caller's mapping of object `id` (decrements the reference count; frees the frames if this was the last mapper of a destroyed object). A process's exit/exec releases all its mappings automatically. |
 | 39 | `shmgrant` | `shm_grant(id, pid) -> 0/-1` | **Creator only.** Authorize process `pid` to `shm_map` object `id`. The window server grants each window's surface to its owning app; the clipboard uses `SHM_PUBLIC` instead. |
+| 40 | `perfus` | `perf_us() -> us` | Microseconds since boot (low 32 bits, wraps ~every 71 min), a high-resolution monotonic clock from a PIT-calibrated RDTSC. Used for frame/compose/blit timing and the perf overlay. |
+| 41 | `netstat` | `netstat(struct net_stats*) -> 0/-1` | Snapshot the NIC counters: up flag, MAC, RX/TX packets & bytes, dropped, errors, IRQs (see [NETWORKING.md](NETWORKING.md)). Surfaced in Settings → System. |
 
 ## Notes
 

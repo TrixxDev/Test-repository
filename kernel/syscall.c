@@ -187,6 +187,10 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)perf_now_us();    /* low 32 bits: ~71 min before wrap */
         break;
 
+    case SYS_NETSTAT:
+        regs->eax = (uint32_t)sys_netstat((struct net_stats *)regs->ebx);
+        break;
+
     case SYS_SHMDEL:
         regs->eax = (uint32_t)shm_destroy((int)regs->ebx);
         break;

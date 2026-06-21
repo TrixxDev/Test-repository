@@ -89,6 +89,12 @@ static void utoa(unsigned v, char *dst)
     int p = 0; while (n > 0) dst[p++] = tmp[--n]; dst[p] = '\0';
 }
 
+static void hex2(unsigned char b, char *dst)
+{
+    const char *h = "0123456789abcdef";
+    dst[0] = h[(b >> 4) & 0xf]; dst[1] = h[b & 0xf]; dst[2] = '\0';
+}
+
 /* "label: NNN unit" */
 static void line_kv(int y, const char *label, unsigned v, const char *unit)
 {
@@ -160,6 +166,29 @@ static void redraw(void)
         line_kv(sx(104), "Free pages: ", si.free_frames,    0);
         line_kv(sx(124), "Processes:  ", si.procs,          0);
         line_kv(sx(144), "Uptime:     ", si.uptime_ms / 1000, "s");
+
+        struct net_stats ns;
+        memset(&ns, 0, sizeof(ns));
+        netstat(&ns);
+        text(X0, sx(176), "Network", GFX_RGB(0x11, 0x11, 0x18));
+        if (ns.up) {
+            char buf[48]; int q = 0;
+            const char *ml = "MAC: ";
+            for (int i = 0; ml[i]; i++) buf[q++] = ml[i];
+            for (int i = 0; i < 6; i++) {
+                if (i) buf[q++] = ':';
+                char hx[3]; hex2(ns.mac[i], hx);
+                buf[q++] = hx[0]; buf[q++] = hx[1];
+            }
+            buf[q] = '\0';
+            text(X0, sx(198), buf, GFX_RGB(0x33, 0x33, 0x3a));
+            line_kv(sx(218), "RX packets: ", ns.rx_packets, 0);
+            line_kv(sx(238), "TX packets: ", ns.tx_packets, 0);
+            line_kv(sx(258), "Dropped:    ",
+                    ns.rx_dropped + ns.tx_dropped + ns.rx_errors + ns.tx_errors, 0);
+        } else {
+            text(X0, sx(198), "(no interface)", GFX_RGB(0x80, 0x80, 0x88));
+        }
     }
     present();
 }

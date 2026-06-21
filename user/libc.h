@@ -70,6 +70,8 @@ static inline int   readdir(const char *path, int index, struct dirent *out) { r
 static inline int   halt(void)                          { return _syscall(SYS_HALT, 0, 0, 0); }
 /* Fill *out with RAM/process/uptime stats. Returns 0/-1. */
 static inline int   sysinfo(struct sysinfo *out)        { return _syscall(SYS_SYSINFO, (int)out, 0, 0); }
+/* Fill *out with network interface counters (up/mac/rx/tx/drops). Returns 0/-1. */
+static inline int   netstat(struct net_stats *out)      { return _syscall(SYS_NETSTAT, (int)out, 0, 0); }
 /* Block this thread for ~ms milliseconds (10 ms granularity; the PIT is 100 Hz). */
 static inline int   msleep(int ms)                      { return _syscall(SYS_SLEEP, ms, 0, 0); }
 /* High-resolution monotonic clock: microseconds since boot (low 32 bits, wraps

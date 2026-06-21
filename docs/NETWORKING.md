@@ -116,8 +116,155 @@ aurora> echocli hello-loopback    # client -> netd -> server -> echo back
 [echocli] echo: hello-loopback
 ```
 
-## Explicitly out of scope for Phase 8
+## Explicitly out of scope for Phase 8A
 
 TLS, HTTPS, IPv6, DHCP, Wi-Fi. Phase 8B is the first real wire: a NIC driver
 (virtio-net / rtl8139) and ARP → IPv4 → UDP → TCP → DNS, behind the same netd
 boundary.
+
+---
+
+# AuroraOS Networking — Phase 8B (the first real wire)
+
+Phase 8B brings up a **hardware NIC** and a raw Ethernet transport beneath the
+loopback layer above. The transport (`drivers/virtio_net.c`) is deliberately the
+*only* piece that touches the device; every protocol layer to come (Ethernet
+dispatch, ARP, IPv4, UDP, TCP) is plain logic built on its two primitives.
+
+```
+   ARP / IPv4 / UDP / TCP   (logic — built next, no DMA)
+        net_send_frame() ▲ ▼ net_recv_frame()
+   ┌──────────────────────────────────────────┐
+   │  virtio_net.c  — transport (the only      │
+   │  code that talks to the device + DMA)     │
+   └──────────────────────────────────────────┘
+        virtqueues (RX=0, TX=1) in DMA memory
+   ┌──────────────────────────────────────────┐
+   │  pci.c — config space, BAR0, bus-master   │
+   └──────────────────────────────────────────┘
+```
+
+## The transport (`drivers/virtio_net.c`)
+
+Legacy/transitional **virtio-net** (PCI vendor `0x1AF4`, device `0x1000`). The
+legacy virtio-pci interface is a small block of I/O registers behind BAR0; bring-
+up is the standard handshake: reset → `ACK` → `DRIVER` → negotiate features
+(we offer **none** — guest features = 0, so the device uses the 10-byte legacy
+`virtio_net_hdr` and never merges RX buffers) → read the MAC → set up the
+queues → `DRIVER_OK`.
+
+A **virtqueue** is a descriptor table + an *available* ring (driver→device) + a
+*used* ring (device→driver), one contiguous page-aligned region whose page number
+is handed to the device via `QUEUE_PFN`. virtio-net uses queue 0 for RX and queue
+1 for TX. `vq_setup()` carves one out of a static buffer and registers it.
+
+### DMA without a DMA allocator
+
+This kernel identity-maps low physical memory (phys == virt), so a page-aligned
+**static BSS buffer's address is also its physical address**. The rings and packet
+buffers therefore live in `__attribute__((aligned(4096))) static uint8_t[...]`
+arrays and are handed to the device directly — no DMA allocator is needed yet.
+This is the single most load-bearing assumption in the driver; if the kernel ever
+moves to a higher-half / non-identity layout, the transport needs a real
+phys↔virt translation here and **nowhere else**.
+
+### The two primitives
+
+```c
+int net_send_frame(const void *data, unsigned len);   /* TX one Ethernet frame */
+int net_recv_frame(void *buf, unsigned cap);          /* RX one, or 0 if none  */
+```
+
+- **TX** stages `[10-byte zero hdr][frame]` in a static buffer, posts one
+  descriptor, publishes it on the available ring, notifies the device, then
+  bounded-polls the used ring for completion.
+- **RX** pre-posts 16 device-writable buffers (`rx_fill()`). `net_recv_frame()`
+  drains the used ring, strips the virtio header, copies out one frame, and
+  recycles the descriptor back to the device.
+- The **IRQ** handler (IRQ11 → vector 43) only reads the ISR to ack the device
+  and bumps a counter; RX is polled. This is intentional (see *IRQ storm* below).
+
+## Architecture review — what was hardened before going up the stack
+
+Phase 8B is the first code that ingests data from **outside the machine**, so —
+mirroring the SHM and graphics reviews — the transport was audited and hardened
+before any protocol logic was layered on top.
+
+### 1. Inbound bounds checking
+
+Everything the **device** reports about a received buffer is treated as
+untrusted. `net_recv_frame()` validates each used-ring entry before copying:
+
+| Field | Check | On failure |
+|-------|-------|-----------|
+| descriptor `id` | `id < RX_BUFS` | drop (`rx_dropped++`), cannot recycle |
+| length | `>= NET_HDR_LEN + ETH_MIN` (14) | drop runt (`rx_errors++`), recycle |
+| length | `<= RX_BUF_SZ` and payload `<= ETH_MAX` (1514) | drop oversize (`rx_errors++`), recycle |
+| copy size | `min(payload, caller cap)` | clamp — never overruns either buffer |
+
+TX is symmetric: `net_send_frame()` rejects `len < 14` or `len > 1514` before it
+ever touches a descriptor (`tx_dropped++`).
+
+### 2. RX-ring exhaustion
+
+The earlier draft returned **after a single used entry** and returned `0` for
+both "queue empty" *and* "frame dropped" — so one runt could mask the real frame
+behind it, and a burst could appear to stall the ring. The hardened version
+**drains in a loop**: it pulls and recycles every used entry until it finds one
+plausible frame to return (or the ring is genuinely empty), so a flood of
+runts/garbage can neither wedge the ring nor hide a good frame. Buffers are
+recycled the instant they are consumed, so the 16-deep ring keeps cycling as long
+as anything polls it. (If inbound out-runs the poller, the *device* drops the
+excess — backpressure lives on the device side, never as a guest-side leak.)
+
+### 3. IRQ-storm resistance
+
+A classic first-stack failure is doing real work in the IRQ: a packet flood then
+becomes an interrupt flood that starves the compositor. AuroraOS sidesteps this
+by design — **the ISR does no work**: it acks the device and increments a counter,
+nothing more. All RX processing happens in polled context at the upper layers'
+pace, so inbound load can never preempt the GUI render loop.
+
+### 4. Per-interface statistics
+
+The transport keeps counters (`struct net_stats`): `rx/tx_packets`,
+`rx/tx_bytes`, `rx/tx_dropped`, `rx/tx_errors`, `rx_irqs`. They are exposed via
+`SYS_NETSTAT` (libc `netstat()`) and surfaced in **Settings → System** (NIC up,
+MAC, RX/TX packets, dropped). This pays for itself immediately when debugging
+IPv4 — a malformed packet shows up as a `dropped`/`error` tick instead of a
+silent black hole.
+
+## Verification
+
+```
+qemu-system-i386 -kernel aurora.elf -m 64M -drive file=disk.img,format=raw,if=ide \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+  -object filter-dump,id=d0,netdev=n0,file=/tmp/net.pcap -serial file:/tmp/log
+```
+
+At boot the driver sends an ARP "who-has 10.0.2.2" and waits for the reply. A
+healthy run shows both frames in the pcap and matching counters on the serial:
+
+```
+[net] virtio-net up: io=0xc000 irq=11 mac=52:54:00:12:34:56 feat=0x79bf8064
+[net] rx 64 bytes src=52:55:0a:00:02:02 type=0x0806      # SLIRP's ARP reply
+[net] stats rx=1/64 tx=1/42 drop=0/0 err=0/0 irq=1
+```
+
+```
+frame 1: 42 bytes ethertype=0x0806 src=52:54:00:12:34:56  # our request
+frame 2: 64 bytes ethertype=0x0806 src=52:55:0a:00:02:02  # gateway reply
+```
+
+## Roadmap (logic on top of the proven transport)
+
+The transport is done and audited; everything below is protocol logic over
+`net_send_frame`/`net_recv_frame`, with no further DMA risk.
+
+| Phase | Layer | Done = |
+|-------|-------|--------|
+| 4 | **Ethernet** dispatch (`ethernet.c`) — split frames by EtherType → ARP / IPv4 | frames routed by type |
+| 5 | **ARP** cache (`arp_lookup`/`arp_insert`, 60 s timeout) + reply to requests | host can `arp` us; we resolve the gateway |
+| 6 | **IPv4** RX/TX + header checksum; **fragments dropped** | ping reply (ICMP echo) |
+| 7 | **UDP** | `nc -u` round-trip Aurora ↔ host |
+| 8 | **TCP** | the long pole — last, on purpose |

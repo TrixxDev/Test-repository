@@ -56,6 +56,7 @@
 #define SYS_SHMGRANT 39 /* shm_grant(id, pid) -> 0 / -1 (creator grants map)   */
 #define SYS_PERFUS  40  /* perf_us() -> microseconds since boot (low 32 bits),  */
                         /*   a high-resolution monotonic clock (RDTSC-based)    */
+#define SYS_NETSTAT 41  /* netstat(struct net_stats *out) -> 0/-1               */
 
 /* shm_create() flags (arg2). */
 #define SHM_PUBLIC  1   /* any process may shm_map the object (e.g. clipboard) */
@@ -69,6 +70,18 @@ struct sysinfo {
     unsigned uptime_ms;     /* milliseconds since boot           */
 };
 /* Note: SYS_REGISTER takes a service mode in arg2 (was reserved/0).   */
+
+/* ---- network interface statistics (SYS_NETSTAT) ---- */
+struct net_stats {
+    unsigned up;                /* 1 if a NIC is present and DRIVER_OK   */
+    unsigned char mac[6];       /* our MAC address                       */
+    unsigned char _pad[2];
+    unsigned rx_packets, tx_packets;
+    unsigned rx_bytes,   tx_bytes;
+    unsigned rx_dropped, tx_dropped;  /* frames rejected by bounds checks */
+    unsigned rx_errors,  tx_errors;   /* runts/oversize (rx), timeouts (tx) */
+    unsigned rx_irqs;           /* device interrupts serviced            */
+};
 
 /* ---- directory enumeration (SYS_READDIR) ---- */
 #define DT_FILE 1       /* a regular file      */
@@ -95,7 +108,7 @@ struct dirent {
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
 
-#define SYS_MAX    41   /* one past the last valid syscall number    */
+#define SYS_MAX    42   /* one past the last valid syscall number    */
 
 /* ---- socket layer (AF_LOOPBACK only for now) ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

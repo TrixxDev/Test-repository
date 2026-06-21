@@ -43,7 +43,8 @@
 #define MAX_QSIZE     256
 #define VRING_BYTES   16384         /* fits a 256-entry legacy vring (~10 KiB) */
 #define NET_HDR_LEN   10            /* legacy virtio_net_hdr, no MRG_RXBUF */
-#define ETH_MAX       1514
+#define ETH_MIN       14            /* a frame shorter than this has no header */
+#define ETH_MAX       1514          /* DIX Ethernet payload cap (no jumbo/FCS) */
 #define RX_BUFS       16            /* receive buffers we post */
 #define RX_BUF_SZ     2048
 
@@ -80,13 +81,23 @@ static uint16_t  io_base;
 static uint8_t   mac[6];
 static int       present;
 static struct vq txq, rxq;
-static volatile unsigned rx_irqs;   /* diagnostics: device interrupts seen */
+static struct net_stats stats;      /* interface counters (see net_get_stats) */
 
 static inline void barrier(void) { __asm__ volatile("" ::: "memory"); }
 static uint32_t align_up(uint32_t v, uint32_t a) { return (v + a - 1) & ~(a - 1); }
 
 int            virtio_net_present(void) { return present; }
 const uint8_t *virtio_net_mac(void)     { return mac; }
+
+void net_get_stats(struct net_stats *out)
+{
+    if (!out)
+        return;
+    *out = stats;               /* snapshot of plain counters */
+    out->up = present ? 1u : 0u;
+    for (int i = 0; i < 6; i++)
+        out->mac[i] = mac[i];
+}
 
 /* Carve a virtqueue out of `buf` and register its page number with the device. */
 static int vq_setup(struct vq *q, uint8_t *buf, int index)
@@ -117,8 +128,10 @@ static int vq_setup(struct vq *q, uint8_t *buf, int index)
 
 int net_send_frame(const void *data, unsigned len)
 {
-    if (!present || len == 0 || len > ETH_MAX)
+    if (!present || !data || len < ETH_MIN || len > ETH_MAX) {
+        stats.tx_dropped++;                     /* malformed: never hits the wire */
         return -1;
+    }
 
     memset(tx_buf, 0, NET_HDR_LEN);             /* zeroed legacy net header */
     memcpy(tx_buf + NET_HDR_LEN, data, len);
@@ -135,43 +148,79 @@ int net_send_frame(const void *data, unsigned len)
     outw(io_base + R_QUEUE_NOTIFY, TX_QUEUE);
 
     uint16_t target = *txq.avail_idx;
-    for (int spin = 0; spin < 4000000 && *txq.used_idx != target; spin++)
+    int done = 0;
+    for (int spin = 0; spin < 4000000; spin++) {
+        if (*txq.used_idx == target) { done = 1; break; }
         barrier();
+    }
+    if (!done) {
+        stats.tx_errors++;                      /* device never completed the buffer */
+        return -1;
+    }
+    stats.tx_packets++;
+    stats.tx_bytes += len;
     return 0;
+}
+
+/* Hand RX descriptor `id` back to the device so it can refill that buffer. */
+static void rx_recycle(uint32_t id)
+{
+    rxq.avail_ring[*rxq.avail_idx % rxq.size] = (uint16_t)id;
+    barrier();
+    (*rxq.avail_idx)++;
+    barrier();
+    outw(io_base + R_QUEUE_NOTIFY, RX_QUEUE);
 }
 
 int net_recv_frame(void *buf, unsigned cap)
 {
-    if (!present || rxq.last_used == *rxq.used_idx)
-        return 0;                               /* nothing received */
+    if (!present || !buf || cap == 0)
+        return 0;
 
-    struct vring_used_elem e = rxq.used_ring[rxq.last_used % rxq.size];
-    uint32_t id  = e.id;
-    uint32_t len = e.len;
-    int out = 0;
-    if (id < RX_BUFS && len > NET_HDR_LEN) {     /* strip the virtio_net_hdr */
-        out = (int)(len - NET_HDR_LEN);
-        if ((unsigned)out > cap) out = (int)cap;
-        memcpy(buf, rx_bufs[id] + NET_HDR_LEN, (size_t)out);
-    }
-    rxq.last_used++;
+    /* Drain the used ring until we find one plausible frame to return, or it is
+     * empty. Every entry we pull is recycled, so a burst of runts/garbage can
+     * never wedge the ring or hide the next good frame behind them. */
+    while (rxq.last_used != *rxq.used_idx) {
+        struct vring_used_elem e = rxq.used_ring[rxq.last_used % rxq.size];
+        uint32_t id  = e.id;
+        uint32_t len = e.len;
+        rxq.last_used++;
 
-    /* Recycle the buffer back to the device. */
-    if (id < RX_BUFS) {
-        rxq.avail_ring[*rxq.avail_idx % rxq.size] = (uint16_t)id;
-        barrier();
-        (*rxq.avail_idx)++;
-        barrier();
-        outw(io_base + R_QUEUE_NOTIFY, RX_QUEUE);
+        if (id >= RX_BUFS) {        /* device handed back a bogus descriptor id */
+            stats.rx_dropped++;
+            continue;               /* can't recycle what we can't address */
+        }
+
+        /* The device-reported length must cover the virtio header + a minimal
+         * Ethernet header, and must not exceed our buffer or the wire MTU. */
+        int ok = 1;
+        unsigned payload = 0;
+        if (len < NET_HDR_LEN + ETH_MIN) {
+            stats.rx_errors++; ok = 0;          /* runt */
+        } else if (len > RX_BUF_SZ || len - NET_HDR_LEN > ETH_MAX) {
+            stats.rx_errors++; ok = 0;          /* oversize / impossible */
+        } else {
+            payload = len - NET_HDR_LEN;
+        }
+
+        if (ok) {
+            unsigned n = payload < cap ? payload : cap;
+            memcpy(buf, rx_bufs[id] + NET_HDR_LEN, n);
+            rx_recycle(id);
+            stats.rx_packets++;
+            stats.rx_bytes += payload;
+            return (int)n;
+        }
+        rx_recycle(id);             /* drop the bad frame, reuse the buffer */
     }
-    return out;
+    return 0;                       /* ring empty */
 }
 
 static void on_virtio_irq(registers_t *regs)
 {
     (void)regs;
     (void)inb(io_base + R_ISR);   /* reading ISR acks the device interrupt */
-    rx_irqs++;                     /* RX is polled for now; just count + ack */
+    stats.rx_irqs++;              /* RX is polled for now; the ISR only acks  */
 }
 
 /* Post all RX buffers so the device can fill them, then notify. */
@@ -223,6 +272,7 @@ static void arp_probe(void)
 
 void virtio_net_init(void)
 {
+    memset(&stats, 0, sizeof(stats));
     if (!pci_find(VIRTIO_VENDOR, VIRTIO_NET_DEV, &dev)) {
         kprintf("[net] no virtio-net device on PCI\n");
         return;
@@ -257,4 +307,9 @@ void virtio_net_init(void)
             host_features);
 
     arp_probe();
+
+    kprintf("[net] stats rx=%d/%d tx=%d/%d drop=%d/%d err=%d/%d irq=%d\n",
+            stats.rx_packets, stats.rx_bytes, stats.tx_packets, stats.tx_bytes,
+            stats.rx_dropped, stats.tx_dropped, stats.rx_errors, stats.tx_errors,
+            stats.rx_irqs);
 }
