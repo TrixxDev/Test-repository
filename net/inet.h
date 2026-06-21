@@ -28,5 +28,14 @@ static inline uint32_t ntohl(uint32_t x) { return htonl(x); }
 #define ETH_P_IPV4  0x0800
 #define ETH_P_ARP   0x0806
 
+/* IPv4 protocol numbers. */
+#define IPPROTO_ICMP  1
+#define IPPROTO_UDP   17
+
 /* Monotonic milliseconds since boot (PIT is 100 Hz -> 10 ms/tick). */
 uint64_t net_now_ms(void);
+
+/* Internet checksum (RFC 1071): one's-complement sum over `len` bytes. Compute
+ * with the checksum field zeroed and store the result directly; verify by
+ * summing the whole structure and checking the result is 0. */
+uint16_t inet_csum(const void *data, uint32_t len);

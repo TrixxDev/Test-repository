@@ -261,10 +261,41 @@ frame 2: 64 bytes ethertype=0x0806 src=52:55:0a:00:02:02  # gateway reply
 The transport is done and audited; everything below is protocol logic over
 `net_send_frame`/`net_recv_frame`, with no further DMA risk.
 
-| Phase | Layer | Done = |
-|-------|-------|--------|
-| 4 | **Ethernet** dispatch (`ethernet.c`) — split frames by EtherType → ARP / IPv4 | frames routed by type |
-| 5 | **ARP** cache (`arp_lookup`/`arp_insert`, 60 s timeout) + reply to requests | host can `arp` us; we resolve the gateway |
-| 6 | **IPv4** RX/TX + header checksum; **fragments dropped** | ping reply (ICMP echo) |
-| 7 | **UDP** | `nc -u` round-trip Aurora ↔ host |
-| 8 | **TCP** | the long pole — last, on purpose |
+| Phase | Layer | Done = | Status |
+|-------|-------|--------|--------|
+| 4 | **Ethernet** dispatch (`net/eth.c`) — split frames by EtherType → ARP / IPv4 | frames routed by type | ✅ |
+| 5 | **ARP** cache (`net/arp.c`, EMPTY/PENDING/RESOLVED, 60 s TTL) + reply to requests | host can `arp` us; we resolve the gateway | ✅ |
+| 6 | **IPv4** (`net/ipv4.c`) RX/TX + header checksum, **fragments dropped**; **ICMP** echo (`net/icmp.c`) | **`ping 10.0.2.2` — 4/4 replies** | ✅ |
+| 7 | **UDP** | `nc -u` round-trip Aurora ↔ host | next |
+| — | **DNS** (over UDP) | `ping openai.com` resolves a name | after UDP |
+| 8 | **TCP** | the long pole — last, on purpose | later |
+
+## Phase 6 — IPv4 + ICMP (the ping milestone)
+
+IPv4 is deliberately minimal. **RX** (`ipv4_input`) accepts a packet only if it
+is version 4, IHL ≥ 5, **not a fragment** (`frag_off & 0x3FFF == 0`, DF ignored),
+its header checksum verifies, and its destination is our IP — anything else is
+counted and dropped. **TX** (`ipv4_send`) builds just a 20-byte header + payload
++ checksum: no options, no fragmentation, no broadcast/multicast. The next hop is
+resolved through `arp_resolve()` (on-link direct, off-link via the gateway), so
+the IP layer never touches the ARP cache directly and returns *pending* if the
+MAC isn't known yet — the caller simply retries.
+
+**ICMP** (`net/icmp.c`) is echo-only, both halves: it reflects incoming echo
+requests for our IP (so the host can ping us) and matches the replies to our own
+requests (so we can ping the gateway). The boot self-test pings `10.0.2.2` four
+times and reports RTT:
+
+```
+[icmp] PING 10.0.2.2 : 4 packets
+[icmp] reply from 10.0.2.2: seq=1 time=939 us
+[icmp] reply from 10.0.2.2: seq=2 time=203 us
+[icmp] reply from 10.0.2.2: seq=3 time=149 us
+[icmp] reply from 10.0.2.2: seq=4 time=196 us
+[icmp] 4/4 replies received -- PING OK
+[net] ipv4 rx_ok=4 rx_drop=0 ...
+```
+
+One successful echo validates the whole lower stack in a single round-trip:
+Ethernet TX/RX, ARP, IPv4 TX/RX, checksum **both directions**, and ICMP. With
+ping working, AuroraOS has crossed from a local desktop OS into a networked one.

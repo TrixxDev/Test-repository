@@ -2,6 +2,7 @@
 #include "eth.h"
 #include "inet.h"
 #include "arp.h"
+#include "ipv4.h"
 #include "virtio_net.h"
 #include "string.h"
 
@@ -48,7 +49,7 @@ void eth_input(const void *frame, size_t len)
         arp_input(payload, plen);
         break;
     case ETH_P_IPV4:
-        /* Phase 6: ipv4_input(payload, plen); */
+        ipv4_input(payload, plen);
         break;
     default:
         break;                          /* unknown EtherType: ignore */

@@ -1,15 +1,28 @@
-/* Network glue: time base, the RX pump, and the Phase 4/5 self-test. */
+/* Network glue: time base, the RX pump, and the Phase 4/5/6 self-test. */
 #include "netstack.h"
 #include "inet.h"
 #include "eth.h"
 #include "arp.h"
+#include "ipv4.h"
+#include "icmp.h"
 #include "virtio_net.h"
 #include "pit.h"
+#include "perf.h"
 #include "kio.h"
 
 uint64_t net_now_ms(void) { return (uint64_t)pit_ticks() * 10; }
 
-void net_init(void) { arp_init(); }
+uint16_t inet_csum(const void *data, uint32_t len)
+{
+    const uint16_t *w = (const uint16_t *)data;
+    uint32_t sum = 0;
+    while (len > 1) { sum += *w++; len -= 2; }
+    if (len) sum += *(const uint8_t *)w;          /* odd trailing byte */
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
+void net_init(void) { arp_init(); ipv4_init(); }
 
 /* Drain every pending RX frame up into the dispatcher. */
 void net_poll(void)
@@ -35,6 +48,58 @@ static int wait_resolved(uint32_t ip, uint8_t mac[6], unsigned timeout_ms)
 
 #define OCTETS(ip) (unsigned)(((ip) >> 24) & 0xff), (unsigned)(((ip) >> 16) & 0xff), \
                    (unsigned)(((ip) >> 8) & 0xff),  (unsigned)((ip) & 0xff)
+
+/* Phase 6 milestone: ping `dst` `count` times, reporting RTT per reply. Drives
+ * the whole stack (Ethernet/ARP/IPv4/ICMP/checksum) in one round-trip each. */
+static void net_ping(uint32_t dst, int count)
+{
+    const char data[] = "AuroraOS-ping";
+    const uint16_t id = 0xAE01;
+    int recv = 0;
+
+    kprintf("[icmp] PING %u.%u.%u.%u : %d packets\n", OCTETS(dst), count);
+    for (int i = 1; i <= count; i++) {
+        uint16_t seq = (uint16_t)i;
+
+        /* Send; retry while the next-hop ARP entry is still resolving. */
+        int sent = -1;
+        uint32_t t0 = (uint32_t)perf_now_us();
+        uint64_t sdl = net_now_ms() + 2000;
+        while (net_now_ms() < sdl) {
+            t0 = (uint32_t)perf_now_us();
+            sent = icmp_send_echo(dst, id, seq, data, sizeof(data) - 1);
+            if (sent == 0)
+                break;
+            net_poll();                         /* let the ARP reply land */
+        }
+        if (sent != 0) {
+            kprintf("[icmp] seq=%d: send failed (no route)\n", i);
+            continue;
+        }
+
+        /* Await the matching echo reply. */
+        int got = 0;
+        uint32_t rtt = 0;
+        uint64_t dl = net_now_ms() + 1000;
+        while (net_now_ms() < dl) {
+            net_poll();
+            if (icmp_take_reply(id, seq)) {
+                rtt = (uint32_t)perf_now_us() - t0;
+                got = 1;
+                break;
+            }
+        }
+        if (got) {
+            recv++;
+            kprintf("[icmp] reply from %u.%u.%u.%u: seq=%d time=%u us\n",
+                    OCTETS(dst), i, rtt);
+        } else {
+            kprintf("[icmp] seq=%d: request timed out\n", i);
+        }
+    }
+    kprintf("[icmp] %d/%d replies received -- %s\n", recv, count,
+            recv == count ? "PING OK" : (recv ? "partial" : "PING FAIL"));
+}
 
 /* Phase 4 (Ethernet) + Phase 5 (ARP) proof. Three scenarios the user specified
  * must pass before IPv4:
@@ -82,8 +147,12 @@ void net_selftest(void)
             stale, ok, s0.tx_packets, s1.tx_packets,
             (stale == 0 && ok && s1.tx_packets > s0.tx_packets) ? "expired -> re-asked" : "FAIL");
 
+    /* Phase 6: ping the gateway. The headline milestone. */
+    net_ping(IP_GATEWAY, 4);
+
     net_get_stats(&s1);
-    kprintf("[arp] cache entries=%d; stats rx=%u/%u tx=%u/%u drop=%u/%u err=%u/%u irq=%u\n",
-            arp_cache_count(), s1.rx_packets, s1.rx_bytes, s1.tx_packets, s1.tx_bytes,
+    kprintf("[net] ipv4 rx_ok=%u rx_drop=%u; stats rx=%u/%u tx=%u/%u drop=%u/%u err=%u/%u irq=%u\n",
+            ipv4_rx_ok(), ipv4_rx_dropped(),
+            s1.rx_packets, s1.rx_bytes, s1.tx_packets, s1.tx_bytes,
             s1.rx_dropped, s1.tx_dropped, s1.rx_errors, s1.tx_errors, s1.rx_irqs);
 }
