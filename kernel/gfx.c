@@ -103,9 +103,23 @@ void gfx_fill_vgradient(gfx_surface_t *s, int x, int y, int w, int h,
 
 void gfx_blit(gfx_surface_t *s, int x, int y, const uint32_t *src, int sw, int sh)
 {
-    for (int yy = 0; yy < sh; yy++)
-        for (int xx = 0; xx < sw; xx++)
-            put(s, x + xx, y + yy, src[yy * sw + xx]);
+    /* Clip once per row and copy the run, instead of a bounds-checked put() per
+     * pixel — a full-screen blit was paying a branch + multiply on every one of
+     * ~800k pixels. */
+    for (int yy = 0; yy < sh; yy++) {
+        int py = y + yy;
+        if (py < 0 || py >= s->height)
+            continue;
+        int x0 = x < 0 ? 0 : x;
+        int x1 = x + sw;
+        if (x1 > s->width) x1 = s->width;
+        if (x0 >= x1)
+            continue;
+        uint32_t *drow = (uint32_t *)(s->pixels + (uint32_t)py * s->pitch);
+        const uint32_t *srow = &src[yy * sw];
+        for (int px = x0; px < x1; px++)
+            drow[px] = srow[px - x];
+    }
 }
 
 int gfx_font_w_s(int scale) { return FONT_W * scale / 100; }
