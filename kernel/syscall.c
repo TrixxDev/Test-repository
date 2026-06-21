@@ -7,6 +7,7 @@
 #include "mouse.h"
 #include "io.h"
 #include "shm.h"
+#include "perf.h"
 
 /* Convention: eax = syscall number, ebx/ecx/edx = arguments. The return value
  * is written back into regs->eax (restored to the user's eax by the stub). */
@@ -180,6 +181,10 @@ void syscall_handler(registers_t *regs)
 
     case SYS_SHMGRANT:
         regs->eax = (uint32_t)shm_grant((int)regs->ebx, (int)regs->ecx);
+        break;
+
+    case SYS_PERFUS:
+        regs->eax = (uint32_t)perf_now_us();    /* low 32 bits: ~71 min before wrap */
         break;
 
     case SYS_SHMDEL:

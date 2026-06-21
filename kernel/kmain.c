@@ -12,6 +12,7 @@
 #include "isr.h"
 #include "serial.h"
 #include "pit.h"
+#include "perf.h"
 #include "keyboard.h"
 #include "pmm.h"
 #include "paging.h"
@@ -127,6 +128,9 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
         kprintf("      no framebuffer from loader; staying in text mode\n");
 
     __asm__ volatile("sti");
+
+    kprintf("[boot] calibrating timer...\n");
+    perf_calibrate();       /* PIT is live, scheduler not yet hooked: clean window */
 
     kprintf("[boot] scheduler + process model...\n");
     scheduler_init();

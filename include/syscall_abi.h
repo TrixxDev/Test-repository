@@ -54,6 +54,8 @@
 #define SYS_SHMDEL  37  /* shm_destroy(id) -> 0 / -1 (creator only)            */
 #define SYS_SHMUNMAP 38 /* shm_unmap(id) -> 0 / -1 (drop this proc's mapping)  */
 #define SYS_SHMGRANT 39 /* shm_grant(id, pid) -> 0 / -1 (creator grants map)   */
+#define SYS_PERFUS  40  /* perf_us() -> microseconds since boot (low 32 bits),  */
+                        /*   a high-resolution monotonic clock (RDTSC-based)    */
 
 /* shm_create() flags (arg2). */
 #define SHM_PUBLIC  1   /* any process may shm_map the object (e.g. clipboard) */
@@ -93,7 +95,7 @@ struct dirent {
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
 
-#define SYS_MAX    40   /* one past the last valid syscall number    */
+#define SYS_MAX    41   /* one past the last valid syscall number    */
 
 /* ---- socket layer (AF_LOOPBACK only for now) ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */
