@@ -13,6 +13,7 @@
 #include "serial.h"
 #include "pit.h"
 #include "perf.h"
+#include "virtio_net.h"
 #include "keyboard.h"
 #include "pmm.h"
 #include "paging.h"
@@ -131,6 +132,9 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
 
     kprintf("[boot] calibrating timer...\n");
     perf_calibrate();       /* PIT is live, scheduler not yet hooked: clean window */
+
+    kprintf("[boot] probing network...\n");
+    virtio_net_init();      /* PCI scan for virtio-net (no-op if absent) */
 
     kprintf("[boot] scheduler + process model...\n");
     scheduler_init();
