@@ -30,8 +30,8 @@ Run the vectors: `make crypto-test`.
 | 11 | **Record binding** (`tls/conn.c`) — phase gating, key switch, reassembly | RFC 8446 §5 | ✅ |
 | 11b | **RFC 8448 trace runner** (`tools/tls_trace_test.c`) — engine vs real bytes | RFC 8448 §3 | ✅ |
 | 12.1 | **ASN.1 DER reader** (`x509/asn1.c`) — bounds-checked TLV cursor | X.690 / RFC 8448 cert | ✅ |
-| 12.2 | X.509 certificate parser (`x509/x509.c`) | RFC 5280 / RFC 8448 cert | next |
-| 12.3 | RSA signature verification (PKCS#1 v1.5) | RFC 8448 CertificateVerify | later |
+| 12.2 | **X.509 certificate parser** (`x509/x509.c`) — no crypto | RFC 5280 / RFC 8448 + SAN | ✅ |
+| 12.3 | RSA signature verification (PKCS#1 v1.5) | RFC 8448 CertificateVerify | next |
 | 12.4 | Trust store (ISRG Root X1) + hostname (SAN) | RFC 6125 | later |
 | 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
@@ -469,3 +469,44 @@ becomes an end-to-end vector all the way to verifying CertificateVerify. Next
 (12.2) is the X.509 parser proper — turning these bytes into a `struct x509_cert`
 (subject, issuer, validity, SAN, SubjectPublicKeyInfo, signature) with no trust
 decisions yet.
+
+## Step 12.2 — X.509 certificate parser (RFC 5280)
+
+`x509/x509.c` turns a DER certificate into a flat `x509_cert` over the
+bounds-checked ASN.1 reader — **no cryptography, no trust decision**. Scope is
+kept deliberately tight, exactly the fields a TLS client needs:
+
+- Only the **Common Name** is pulled out of the issuer/subject Distinguished
+  Names; the rest of the DN is left alone. CN is diagnostic only — hostname
+  matching will use SAN.
+- **Validity is normalized to Unix time on the spot** (UTCTime / GeneralizedTime,
+  'Z' form), so the later expiry check is just `now >= not_before && now <=
+  not_after` — no date strings stored.
+- **SubjectAltName dNSName** entries are collected now even though the RFC 8448
+  cert has none, because that is what real hostname validation matches against.
+- `tbsCertificate`, `SubjectPublicKeyInfo`, the public-key bits and the signature
+  are captured as raw slices into the caller's buffer (no copies) — precisely
+  what RSA verification (12.3) consumes. The signature is over the raw
+  TBSCertificate, so that full element (tag+length+value) is captured verbatim.
+
+The reader's boundedness carries up: every field is read through the cursor, so a
+truncated or oversized certificate fails cleanly instead of reading out of bounds.
+
+`make x509-test` checks two certificates — the real reference plus a synthetic one
+that exercises the path RFC 8448 cannot:
+
+```
+RFC 8448 cert:   version v3, serial 2, issuer/subject CN "rsa", RSA public key,
+                 SPKI len 162, TBSCertificate len 281, signature len 128 (RSA-1024),
+                 sig OID sha256WithRSAEncryption, validity -> Unix
+                 (2016-07-30..2026-07-30), no SAN
+synthetic SAN:   subject CN "example.com", issuer CN "Test CA", RSA,
+                 san_count == 2 -> "example.com", "www.example.com",
+                 validity -> Unix (2024-01-01..2034-01-01)
+```
+
+The certificate is now structured data; the last missing piece before trust is
+proving the signature over `tbsCertificate`. The RFC 8448 cert is RSA, so 12.3 is
+RSA PKCS#1 v1.5 verification — and because the whole chain (ASN.1 -> X.509 -> the
+captured `tbs`/`spki_key`/`signature` slices) is already pinned to the published
+trace, that step closes a real end-to-end PKI test on RFC bytes.

@@ -6,9 +6,14 @@
 #include <string.h>
 #include <stdint.h>
 #include "asn1.h"
+#include "x509.h"
 
 /* The 432-byte DER certificate from RFC 8448 §3 (extracted verbatim). */
 #define RFC_DER_CERT "308201ac30820115a003020102020102300d06092a864886f70d01010b0500300e310c300a06035504031303727361301e170d3136303733303031323335395a170d3236303733303031323335395a300e310c300a0603550403130372736130819f300d06092a864886f70d010101050003818d0030818902818100b4bb498f8279303d980836399b36c6988c0c68de55e1bdb826d3901a2461eafd2de49a91d015abbc9a95137ace6c1af19eaa6af98c7ced43120998e187a80ee0ccb0524b1b018c3e0b63264d449a6d38e22a5fda430846748030530ef0461c8ca9d9efbfae8ea6d1d03e2bd193eff0ab9a8002c47428a6d35a8d88d79f7f1e3f0203010001a31a301830090603551d1304023000300b0603551d0f0404030205a0300d06092a864886f70d01010b05000381810085aad2a0e5b9276b908c65f73a7267170618a54c5f8a7b337d2df7a594365417f2eae8f8a58c8f8172f9319cf36b7fd6c55b80f21a03015156726096fd335e5e67f2dbf102702e608ccae6bec1fc63a42a99be5c3eb7107c3c54e9b9eb2bd5203b1c3b84e0a8b2f759409ba3eac9d91d402dcc0cc8f8961229ac9187b42b4de1"
+
+/* A synthetic minimal certificate carrying a SubjectAltName with two dNSName
+ * entries (RFC 8448's cert has none). Built by tools (correct DER lengths). */
+#define SAN_CERT "3081ca3081b1a003020102020101300d06092a864886f70d01010b050030123110300e0603550403130754657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3016311430120603550403130b6578616d706c652e636f6d301f300d06092a864886f70d0101010500030e00300b020400c0ffee0203010001a32b302930270603551d110420301e820b6578616d706c652e636f6d820f7777772e6578616d706c652e636f6d300d06092a864886f70d01010b0500030500deadbeef"
 
 static int failures;
 
@@ -156,6 +161,45 @@ int main(void)
         check_ok("validity has two UTCTime fields", vlok);
         check_ok("notBefore == 160730012359Z",
                  vlok && nb.len == 13 && memcmp(nb.value, "160730012359Z", 13) == 0);
+    }
+
+    printf("X.509 parser — RFC 8448 server certificate:\n");
+    {
+        uint8_t der[512];
+        int derlen = unhex(RFC_DER_CERT, der);
+        x509_cert cert;
+        check_ok("certificate parses", x509_parse(der, derlen, &cert) == 0);
+        check_ok("version == 2 (v3)", cert.version == 2);
+        check_ok("serialNumber == 2", cert.serial.len == 1 && cert.serial.p[0] == 2);
+        check_ok("issuer CN == \"rsa\"", strcmp(cert.issuer_cn, "rsa") == 0);
+        check_ok("subject CN == \"rsa\"", strcmp(cert.subject_cn, "rsa") == 0);
+        check_ok("public key algorithm == RSA", cert.pubkey_algo == X509_PK_RSA);
+        check_ok("SPKI length == 162 (full element)", cert.spki.len == 162);
+        check_ok("TBSCertificate length == 281 (full element)", cert.tbs.len == 281);
+        check_ok("signatureValue length == 128 (RSA-1024)", cert.signature.len == 128);
+        static const uint8_t oid_sha256rsa[] = { 0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x0b };
+        check_ok("signature OID == sha256WithRSAEncryption",
+                 x509_slice_eq(&cert.sig_oid, oid_sha256rsa, sizeof oid_sha256rsa));
+        check_ok("notBefore == 2016-07-30 01:23:59Z (1469841839)", cert.not_before == 1469841839ULL);
+        check_ok("notAfter  == 2026-07-30 01:23:59Z (1785374639)", cert.not_after == 1785374639ULL);
+        check_ok("notBefore < notAfter", cert.not_before < cert.not_after);
+        check_ok("no SAN entries", cert.san_count == 0);
+    }
+
+    printf("X.509 parser — synthetic certificate with SubjectAltName:\n");
+    {
+        uint8_t der[512];
+        int derlen = unhex(SAN_CERT, der);
+        x509_cert cert;
+        check_ok("certificate parses", x509_parse(der, derlen, &cert) == 0);
+        check_ok("subject CN == \"example.com\"", strcmp(cert.subject_cn, "example.com") == 0);
+        check_ok("issuer CN == \"Test CA\"", strcmp(cert.issuer_cn, "Test CA") == 0);
+        check_ok("public key algorithm == RSA", cert.pubkey_algo == X509_PK_RSA);
+        check_ok("san_count == 2", cert.san_count == 2);
+        check_ok("SAN[0] == example.com",     cert.san_count > 0 && strcmp(cert.san_dns[0], "example.com") == 0);
+        check_ok("SAN[1] == www.example.com", cert.san_count > 1 && strcmp(cert.san_dns[1], "www.example.com") == 0);
+        check_ok("notBefore == 2024-01-01Z (1704067200)", cert.not_before == 1704067200ULL);
+        check_ok("notAfter  == 2034-01-01Z (2019686400)", cert.not_after == 2019686400ULL);
     }
 
     printf(failures ? "\nX509 TEST: %d FAILURE(S)\n" : "\nX509 TEST: ALL PASS\n", failures);

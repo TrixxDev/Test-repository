@@ -191,7 +191,7 @@ tls-trace-test:
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
 .PHONY: x509-test
 x509-test:
-	$(CC) -O2 -Ix509 tools/x509_test.c x509/asn1.c -o /tmp/aurora_x509_test
+	$(CC) -O2 -Ix509 tools/x509_test.c x509/asn1.c x509/x509.c -o /tmp/aurora_x509_test
 	/tmp/aurora_x509_test
 
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
