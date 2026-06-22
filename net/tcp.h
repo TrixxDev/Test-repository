@@ -1,10 +1,11 @@
-/* TCP — Phase 1: client connect() only (the three-way handshake).
+/* TCP — client connections over the full RFC 793 state machine.
  *
- * Strictly scoped: the TCB and the state enum are the full RFC 793 shape from day
- * one (so nothing has to be rewritten later), but only CLOSED -> SYN_SENT ->
- * ESTABLISHED are implemented. No listen/accept, no data transfer, no
- * retransmission, congestion control, SACK, window scaling or keepalive yet.
- * A single global connection is enough to prove the handshake. */
+ * Connections live in a fixed table; the API is handle-based (tcp_connect returns
+ * a small integer handle used by send/recv/close/state), so several connections
+ * can be open at once (Aurora Fetch today, a browser/updater/etc. tomorrow).
+ * Implemented: connect (handshake), data send/recv (one in-order stream), and
+ * teardown. Not yet: listen/accept, retransmission, congestion control, SACK,
+ * window scaling, keepalive. */
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -45,38 +46,42 @@ struct tcp_tcb {
     uint8_t  state;
 };
 
+#define TCP_MAX_CONN 32     /* connections open at once */
+
 void        tcp_init(void);
 
-/* Begin a connection to host-order `dst`:`port`: send SYN, enter SYN_SENT.
- * Returns 0 if the SYN was transmitted, -1 on error. The caller pumps the RX
- * path (net_poll) and watches tcp_state() for ESTABLISHED. */
+/* Open a connection to host-order `dst`:`port`: send SYN, enter SYN_SENT.
+ * Returns a connection handle (0..TCP_MAX_CONN-1) or -1 (table full / SYN not
+ * sent). The caller pumps the RX path (net_poll) and watches tcp_state(h) for
+ * ESTABLISHED. */
 int         tcp_connect(uint32_t dst, uint16_t port);
 
-/* Current state of the (single) connection. */
-int         tcp_state(void);
+/* State of connection `h` (TCP_CLOSED for an invalid/closed handle). */
+int         tcp_state(int h);
 const char *tcp_state_name(int state);
 
-/* Phase 2: send one segment of `len` payload bytes (PSH|ACK) on the established
- * connection. Returns bytes queued (one segment, no retransmission), or -1. */
-int         tcp_send(const void *data, size_t len);
+/* Send one segment of `len` payload bytes (PSH|ACK) on connection `h`. Returns
+ * bytes queued (one segment, no retransmission), or -1. */
+int         tcp_send(int h, const void *data, size_t len);
 
-/* Copy up to `cap` received bytes out of the receive buffer (FIFO). Returns the
- * number copied (0 if none pending). */
-int         tcp_recv(void *buf, size_t cap);
+/* Copy up to `cap` received bytes out of connection `h`'s buffer (FIFO). Returns
+ * the number copied (0 if none pending). */
+int         tcp_recv(int h, void *buf, size_t cap);
 
-/* Total payload bytes received on this connection so far. */
-int         tcp_rx_total(void);
+/* Total payload bytes received on connection `h` so far. */
+int         tcp_rx_total(int h);
 
-/* Phase 3: begin an orderly close. From ESTABLISHED this sends FIN and enters
- * FIN_WAIT_1 (active close); from CLOSE_WAIT it sends FIN and enters LAST_ACK
- * (finishing a passive close). Returns 0 if a FIN was sent, -1 otherwise. */
-int         tcp_close(void);
+/* Begin an orderly close of connection `h`. From ESTABLISHED this sends FIN and
+ * enters FIN_WAIT_1 (active close); from CLOSE_WAIT it sends FIN and enters
+ * LAST_ACK (finishing a passive close). Returns 0 if a FIN was sent, -1. */
+int         tcp_close(int h);
 
-/* Drive time-based transitions (TIME_WAIT -> CLOSED). Call periodically. */
+/* Drive time-based transitions (TIME_WAIT -> CLOSED) on all connections. */
 void        tcp_tick(void);
 
 /* Snapshot the TCP counters. */
 void        tcp_get_stats(struct tcp_stats *out);
 
-/* Handle one TCP segment (IPv4 payload) from host-order `src`. */
+/* Handle one TCP segment (IPv4 payload) from host-order `src` (demuxed to the
+ * matching connection by 4-tuple). */
 void        tcp_input(uint32_t src, const void *segment, size_t len);

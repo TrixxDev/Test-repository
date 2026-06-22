@@ -272,7 +272,23 @@ The transport is done and audited; everything below is protocol logic over
 | 8.2 | **TCP data** — `tcp_send`/`tcp_recv` + HTTP GET | **`GET /` → `HTTP/1.0 200 OK` (local & real internet)** | ✅ |
 | 8.3 | **TCP teardown** — FIN_WAIT_1/2, CLOSING, CLOSE_WAIT, LAST_ACK, TIME_WAIT | **HTTP fetch closes to CLOSED** | ✅ |
 | 8.5 | **Aurora Fetch** — first network GUI app (`http_get` syscall) | **fetch a web page from the internet, show it in the Viewer** | ✅ |
-| 8.4 | TCP retransmission + multiple connections + socket API | reliability, then user sockets | next |
+| 8.6 | **Multiple TCBs** — connection table + handle-based API | several connections at once | ✅ |
+| 8.7 | TCP retransmission | reliability on a lossy path | next |
+| 8.8 | Socket API (`socket/connect/send/recv/close`) | user sockets, netd boundary | later |
+
+## Phase 8.6 — Multiple connections (off the singleton)
+
+TCP was a single global TCB — fine for one Aurora Fetch, but technical debt the
+moment anything wants two connections at once (tabs, a weather widget, an update
+check). It is now a fixed **connection table** (`conns[TCP_MAX_CONN]`, 32) with a
+**handle-based API**: `tcp_connect()` returns a small integer handle, and
+`tcp_send/recv/close/state/rx_total` take it. `tcp_input` demuxes each segment to
+the matching connection by its 4-tuple; `tcp_tick` ages every TIME_WAIT. Slots
+are reused once CLOSED (kept around first so a caller can drain trailing data).
+
+This is purely structural — `http_get`/Aurora Fetch are unchanged externally and
+still fetch the same page — but it's the prerequisite for retransmission (per-TCB
+timers) and a real socket API.
 
 ## Phase 8.5 — Aurora Fetch (the first network application)
 

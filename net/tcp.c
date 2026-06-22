@@ -1,4 +1,4 @@
-/* TCP client handshake (Phase 1) — see tcp.h. */
+/* TCP client connections over a fixed connection table — see tcp.h. */
 #include "tcp.h"
 #include "ipv4.h"
 #include "netstack.h"
@@ -25,28 +25,44 @@ struct tcp_hdr {
 #define TCP_ACK  0x10
 
 #define TCP_RCV_WND   8192
-#define TCP_RX_CAP    8192          /* receive buffer (one in-order stream) */
+#define TCP_RX_CAP    8192          /* per-connection receive buffer */
 #define TCP_TX_MAX    1400          /* one segment, well under the MTU */
 #define TCP_TIME_WAIT_MS 1000       /* shortened 2*MSL (real TCP: minutes) */
 
-static struct tcp_tcb tcb;          /* the single connection */
-static uint8_t  rx_buf[TCP_RX_CAP];
-static unsigned rx_len;             /* bytes accumulated */
-static unsigned rx_read;            /* bytes handed to tcp_recv */
-static uint64_t tw_deadline;        /* TIME_WAIT -> CLOSED moment */
-static struct tcp_stats stats;      /* lifetime counters */
+/* One connection: its control block plus the buffering/timer state the public
+ * TCB shape doesn't carry. `used` slots that reach CLOSED are reused by the next
+ * connect (kept around first so a caller can drain trailing data after close). */
+struct conn {
+    struct tcp_tcb tcb;
+    uint8_t   rx_buf[TCP_RX_CAP];
+    unsigned  rx_len, rx_read;
+    uint64_t  tw_deadline;      /* TIME_WAIT -> CLOSED moment */
+    int       used;
+};
+
+static struct conn conns[TCP_MAX_CONN];
+static struct tcp_stats stats;
 
 void tcp_init(void)
 {
-    memset(&tcb, 0, sizeof(tcb));
-    tcb.state = TCP_CLOSED;
-    rx_len = rx_read = 0;
+    memset(conns, 0, sizeof(conns));
     memset(&stats, 0, sizeof(stats));
 }
 
 void tcp_get_stats(struct tcp_stats *out) { if (out) *out = stats; }
 
-int tcp_state(void) { return tcb.state; }
+static struct conn *conn_of(int h)
+{
+    if (h < 0 || h >= TCP_MAX_CONN || !conns[h].used)
+        return NULL;
+    return &conns[h];
+}
+
+int tcp_state(int h)
+{
+    struct conn *c = conn_of(h);
+    return c ? c->tcb.state : TCP_CLOSED;
+}
 
 const char *tcp_state_name(int s)
 {
@@ -85,8 +101,8 @@ static uint16_t tcp_checksum(uint32_t src, uint32_t dst,
     return (uint16_t)~sum;
 }
 
-/* Send a segment with `flags`, optionally carrying `len` payload bytes. */
-static int tcp_xmit(uint8_t flags, uint32_t seq, uint32_t ack,
+/* Send a segment for connection `c` with `flags`, optionally carrying payload. */
+static int tcp_xmit(struct conn *c, uint8_t flags, uint32_t seq, uint32_t ack,
                     const void *data, unsigned len)
 {
     static uint8_t buf[sizeof(struct tcp_hdr) + TCP_TX_MAX];
@@ -94,59 +110,70 @@ static int tcp_xmit(uint8_t flags, uint32_t seq, uint32_t ack,
         len = TCP_TX_MAX;
 
     struct tcp_hdr *h = (struct tcp_hdr *)buf;
-    h->src_port = htons(tcb.local_port);
-    h->dst_port = htons(tcb.remote_port);
+    h->src_port = htons(c->tcb.local_port);
+    h->dst_port = htons(c->tcb.remote_port);
     h->seq      = htonl(seq);
     h->ack      = htonl(ack);
     h->data_off = 5 << 4;                       /* 20-byte header, no options */
     h->flags    = flags;
-    h->window   = htons(tcb.rcv_wnd);
+    h->window   = htons(c->tcb.rcv_wnd);
     h->checksum = 0;
     h->urg_ptr  = 0;
     if (len)
         memcpy(buf + sizeof(struct tcp_hdr), data, len);
 
     unsigned total = sizeof(struct tcp_hdr) + len;
-    h->checksum = htons(tcp_checksum(tcb.local_ip, tcb.remote_ip, buf, total));
-    return ipv4_send(tcb.remote_ip, IPPROTO_TCP, buf, total);
+    h->checksum = htons(tcp_checksum(c->tcb.local_ip, c->tcb.remote_ip, buf, total));
+    return ipv4_send(c->tcb.remote_ip, IPPROTO_TCP, buf, total);
 }
 
-int tcp_send(const void *data, size_t len)
+int tcp_send(int h, const void *data, size_t len)
 {
-    if (tcb.state != TCP_ESTABLISHED || !data)
+    struct conn *c = conn_of(h);
+    if (!c || c->tcb.state != TCP_ESTABLISHED || !data)
         return -1;
     if (len > TCP_TX_MAX)
         len = TCP_TX_MAX;                        /* one segment only, no splitting */
-    if (tcp_xmit(TCP_PSH | TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, data, (unsigned)len) != 0)
+    if (tcp_xmit(c, TCP_PSH | TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, data, (unsigned)len) != 0)
         return -1;
-    tcb.snd_nxt += (uint32_t)len;               /* data consumes sequence space */
+    c->tcb.snd_nxt += (uint32_t)len;            /* data consumes sequence space */
     return (int)len;
 }
 
-int tcp_recv(void *buf, size_t cap)
+int tcp_recv(int h, void *buf, size_t cap)
 {
-    unsigned avail = rx_len - rx_read;
+    struct conn *c = conn_of(h);
+    if (!c)
+        return 0;
+    unsigned avail = c->rx_len - c->rx_read;
     unsigned n = avail < cap ? avail : (unsigned)cap;
     if (n)
-        memcpy(buf, rx_buf + rx_read, n);
-    rx_read += n;
+        memcpy(buf, c->rx_buf + c->rx_read, n);
+    c->rx_read += n;
     return (int)n;
 }
 
-int tcp_rx_total(void) { return (int)rx_len; }
-
-int tcp_close(void)
+int tcp_rx_total(int h)
 {
-    if (tcb.state == TCP_ESTABLISHED) {                 /* active close */
-        tcp_xmit(TCP_FIN | TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);
-        tcb.snd_nxt += 1;                               /* FIN consumes a seq */
-        tcb.state = TCP_FIN_WAIT_1;
+    struct conn *c = conn_of(h);
+    return c ? (int)c->rx_len : 0;
+}
+
+int tcp_close(int h)
+{
+    struct conn *c = conn_of(h);
+    if (!c)
+        return -1;
+    if (c->tcb.state == TCP_ESTABLISHED) {              /* active close */
+        tcp_xmit(c, TCP_FIN | TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
+        c->tcb.snd_nxt += 1;                            /* FIN consumes a seq */
+        c->tcb.state = TCP_FIN_WAIT_1;
         return 0;
     }
-    if (tcb.state == TCP_CLOSE_WAIT) {                  /* finish passive close */
-        tcp_xmit(TCP_FIN | TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);
-        tcb.snd_nxt += 1;
-        tcb.state = TCP_LAST_ACK;
+    if (c->tcb.state == TCP_CLOSE_WAIT) {               /* finish passive close */
+        tcp_xmit(c, TCP_FIN | TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
+        c->tcb.snd_nxt += 1;
+        c->tcb.state = TCP_LAST_ACK;
         return 0;
     }
     return -1;
@@ -154,23 +181,43 @@ int tcp_close(void)
 
 void tcp_tick(void)
 {
-    if (tcb.state == TCP_TIME_WAIT && net_now_ms() >= tw_deadline)
-        tcb.state = TCP_CLOSED;
+    uint64_t now = net_now_ms();
+    for (int i = 0; i < TCP_MAX_CONN; i++)
+        if (conns[i].used && conns[i].tcb.state == TCP_TIME_WAIT &&
+            now >= conns[i].tw_deadline)
+            conns[i].tcb.state = TCP_CLOSED;
+}
+
+/* Allocate a slot: prefer a never-used one, else reuse a CLOSED one. */
+static struct conn *alloc_conn(int *out_h)
+{
+    int closed = -1;
+    for (int i = 0; i < TCP_MAX_CONN; i++) {
+        if (!conns[i].used) { *out_h = i; return &conns[i]; }
+        if (closed < 0 && conns[i].tcb.state == TCP_CLOSED) closed = i;
+    }
+    if (closed >= 0) { *out_h = closed; return &conns[closed]; }
+    return NULL;
 }
 
 int tcp_connect(uint32_t dst, uint16_t port)
 {
-    memset(&tcb, 0, sizeof(tcb));
-    rx_len = rx_read = 0;
-    tcb.local_ip    = IP_LOCAL;
-    tcb.remote_ip   = dst;
-    tcb.remote_port = port;
-    tcb.local_port  = (uint16_t)(49152 + (perf_now_us() & 0x1fff));
-    tcb.iss         = (uint32_t)perf_now_us();
-    tcb.snd_una     = tcb.iss;
-    tcb.snd_nxt     = tcb.iss + 1;              /* SYN consumes one sequence */
-    tcb.rcv_wnd     = TCP_RCV_WND;
-    tcb.state       = TCP_SYN_SENT;
+    int h = -1;
+    struct conn *c = alloc_conn(&h);
+    if (!c)
+        return -1;                              /* table full */
+
+    memset(c, 0, sizeof(*c));
+    c->used = 1;
+    c->tcb.local_ip    = IP_LOCAL;
+    c->tcb.remote_ip   = dst;
+    c->tcb.remote_port = port;
+    c->tcb.local_port  = (uint16_t)(49152 + (perf_now_us() & 0x1fff));
+    c->tcb.iss         = (uint32_t)perf_now_us();
+    c->tcb.snd_una     = c->tcb.iss;
+    c->tcb.snd_nxt     = c->tcb.iss + 1;        /* SYN consumes one sequence */
+    c->tcb.rcv_wnd     = TCP_RCV_WND;
+    c->tcb.state       = TCP_SYN_SENT;
     stats.connects++;
 
     /* Transmit the SYN; retry only while the next-hop ARP is still resolving
@@ -179,38 +226,46 @@ int tcp_connect(uint32_t dst, uint16_t port)
     int sent = -1;
     uint64_t dl = net_now_ms() + 1500;
     while (net_now_ms() < dl) {
-        sent = tcp_xmit(TCP_SYN, tcb.iss, 0, NULL, 0);
+        sent = tcp_xmit(c, TCP_SYN, c->tcb.iss, 0, NULL, 0);
         if (sent == 0)
             break;
         net_poll();
     }
     if (sent != 0) {
-        tcb.state = TCP_CLOSED;
+        c->tcb.state = TCP_CLOSED;
         return -1;
     }
-    return 0;
+    return h;
+}
+
+/* Demux to the connection matching the segment's 4-tuple (skipping CLOSED). */
+static struct conn *find_conn(uint32_t src, uint16_t sport, uint16_t dport)
+{
+    for (int i = 0; i < TCP_MAX_CONN; i++) {
+        struct conn *c = &conns[i];
+        if (c->used && c->tcb.state != TCP_CLOSED &&
+            c->tcb.remote_ip == src && c->tcb.remote_port == sport &&
+            c->tcb.local_port == dport)
+            return c;
+    }
+    return NULL;
 }
 
 void tcp_input(uint32_t src, const void *segment, size_t len)
 {
-    if (tcb.state == TCP_CLOSED)
-        return;
     if (len < sizeof(struct tcp_hdr)) {
         stats.drops++;
         return;
     }
-    if (tcp_checksum(src, tcb.local_ip, (const uint8_t *)segment, (unsigned)len) != 0) {
+    if (tcp_checksum(src, IP_LOCAL, (const uint8_t *)segment, (unsigned)len) != 0) {
         stats.drops++;                          /* bad checksum: drop */
         return;
     }
 
     const struct tcp_hdr *h = (const struct tcp_hdr *)segment;
-
-    /* Single-connection demux: must match our 4-tuple. */
-    if (src != tcb.remote_ip ||
-        ntohs(h->src_port) != tcb.remote_port ||
-        ntohs(h->dst_port) != tcb.local_port) {
-        stats.drops++;
+    struct conn *c = find_conn(src, ntohs(h->src_port), ntohs(h->dst_port));
+    if (!c) {
+        stats.drops++;                          /* no matching connection */
         return;
     }
 
@@ -220,31 +275,28 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
 
     if (flags & TCP_RST) {                       /* peer refused / reset */
         stats.resets++;
-        tcb.state = TCP_CLOSED;
+        c->tcb.state = TCP_CLOSED;
         return;
     }
 
-    if (tcb.state == TCP_SYN_SENT) {
+    if (c->tcb.state == TCP_SYN_SENT) {
         /* Expect SYN+ACK acknowledging our SYN (ack == iss + 1). */
-        if ((flags & TCP_SYN) && (flags & TCP_ACK) && ack == tcb.snd_nxt) {
-            tcb.irs     = seq;
-            tcb.rcv_nxt = seq + 1;               /* their SYN consumes one */
-            tcb.snd_una = ack;
-            tcb.snd_wnd = ntohs(h->window);
-            tcb.state   = TCP_ESTABLISHED;
+        if ((flags & TCP_SYN) && (flags & TCP_ACK) && ack == c->tcb.snd_nxt) {
+            c->tcb.irs     = seq;
+            c->tcb.rcv_nxt = seq + 1;            /* their SYN consumes one */
+            c->tcb.snd_una = ack;
+            c->tcb.snd_wnd = ntohs(h->window);
+            c->tcb.state   = TCP_ESTABLISHED;
             stats.established++;
-            tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);  /* finish handshake */
+            tcp_xmit(c, TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);  /* finish */
         }
         return;
     }
 
-    if (tcb.state == TCP_CLOSED || tcb.state == TCP_SYN_RECEIVED)
-        return;
-
     /* ESTABLISHED and every closing state: track ACKs, accept in-order data,
      * consume an in-order FIN, then advance the state machine. */
-    if ((flags & TCP_ACK) && (int32_t)(ack - tcb.snd_una) > 0)
-        tcb.snd_una = ack;                       /* wrap-safe */
+    if ((flags & TCP_ACK) && (int32_t)(ack - c->tcb.snd_una) > 0)
+        c->tcb.snd_una = ack;                    /* wrap-safe */
 
     unsigned hlen = (unsigned)((h->data_off >> 4) & 0x0f) * 4;
     if (hlen < sizeof(struct tcp_hdr) || hlen > len)
@@ -252,53 +304,53 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
     const uint8_t *payload = (const uint8_t *)segment + hlen;
     unsigned plen = (unsigned)len - hlen;
 
-    int receiving = (tcb.state == TCP_ESTABLISHED ||
-                     tcb.state == TCP_FIN_WAIT_1 ||
-                     tcb.state == TCP_FIN_WAIT_2);
+    int receiving = (c->tcb.state == TCP_ESTABLISHED ||
+                     c->tcb.state == TCP_FIN_WAIT_1 ||
+                     c->tcb.state == TCP_FIN_WAIT_2);
 
-    uint32_t before = tcb.rcv_nxt;
-    if (plen > 0 && seq == tcb.rcv_nxt && receiving) {   /* in-order data only */
-        unsigned space = (rx_len < TCP_RX_CAP) ? TCP_RX_CAP - rx_len : 0;
+    uint32_t before = c->tcb.rcv_nxt;
+    if (plen > 0 && seq == c->tcb.rcv_nxt && receiving) {   /* in-order data only */
+        unsigned space = (c->rx_len < TCP_RX_CAP) ? TCP_RX_CAP - c->rx_len : 0;
         unsigned n = plen < space ? plen : space;
         if (n)
-            memcpy(rx_buf + rx_len, payload, n);
-        rx_len += n;
-        tcb.rcv_nxt += plen;
+            memcpy(c->rx_buf + c->rx_len, payload, n);
+        c->rx_len += n;
+        c->tcb.rcv_nxt += plen;
     }
 
     int fin = 0;
-    if ((flags & TCP_FIN) && (seq + plen) == tcb.rcv_nxt) {  /* in-order FIN */
-        tcb.rcv_nxt += 1;                        /* FIN consumes a seq */
+    if ((flags & TCP_FIN) && (seq + plen) == c->tcb.rcv_nxt) {  /* in-order FIN */
+        c->tcb.rcv_nxt += 1;                     /* FIN consumes a seq */
         fin = 1;
         stats.fins++;
     }
-    if (tcb.rcv_nxt != before)
-        tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);
+    if (c->tcb.rcv_nxt != before)
+        tcp_xmit(c, TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
 
-    int our_fin_acked = (tcb.snd_una == tcb.snd_nxt);
+    int our_fin_acked = (c->tcb.snd_una == c->tcb.snd_nxt);
 
-    switch (tcb.state) {
+    switch (c->tcb.state) {
     case TCP_ESTABLISHED:
         if (fin)
-            tcb.state = TCP_CLOSE_WAIT;          /* peer closed first (passive) */
+            c->tcb.state = TCP_CLOSE_WAIT;       /* peer closed first (passive) */
         break;
     case TCP_FIN_WAIT_1:
-        if (our_fin_acked && fin) { tcb.state = TCP_TIME_WAIT; tw_deadline = net_now_ms() + TCP_TIME_WAIT_MS; }
-        else if (our_fin_acked)   tcb.state = TCP_FIN_WAIT_2;
-        else if (fin)             tcb.state = TCP_CLOSING;
+        if (our_fin_acked && fin) { c->tcb.state = TCP_TIME_WAIT; c->tw_deadline = net_now_ms() + TCP_TIME_WAIT_MS; }
+        else if (our_fin_acked)   c->tcb.state = TCP_FIN_WAIT_2;
+        else if (fin)             c->tcb.state = TCP_CLOSING;
         break;
     case TCP_FIN_WAIT_2:
-        if (fin) { tcb.state = TCP_TIME_WAIT; tw_deadline = net_now_ms() + TCP_TIME_WAIT_MS; }
+        if (fin) { c->tcb.state = TCP_TIME_WAIT; c->tw_deadline = net_now_ms() + TCP_TIME_WAIT_MS; }
         break;
     case TCP_CLOSING:
-        if (our_fin_acked) { tcb.state = TCP_TIME_WAIT; tw_deadline = net_now_ms() + TCP_TIME_WAIT_MS; }
+        if (our_fin_acked) { c->tcb.state = TCP_TIME_WAIT; c->tw_deadline = net_now_ms() + TCP_TIME_WAIT_MS; }
         break;
     case TCP_LAST_ACK:
-        if (our_fin_acked) tcb.state = TCP_CLOSED;
+        if (our_fin_acked) c->tcb.state = TCP_CLOSED;
         break;
     case TCP_TIME_WAIT:
         if (flags & TCP_FIN)                     /* re-ack a retransmitted FIN */
-            tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);
+            tcp_xmit(c, TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
         break;
     default:
         break;

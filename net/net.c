@@ -76,13 +76,14 @@ static void udp_test_handler(uint32_t src, uint16_t sport, const void *data, siz
 static void tcp_http_get(uint32_t ip, uint16_t port, const char *host)
 {
     kprintf("[tcp] connect %u.%u.%u.%u:%d (%s)\n", OCTETS(ip), port, host);
-    tcp_connect(ip, port);
+    int h = tcp_connect(ip, port);
+    if (h < 0) { kprintf("[tcp] %s: no free connection\n", host); return; }
     uint64_t cdl = net_now_ms() + 4000;
     while (net_now_ms() < cdl &&
-           tcp_state() != TCP_ESTABLISHED && tcp_state() != TCP_CLOSED)
+           tcp_state(h) != TCP_ESTABLISHED && tcp_state(h) != TCP_CLOSED)
         net_poll();
-    if (tcp_state() != TCP_ESTABLISHED) {
-        kprintf("[tcp] %s: connect failed (state=%s)\n", host, tcp_state_name(tcp_state()));
+    if (tcp_state(h) != TCP_ESTABLISHED) {
+        kprintf("[tcp] %s: connect failed (state=%s)\n", host, tcp_state_name(tcp_state(h)));
         return;
     }
     kprintf("[tcp] %s: ESTABLISHED\n", host);
@@ -95,29 +96,29 @@ static void tcp_http_get(uint32_t ip, uint16_t port, const char *host)
     for (int i = 0; host[i]; i++) req[n++] = host[i];
     const char *b = "\r\nConnection: close\r\n\r\n";
     for (int i = 0; b[i]; i++) req[n++] = b[i];
-    tcp_send(req, n);
+    tcp_send(h, req, n);
 
     uint64_t rdl = net_now_ms() + 4000;          /* let the response arrive */
     while (net_now_ms() < rdl)
         net_poll();
 
     char resp[128];
-    int got = tcp_recv(resp, sizeof(resp) - 1);
+    int got = tcp_recv(h, resp, sizeof(resp) - 1);
     if (got > 0) {
         int i = 0;
         while (i < got && resp[i] != '\r' && resp[i] != '\n') i++;
         resp[i] = '\0';
-        kprintf("[http] %s: %d bytes total, status: \"%s\"\n", host, tcp_rx_total(), resp);
+        kprintf("[http] %s: %d bytes total, status: \"%s\"\n", host, tcp_rx_total(h), resp);
     } else {
         kprintf("[http] %s: no data received\n", host);
     }
 
     /* Phase 3: close the connection and watch the teardown reach CLOSED. */
-    tcp_close();
+    tcp_close(h);
     uint64_t tdl = net_now_ms() + 3000;
-    while (net_now_ms() < tdl && tcp_state() != TCP_CLOSED)
+    while (net_now_ms() < tdl && tcp_state(h) != TCP_CLOSED)
         net_poll();
-    kprintf("[tcp] %s: closed (final state=%s)\n", host, tcp_state_name(tcp_state()));
+    kprintf("[tcp] %s: closed (final state=%s)\n", host, tcp_state_name(tcp_state(h)));
 }
 
 /* Build "GET <path> HTTP/1.0\r\nHost: <host>\r\nConnection: close\r\n\r\n". */
@@ -144,17 +145,19 @@ int net_http_get(const char *host, const char *path, char *buf, unsigned cap)
     if (dns_query(host, DNS_A, &ip) != 0)
         return -2;                              /* DNS failed */
 
-    tcp_connect(ip, 80);
+    int h = tcp_connect(ip, 80);
+    if (h < 0)
+        return -3;                              /* table full / SYN not sent */
     uint64_t cdl = net_now_ms() + 5000;
     while (net_now_ms() < cdl &&
-           tcp_state() != TCP_ESTABLISHED && tcp_state() != TCP_CLOSED)
+           tcp_state(h) != TCP_ESTABLISHED && tcp_state(h) != TCP_CLOSED)
         net_poll();
-    if (tcp_state() != TCP_ESTABLISHED)
+    if (tcp_state(h) != TCP_ESTABLISHED)
         return -3;                              /* connect failed / refused */
 
     char req[256];
     unsigned rn = build_request(req, sizeof(req), host, path);
-    tcp_send(req, rn);
+    tcp_send(h, req, rn);
 
     /* Drain the response into buf as it arrives (so the 8 KiB rx buffer never
      * overflows for pages up to `cap`). Stop on close or an idle timeout. */
@@ -162,16 +165,16 @@ int net_http_get(const char *host, const char *path, char *buf, unsigned cap)
     uint64_t idle = net_now_ms() + 6000;
     while (net_now_ms() < idle && total < cap) {
         net_poll();
-        int g = tcp_recv(buf + total, cap - total);
+        int g = tcp_recv(h, buf + total, cap - total);
         if (g > 0) { total += (unsigned)g; idle = net_now_ms() + 2000; }
-        if (tcp_state() == TCP_CLOSED || tcp_state() == TCP_TIME_WAIT)
+        if (tcp_state(h) == TCP_CLOSED || tcp_state(h) == TCP_TIME_WAIT)
             break;
     }
-    total += (unsigned)tcp_recv(buf + total, cap - total);   /* final bytes */
+    total += (unsigned)tcp_recv(h, buf + total, cap - total);   /* final bytes */
 
-    tcp_close();
+    tcp_close(h);
     uint64_t tdl = net_now_ms() + 1500;
-    while (net_now_ms() < tdl && tcp_state() != TCP_CLOSED)
+    while (net_now_ms() < tdl && tcp_state(h) != TCP_CLOSED)
         net_poll();
     return (int)total;
 }
