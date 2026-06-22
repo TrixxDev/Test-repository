@@ -27,8 +27,8 @@ Run the vectors: `make crypto-test`.
 | 8 | **Transcript hash + key schedule** (`tls/transcript.c`, `tls/key_schedule.c`) | RFC 8448 §3 trace | ✅ |
 | 9 | **Handshake messages v1** (`tls/handshake.c`) — ClientHello/ServerHello/Finished | RFC 8446 §4 | ✅ |
 | 10 | **Client handshake FSM core** (`tls/client.c`) — event-driven, no network | RFC 8446 §4 / §A.1 | ✅ |
-| 11 | Record binding (phase gating, key switch over the record layer) | RFC 8446 §5–6 | next |
-| 12 | Certificate / signature validation | RFC 8446 §4.4 | later |
+| 11 | **Record binding** (`tls/conn.c`) — phase gating, key switch, reassembly | RFC 8446 §5 | ✅ |
+| 12 | Certificate / signature validation | RFC 8446 §4.4 | next |
 | 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -171,7 +171,8 @@ the weak point; TLS/HTTPS now is:
 | Networking (L2–L4, DNS, sockets) | ████████▌░ |
 | TCP (retransmit; no RTT est. yet) | ███████▌░░ |
 | Crypto — symmetric primitives | █████████░ |
-| TLS / HTTPS | ░░░░░░░░░░ |
+| TLS 1.3 client (handshake + record binding; no cert trust) | ███████░░░ |
+| Certificate / X.509 PKI | ░░░░░░░░░░ |
 | GPU acceleration | █░░░░░░░░░ |
 | x86_64 port | ░░░░░░░░░░ |
 
@@ -342,3 +343,48 @@ FSM loopback:  START -> WAIT_SH -> WAIT_EE -> WAIT_CERT -> WAIT_CV
 
 Next is binding this to `tls_record_seal/open` (plaintext gating, key switch on
 each phase anchor, per-phase sequence numbers), then certificate trust.
+
+## Step 11 — record binding (RFC 8446 §5)
+
+`tls/conn.c` is the layer between raw TLS records and the FSM — the point where
+the handshake finally rides the encrypted record layer. It does three things and
+nothing else:
+
+- **Plaintext-vs-encrypted gating.** ClientHello and ServerHello are plaintext
+  handshake records; everything after ServerHello is an `application_data` record
+  opened with the current read keys. The conn decides which based on the FSM's key
+  phase, not the record layer.
+- **Key switching at the two phase anchors.** ServerHello installs the handshake
+  traffic keys; the server Finished installs the application traffic keys. Each
+  switch builds a *fresh* record epoch, so its sequence number restarts at 0 — TLS
+  1.3 treats a key change as a new encryption epoch (§5.3). The client Finished is
+  sealed under the handshake epoch *before* the switch to application keys.
+- **Handshake reassembly.** One record may coalesce the whole server flight
+  (EncryptedExtensions | Certificate | CertificateVerify | Finished) or split a
+  single message across records; the conn buffers bytes and hands the FSM exactly
+  one complete message at a time.
+
+The dependency direction is one-way — `conn → { FSM, record layer } → crypto` —
+so the record layer never inspects handshake state and the FSM never sees a
+record. A direct consequence, and the headline invariant, is that the two failure
+modes are reported distinctly: a record-layer (AEAD) failure is a transport error
+that leaves the FSM intact, while only a real protocol violation drives it to
+ERROR. `make tls-test` proves the whole thing without a socket:
+
+```
+record binding:  ClientHello emitted as a plaintext record
+                 plaintext ServerHello -> handshake epoch (rx/tx seq reset to 0)
+                 ChangeCipherSpec record ignored (middlebox compat)
+                 one coalesced encrypted record (EE|Cert|CV|Finished) -> CONNECTED,
+                   application epoch installed, client Finished emitted encrypted
+                 server opens & verifies the client Finished
+                 application data both directions over the application epoch
+   invariant:    tampered ciphertext -> ERR_RECORD, FSM untouched (still WAIT_EE)
+   invariant:    valid record, bad Finished -> ERR_PROTOCOL, FSM -> ERROR
+   reassembly:   a handshake message fragmented across two records reassembles
+```
+
+With the FSM now driven over real encrypted records, the only thing standing
+between Aurora and a live `https://` server is trust: parsing the Certificate
+chain and verifying CertificateVerify — the X.509 / signature layer (step 12),
+which `conn.c` deliberately leaves as a blind transcript for now.

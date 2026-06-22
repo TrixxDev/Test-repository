@@ -178,7 +178,7 @@ crypto-test:
 # Host-side TLS protocol tests (tls/ over the verified crypto/ primitives).
 .PHONY: tls-test
 tls-test:
-	$(CC) -O2 -Icrypto -Itls tools/tls_test.c tls/record.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c -o /tmp/aurora_tls_test
+	$(CC) -O2 -Icrypto -Itls tools/tls_test.c tls/record.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c -o /tmp/aurora_tls_test
 	/tmp/aurora_tls_test
 
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display

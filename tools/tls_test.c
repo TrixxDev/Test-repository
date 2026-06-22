@@ -14,6 +14,7 @@
 #include "key_schedule.h"
 #include "handshake.h"
 #include "client.h"
+#include "conn.h"
 #include "chacha20poly1305.h"
 #include "x25519.h"
 
@@ -102,6 +103,23 @@ static int build_hs(uint8_t *o, uint8_t type, const uint8_t *body, int blen)
     o[0] = type; o[1] = 0; o[2] = (uint8_t)(blen >> 8); o[3] = (uint8_t)blen;
     for (int i = 0; i < blen; i++) o[4 + i] = body[i];
     return 4 + blen;
+}
+
+/* Wrap a body in a plaintext TLS record (for the loopback "server"'s SH). */
+static int plaintext_wrap(uint8_t *o, uint8_t ctype, const uint8_t *body, int blen)
+{
+    o[0] = ctype; o[1] = 0x03; o[2] = 0x03;
+    o[3] = (uint8_t)(blen >> 8); o[4] = (uint8_t)blen;
+    for (int i = 0; i < blen; i++) o[5 + i] = body[i];
+    return 5 + blen;
+}
+
+/* Install a record epoch from a traffic secret (server-side mirror of the conn). */
+static void epoch_from_secret(tls_record_keys *k, const uint8_t secret[32])
+{
+    uint8_t key[32], iv[12];
+    tls_traffic_keys(secret, key, 32, iv, 12);
+    tls_record_init(k, key, iv);
 }
 
 int main(void)
@@ -413,6 +431,177 @@ int main(void)
         uint8_t ch3[1024]; tls_client_start(&c3, ch3, sizeof ch3);
         check_int("unexpected EE in WAIT_SH -> -1",
                   tls_client_recv_handshake(&c3, ee, eelen, out, sizeof out, &outlen), -1);
+    }
+
+    printf("TLS 1.3 record binding (conn over the record layer):\n");
+    {
+        uint8_t cpriv[32], spriv[32], crand[32], srand[32];
+        for (int i=0;i<32;i++){ cpriv[i]=(uint8_t)(i+5); spriv[i]=(uint8_t)(0xA0+i);
+                                crand[i]=(uint8_t)(0x33+i); srand[i]=(uint8_t)(0x44+i); }
+
+        tls_conn cn;
+        tls_conn_init(&cn, "example.com", cpriv, crand);
+        check_int("init: rx epoch EARLY (plaintext)", cn.rx_phase, TLS_PHASE_EARLY);
+        check_int("init: tx epoch EARLY (plaintext)", cn.tx_phase, TLS_PHASE_EARLY);
+
+        /* ClientHello comes out as a plaintext handshake record */
+        uint8_t crec[1100];
+        int crl = tls_conn_start(&cn, crec, sizeof crec);
+        check_int("start: plaintext handshake record", (crl > 5 && crec[0] == TLS_CONTENT_HANDSHAKE), 1);
+        const uint8_t *ch = crec + 5; int chlen = crl - 5;   /* handshake message = record body */
+
+        /* ---- server mirror: same transcript, same key schedule ---- */
+        uint8_t spub[32], cpub[32];
+        x25519_base(spub, spriv);
+        x25519_base(cpub, cpriv);
+
+        tls_transcript ts; tls_transcript_init(&ts);
+        tls_transcript_update(&ts, ch, chlen);
+        uint8_t sh[256];
+        int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        tls_transcript_update(&ts, sh, shlen);
+
+        uint8_t hello_hash[32], ecdhe[32];
+        tls_transcript_hash(&ts, hello_hash);
+        x25519(ecdhe, spriv, cpub);
+        tls_key_schedule kss;
+        tls_key_schedule_derive(&kss, ecdhe, hello_hash);
+
+        /* server handshake epochs: write = server hs traffic, read = client hs traffic */
+        tls_record_keys s_tx_hs, s_rx_hs;
+        epoch_from_secret(&s_tx_hs, kss.server_hs_traffic);
+        epoch_from_secret(&s_rx_hs, kss.client_hs_traffic);
+
+        /* server flight: EE | Certificate | CertificateVerify | Finished */
+        uint8_t ee[64], cert[64], cv[64];
+        int eelen   = build_hs(ee,   TLS_HS_ENCRYPTED_EXTENSIONS, (const uint8_t*)"\x00\x00", 2);
+        int certlen = build_hs(cert, TLS_HS_CERTIFICATE,          (const uint8_t*)"\x00\x00\x00\x00", 4);
+        int cvlen   = build_hs(cv,   TLS_HS_CERTIFICATE_VERIFY,   (const uint8_t*)"\x08\x04\x00\x00", 4);
+        tls_transcript_update(&ts, ee, eelen);
+        tls_transcript_update(&ts, cert, certlen);
+        tls_transcript_update(&ts, cv, cvlen);
+
+        uint8_t sfk[32], thash_cv[32], svd[32], sfin[64];
+        tls_finished_key(sfk, kss.server_hs_traffic);
+        tls_transcript_hash(&ts, thash_cv);              /* Transcript(CH..CV) */
+        tls_finished_verify_data(svd, sfk, thash_cv);
+        int sfinlen = build_hs(sfin, TLS_HS_FINISHED, svd, 32);
+        tls_transcript_update(&ts, sfin, sfinlen);       /* Transcript(CH..server Finished) */
+
+        /* coalesce the four messages into one record body */
+        uint8_t flight[512]; int fl = 0;
+        for (int i=0;i<eelen;i++)   flight[fl++] = ee[i];
+        for (int i=0;i<certlen;i++) flight[fl++] = cert[i];
+        for (int i=0;i<cvlen;i++)   flight[fl++] = cv[i];
+        for (int i=0;i<sfinlen;i++) flight[fl++] = sfin[i];
+
+        uint8_t out[256]; size_t outlen;
+
+        /* 1) plaintext ServerHello record -> switch to the handshake epoch */
+        uint8_t shrec[300];
+        int shrl = plaintext_wrap(shrec, TLS_CONTENT_HANDSHAKE, sh, shlen);
+        check_int("recv SH record -> OK", tls_conn_recv_record(&cn, shrec, shrl, out, sizeof out, &outlen), TLS_CONN_OK);
+        check_int("phase anchor 1: rx HANDSHAKE", cn.rx_phase, TLS_PHASE_HANDSHAKE);
+        check_int("phase anchor 1: tx HANDSHAKE", cn.tx_phase, TLS_PHASE_HANDSHAKE);
+        check_int("handshake rx epoch seq starts at 0", (int)cn.rx.seq, 0);
+        check_int("nothing emitted after SH", (int)outlen, 0);
+
+        /* a ChangeCipherSpec between flights is ignored (middlebox compatibility) */
+        uint8_t ccs[6] = { TLS_CONTENT_CHANGE_CIPHER_SPEC, 0x03,0x03, 0,1, 1 };
+        check_int("CCS record ignored -> OK", tls_conn_recv_record(&cn, ccs, 6, out, sizeof out, &outlen), TLS_CONN_OK);
+        check_int("CCS does not advance rx seq", (int)cn.rx.seq, 0);
+
+        /* 2) one coalesced encrypted record carries EE..Finished -> CONNECTED */
+        uint8_t srec[600];
+        int srl = tls_record_seal(&s_tx_hs, TLS_CONTENT_HANDSHAKE, flight, fl, srec, sizeof srec);
+        check_int("recv coalesced flight -> OK", tls_conn_recv_record(&cn, srec, srl, out, sizeof out, &outlen), TLS_CONN_OK);
+        check_int("client CONNECTED", tls_conn_connected(&cn), 1);
+        check_int("phase anchor 2: rx APPLICATION", cn.rx_phase, TLS_PHASE_APPLICATION);
+        check_int("phase anchor 2: tx APPLICATION", cn.tx_phase, TLS_PHASE_APPLICATION);
+        check_int("seq per epoch: app tx seq starts at 0", (int)cn.tx.seq, 0);
+        check_int("emitted an encrypted Finished record", (outlen > 5 && out[0] == TLS_CONTENT_APPLICATION_DATA), 1);
+
+        /* server opens the client Finished with client-handshake keys and verifies */
+        uint8_t cfin[64], itype;
+        int n = tls_record_open(&s_rx_hs, out, outlen, cfin, sizeof cfin, &itype);
+        check_int("server opens client Finished", (n == 36 && itype == TLS_CONTENT_HANDSHAKE), 1);
+        uint8_t cfk[32], thash_sf[32];
+        tls_finished_key(cfk, kss.client_hs_traffic);
+        tls_transcript_hash(&ts, thash_sf);
+        check_int("client Finished verifies server-side", tls_check_finished(cfk, thash_sf, cfin + 4), 0);
+
+        /* ---- application data both ways over the application epoch ---- */
+        uint8_t s_cap[32], s_sap[32];
+        tls_derive_secret(s_cap, kss.master_secret, "c ap traffic", thash_sf);
+        tls_derive_secret(s_sap, kss.master_secret, "s ap traffic", thash_sf);
+        tls_record_keys s_tx_ap, s_rx_ap;
+        epoch_from_secret(&s_tx_ap, s_sap);     /* server writes app data */
+        epoch_from_secret(&s_rx_ap, s_cap);     /* server reads client app data */
+
+        const char *resp = "HTTP/1.1 200 OK"; size_t rlen = strlen(resp);
+        char resphex[64]; tohex((const uint8_t*)resp, (int)rlen, resphex);
+        uint8_t arec[256];
+        int arl = tls_record_seal(&s_tx_ap, TLS_CONTENT_APPLICATION_DATA, (const uint8_t*)resp, rlen, arec, sizeof arec);
+        uint8_t app[256]; size_t applen;
+        check_int("recv server app data -> OK", tls_conn_recv_app(&cn, arec, arl, app, sizeof app, &applen), TLS_CONN_OK);
+        check("decrypted server app data", app, (int)applen, resphex);
+
+        const char *req = "GET / HTTP/1.1"; size_t qlen = strlen(req);
+        char reqhex[64]; tohex((const uint8_t*)req, (int)qlen, reqhex);
+        uint8_t qrec[256];
+        int qrl = tls_conn_send_app(&cn, (const uint8_t*)req, qlen, qrec, sizeof qrec);
+        check_int("send client app data", qrl > 5, 1);
+        uint8_t srvplain[256], it2;
+        int m = tls_record_open(&s_rx_ap, qrec, qrl, srvplain, sizeof srvplain, &it2);
+        check_int("server opens client app data", (m == (int)qlen && it2 == TLS_CONTENT_APPLICATION_DATA), 1);
+        check("server recovered client request", srvplain, m, reqhex);
+
+        /* ---- invariant B: an AEAD failure is a transport error, not a handshake one ---- */
+        tls_conn n1; tls_conn_init(&n1, "example.com", cpriv, crand);
+        uint8_t r1[1100]; tls_conn_start(&n1, r1, sizeof r1);
+        tls_conn_recv_record(&n1, shrec, shrl, out, sizeof out, &outlen);   /* now in HANDSHAKE */
+        uint8_t bad[600]; for (int i=0;i<srl;i++) bad[i]=srec[i]; bad[7] ^= 1;  /* corrupt ciphertext */
+        check_int("tampered encrypted record -> ERR_RECORD",
+                  tls_conn_recv_record(&n1, bad, srl, out, sizeof out, &outlen), TLS_CONN_ERR_RECORD);
+        check_int("AEAD failure leaves FSM intact (not ERROR)", n1.fsm.state != TLS_ST_ERROR, 1);
+        check_int("FSM still expects the server flight (WAIT_EE)", n1.fsm.state, TLS_ST_WAIT_EE);
+
+        /* ---- invariant B (other side): a real protocol failure DOES drive the FSM to ERROR ---- */
+        tls_conn n2; tls_conn_init(&n2, "example.com", cpriv, crand);
+        uint8_t r2[1100]; tls_conn_start(&n2, r2, sizeof r2);
+        tls_conn_recv_record(&n2, shrec, shrl, out, sizeof out, &outlen);
+        uint8_t badsvd[32]; for (int i=0;i<32;i++) badsvd[i]=svd[i]; badsvd[0] ^= 1;
+        uint8_t badsfin[64]; int badsfinlen = build_hs(badsfin, TLS_HS_FINISHED, badsvd, 32);
+        uint8_t flight2[512]; int fl2 = 0;
+        for (int i=0;i<eelen;i++)      flight2[fl2++] = ee[i];
+        for (int i=0;i<certlen;i++)    flight2[fl2++] = cert[i];
+        for (int i=0;i<cvlen;i++)      flight2[fl2++] = cv[i];
+        for (int i=0;i<badsfinlen;i++) flight2[fl2++] = badsfin[i];
+        tls_record_keys s_tx_hs2; epoch_from_secret(&s_tx_hs2, kss.server_hs_traffic);
+        uint8_t srec2[600];
+        int srl2 = tls_record_seal(&s_tx_hs2, TLS_CONTENT_HANDSHAKE, flight2, fl2, srec2, sizeof srec2);
+        check_int("valid record, bad Finished -> ERR_PROTOCOL",
+                  tls_conn_recv_record(&n2, srec2, srl2, out, sizeof out, &outlen), TLS_CONN_ERR_PROTOCOL);
+        check_int("protocol failure drives FSM to ERROR", n2.fsm.state, TLS_ST_ERROR);
+
+        /* ---- invariant C: a handshake message fragmented across two records ---- */
+        tls_conn n3; tls_conn_init(&n3, "example.com", cpriv, crand);
+        uint8_t r3[1100]; tls_conn_start(&n3, r3, sizeof r3);
+        tls_conn_recv_record(&n3, shrec, shrl, out, sizeof out, &outlen);
+        tls_record_keys s_tx_hs3; epoch_from_secret(&s_tx_hs3, kss.server_hs_traffic);
+        int split = eelen + 5;                          /* falls inside the Certificate message */
+        uint8_t f1[600], f2[600]; size_t ol1, ol2;
+        int f1l = tls_record_seal(&s_tx_hs3, TLS_CONTENT_HANDSHAKE, flight, split, f1, sizeof f1);
+        int f2l = tls_record_seal(&s_tx_hs3, TLS_CONTENT_HANDSHAKE, flight + split, fl - split, f2, sizeof f2);
+        check_int("fragment 1 -> OK, nothing emitted",
+                  (tls_conn_recv_record(&n3, f1, f1l, out, sizeof out, &ol1) == TLS_CONN_OK && ol1 == 0), 1);
+        check_int("after fragment 1: WAIT_CERT (partial Cert buffered)", n3.fsm.state, TLS_ST_WAIT_CERT);
+        check_int("still not connected mid-message", tls_conn_connected(&n3), 0);
+        check_int("fragment 2 -> OK, completes handshake",
+                  (tls_conn_recv_record(&n3, f2, f2l, out, sizeof out, &ol2) == TLS_CONN_OK
+                   && tls_conn_connected(&n3)), 1);
+        check_int("reassembled flight emits the client Finished",
+                  (ol2 > 5 && out[0] == TLS_CONTENT_APPLICATION_DATA), 1);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);
