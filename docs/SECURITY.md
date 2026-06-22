@@ -23,9 +23,14 @@ Run the vectors: `make crypto-test`.
 | 5 | **Poly1305** (`crypto/poly1305.c`) | RFC 8439 + OpenSSL | ✅ |
 | 5b | **ChaCha20-Poly1305 AEAD** (`crypto/chacha20poly1305.c`) | RFC 8439 §2.8.2 | ✅ |
 | 6 | **TLS 1.3 record layer** (`tls/record.c`) | RFC 8446 §5 round-trip | ✅ |
-| 7 | X25519 (ECDHE key exchange) | RFC 7748 | next |
-| 8 | Transcript hash + HKDF-Expand-Label key schedule | RFC 8446 §7 | later |
+| 7 | **X25519** (ECDHE key exchange) (`crypto/x25519.c`) | RFC 7748 | ✅ |
+| 8 | Transcript hash + HKDF-Expand-Label key schedule | RFC 8446 §7 | next |
 | 9 | TLS 1.3 client handshake → HTTPS GET | real `https://` site | later |
+
+With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
+client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
+What is left is pure protocol: the key schedule glue, the handshake state
+machine, and certificate/signature verification (a later, separable layer).
 
 With AEAD done, the **symmetric** half of TLS 1.3 is essentially complete: hash,
 MAC, key schedule (HKDF), stream cipher and authenticated encryption are all
@@ -199,3 +204,36 @@ behaviour:        round-trip recovers (type, content); seq advances; identical
 
 This is the bridge to the handshake: ServerHello-onward is just records, and
 `EncryptedExtensions` / `Finished` are sealed/opened with exactly this code.
+
+## Step 7 — X25519 (RFC 7748)
+
+The last fundamental primitive — Diffie-Hellman on Curve25519. The shared secret
+it produces is the input to the TLS 1.3 key schedule (`HKDF-Extract(.., ECDHE)`).
+
+A constant-time Montgomery ladder with branch-free conditional swaps, so the
+secret scalar never steers control flow or memory access. Field arithmetic is mod
+2^255-19 in 16 limbs of radix 2^16 — 64-bit multiplies only, no 128-bit type,
+fine for plain i686. `make crypto-test`:
+
+```
+X25519 (RFC 7748):  scalarmult vectors 1 & 2 (§5.2) / iterative 1-iter (§5.2)
+                    / §6.1 Diffie-Hellman: Alice & Bob publics, shared secret,
+                      and both sides agree   -> PASS
+```
+
+The §6.1 case is the real end-to-end check: derive each side's public key from
+its secret, then confirm `X25519(a, B) == X25519(b, A)` == the RFC's shared
+secret — exactly the exchange the handshake will run.
+
+## Cryptographic toolbox: complete
+
+```
+crypto/   sha256  hmac  hkdf  chacha20  poly1305  chacha20poly1305  x25519
+tls/      record
+```
+
+Every box a TLS 1.3 `TLS_CHACHA20_POLY1305_SHA256` client needs for its maths is
+now present and RFC-verified. The remaining work is protocol state, not crypto:
+key schedule (transcript hash + HKDF-Expand-Label), the handshake messages
+(ClientHello → ServerHello → EncryptedExtensions → Certificate → CertificateVerify
+→ Finished), and certificate/signature validation.

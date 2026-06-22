@@ -11,6 +11,7 @@
 #include "chacha20.h"
 #include "poly1305.h"
 #include "chacha20poly1305.h"
+#include "x25519.h"
 
 static int failures;
 
@@ -279,6 +280,46 @@ int main(void)
         {   uint8_t badtag[16]; for (int i=0;i<16;i++) badtag[i]=tag[i]; badtag[15] ^= 0x80;
             check_int("flip tag -> FAIL",
                       chacha20poly1305_open(out, key, nonce, aad, aadlen, ct, ptlen, badtag), -1); }
+    }
+
+    printf("X25519 (RFC 7748):\n");
+    {   /* §5.2 — scalar * u, vector 1 */
+        uint8_t k[32], u[32], out[32];
+        unhex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", k);
+        unhex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", u);
+        x25519(out, k, u);
+        check("scalarmult vector 1", out, 32,
+              "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552");
+    }
+    {   /* §5.2 — scalar * u, vector 2 */
+        uint8_t k[32], u[32], out[32];
+        unhex("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d", k);
+        unhex("e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493", u);
+        x25519(out, k, u);
+        check("scalarmult vector 2", out, 32,
+              "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957");
+    }
+    {   /* §5.2 — iterative test, 1 iteration: X25519(9, 9) */
+        uint8_t base[32] = {9}, out[32];
+        x25519(out, base, base);
+        check("iterative (1 iter)", out, 32,
+              "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079");
+    }
+    {   /* §6.1 — Diffie-Hellman: both sides derive the same shared secret */
+        uint8_t a[32], b[32], apub[32], bpub[32], ka[32], kb[32];
+        unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", a);
+        unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb", b);
+        x25519_base(apub, a);
+        check("Alice public", apub, 32,
+              "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+        x25519_base(bpub, b);
+        check("Bob public", bpub, 32,
+              "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        x25519(ka, a, bpub);
+        x25519(kb, b, apub);
+        check("shared secret", ka, 32,
+              "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+        check_int("both sides agree", memcmp(ka, kb, 32) == 0, 1);
     }
 
     printf(failures ? "\nCRYPTO TEST: %d FAILURE(S)\n" : "\nCRYPTO TEST: ALL PASS\n", failures);
