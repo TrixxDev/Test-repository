@@ -31,8 +31,8 @@ Run the vectors: `make crypto-test`.
 | 11b | **RFC 8448 trace runner** (`tools/tls_trace_test.c`) — engine vs real bytes | RFC 8448 §3 | ✅ |
 | 12.1 | **ASN.1 DER reader** (`x509/asn1.c`) — bounds-checked TLV cursor | X.690 / RFC 8448 cert | ✅ |
 | 12.2 | **X.509 certificate parser** (`x509/x509.c`) — no crypto | RFC 5280 / RFC 8448 + SAN | ✅ |
-| 12.3 | RSA signature verification (PKCS#1 v1.5) | RFC 8448 CertificateVerify | next |
-| 12.4 | Trust store (ISRG Root X1) + hostname (SAN) | RFC 6125 | later |
+| 12.3 | **RSA verification** (`crypto/bignum.c`, `crypto/rsa.c`, `x509/verify_cert.c`) | RFC 8448 cert (self-signed) | ✅ |
+| 12.4 | Trust store (ISRG Root X1) + hostname (SAN) | RFC 6125 | next |
 | 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -510,3 +510,41 @@ proving the signature over `tbsCertificate`. The RFC 8448 cert is RSA, so 12.3 i
 RSA PKCS#1 v1.5 verification — and because the whole chain (ASN.1 -> X.509 -> the
 captured `tbs`/`spki_key`/`signature` slices) is already pinned to the published
 trace, that step closes a real end-to-end PKI test on RFC bytes.
+
+## Step 12.3 — RSA signature verification (RFC 8017) + the first PKI end-to-end
+
+The crypto/x509 boundary is kept clean: the math lives in `crypto/`, the policy
+in `x509/`.
+
+- `crypto/bignum.c` — a fixed-size big integer (32-bit limbs, schoolbook multiply,
+  binary long division), the simplest thing that can be correct. No Montgomery, no
+  allocation; certificate checks run a handful of times, so clarity beats speed.
+  Its KATs (add/sub/mul/cmp/shift/mod/modexp, vs Python) come first and alone, so
+  an RSA bug is never a hunt across five places.
+- `crypto/rsa.c` — verification only: `rsa_public` (public-exponent modexp) and
+  `rsa_pkcs1_v15_verify`. The PKCS#1 v1.5 check is **construct-and-compare** (RFC
+  8017 §8.2.2): rebuild the expected `00 01 FF..FF 00 || DigestInfo` and compare,
+  instead of parsing the recovered block — no room for a forged DigestInfo or
+  short padding (the BERserk class of bugs). RSA knows the envelope, not the hash.
+- `x509/verify_cert.c` — the policy seam: hash the TBSCertificate, build the DER
+  DigestInfo, **dispatch on the signature-algorithm OID**, and call crypto. RSA +
+  SHA-256 is implemented; the dispatcher already has an ECDSA slot that returns
+  UNSUPPORTED, so adding ECDSA later needs no restructuring. It proves a signature
+  only — no chain, validity-window or hostname decision yet.
+
+`make rsa-test` pins the math; `make x509-test` then closes the first real
+**end-to-end PKI test on RFC bytes**. The RFC 8448 certificate is self-signed, so
+its own SubjectPublicKey verifies its signature:
+
+```
+RFC 8448 cert -> parse -> extract SPKI (modulus, exponent)
+              -> SHA-256(TBSCertificate) -> build DigestInfo
+              -> RSA public op -> compare EM      => OK
+   tamper one TBSCertificate byte                 => BAD_SIGNATURE
+   ECDSA signature algorithm OID                  => UNSUPPORTED (dispatch)
+```
+
+So ASN.1 ✓, X.509 ✓, RSA ✓ — all on the published reference bytes. What is left is
+pure policy, much more tractable than what TLS already required: a trust store
+(one root, ISRG Root X1), the validity-window check (now a Unix-time range
+compare), and hostname matching against SAN.

@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include "asn1.h"
 #include "x509.h"
+#include "verify_cert.h"
 
 /* The 432-byte DER certificate from RFC 8448 §3 (extracted verbatim). */
 #define RFC_DER_CERT "308201ac30820115a003020102020102300d06092a864886f70d01010b0500300e310c300a06035504031303727361301e170d3136303733303031323335395a170d3236303733303031323335395a300e310c300a0603550403130372736130819f300d06092a864886f70d010101050003818d0030818902818100b4bb498f8279303d980836399b36c6988c0c68de55e1bdb826d3901a2461eafd2de49a91d015abbc9a95137ace6c1af19eaa6af98c7ced43120998e187a80ee0ccb0524b1b018c3e0b63264d449a6d38e22a5fda430846748030530ef0461c8ca9d9efbfae8ea6d1d03e2bd193eff0ab9a8002c47428a6d35a8d88d79f7f1e3f0203010001a31a301830090603551d1304023000300b0603551d0f0404030205a0300d06092a864886f70d01010b05000381810085aad2a0e5b9276b908c65f73a7267170618a54c5f8a7b337d2df7a594365417f2eae8f8a58c8f8172f9319cf36b7fd6c55b80f21a03015156726096fd335e5e67f2dbf102702e608ccae6bec1fc63a42a99be5c3eb7107c3c54e9b9eb2bd5203b1c3b84e0a8b2f759409ba3eac9d91d402dcc0cc8f8961229ac9187b42b4de1"
@@ -200,6 +201,34 @@ int main(void)
         check_ok("SAN[1] == www.example.com", cert.san_count > 1 && strcmp(cert.san_dns[1], "www.example.com") == 0);
         check_ok("notBefore == 2024-01-01Z (1704067200)", cert.not_before == 1704067200ULL);
         check_ok("notAfter  == 2034-01-01Z (2019686400)", cert.not_after == 2019686400ULL);
+    }
+
+    printf("X.509 signature — RFC 8448 self-signed certificate (end-to-end PKI):\n");
+    {
+        uint8_t der[512];
+        int derlen = unhex(RFC_DER_CERT, der);
+        x509_cert cert;
+        check_ok("certificate parses", x509_parse(der, derlen, &cert) == 0);
+
+        /* self-signed: the issuer key is the cert's own SubjectPublicKey */
+        int rc = x509_verify_signature(&cert, cert.spki_key.p, cert.spki_key.len);
+        check_ok("RSA/SHA-256 signature verifies over TBSCertificate", rc == X509_VERIFY_OK);
+
+        /* flip one byte inside the TBSCertificate -> signature must fail */
+        uint8_t der2[512]; memcpy(der2, der, derlen);
+        x509_cert cert2;
+        check_ok("tampered cert re-parses", x509_parse(der2, derlen, &cert2) == 0);
+        /* cert2.tbs points into der2; corrupt its first content byte */
+        der2[(cert2.tbs.p - der2) + 8] ^= 1;
+        check_ok("tampered TBSCertificate -> BAD_SIGNATURE",
+                 x509_verify_signature(&cert2, cert2.spki_key.p, cert2.spki_key.len) == X509_VERIFY_BAD_SIGNATURE);
+
+        /* dispatcher: an ECDSA-signed cert is reported UNSUPPORTED, not failed */
+        static const uint8_t oid_ecdsa[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x02 };
+        x509_cert fake = cert;
+        fake.sig_oid.p = oid_ecdsa; fake.sig_oid.len = sizeof oid_ecdsa;
+        check_ok("ECDSA signature algorithm -> UNSUPPORTED",
+                 x509_verify_signature(&fake, cert.spki_key.p, cert.spki_key.len) == X509_VERIFY_UNSUPPORTED);
     }
 
     printf(failures ? "\nX509 TEST: %d FAILURE(S)\n" : "\nX509 TEST: ALL PASS\n", failures);
