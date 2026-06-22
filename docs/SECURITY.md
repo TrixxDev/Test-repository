@@ -22,9 +22,10 @@ Run the vectors: `make crypto-test`.
 | 4 | **ChaCha20** (`crypto/chacha20.c`) | RFC 8439 | ✅ |
 | 5 | **Poly1305** (`crypto/poly1305.c`) | RFC 8439 + OpenSSL | ✅ |
 | 5b | **ChaCha20-Poly1305 AEAD** (`crypto/chacha20poly1305.c`) | RFC 8439 §2.8.2 | ✅ |
-| 6 | TLS record layer (encrypt/decrypt, no handshake) | local round-trip | next |
-| 7 | X25519 (ECDHE key exchange) | RFC 7748 | later |
-| 8 | TLS 1.3 client handshake → HTTPS GET | real `https://` site | later |
+| 6 | **TLS 1.3 record layer** (`tls/record.c`) | RFC 8446 §5 round-trip | ✅ |
+| 7 | X25519 (ECDHE key exchange) | RFC 7748 | next |
+| 8 | Transcript hash + HKDF-Expand-Label key schedule | RFC 8446 §7 | later |
+| 9 | TLS 1.3 client handshake → HTTPS GET | real `https://` site | later |
 
 With AEAD done, the **symmetric** half of TLS 1.3 is essentially complete: hash,
 MAC, key schedule (HKDF), stream cipher and authenticated encryption are all
@@ -50,6 +51,8 @@ tls/     hkdf_label  transcript  record  handshake    (TLS protocol)
 
 In particular `HKDF-Expand-Label` / `Derive-Secret` are TLS helpers (`tls/`), not
 crypto primitives — they wrap `hkdf_expand`, they don't live inside it.
+
+`tls/` has its own host harness: `make tls-test`.
 
 ## Step 1–2 — SHA-256 + HMAC-SHA256
 
@@ -166,3 +169,33 @@ the weak point; TLS/HTTPS now is:
 The first real internet request from Aurora Fetch hit `426 Upgrade Required` —
 the web itself telling Aurora to learn HTTPS. That makes the TLS record layer the
 single highest-value next step, which is exactly what step 6 begins.
+
+## Step 6 — TLS 1.3 record layer (RFC 8446 §5)
+
+The crossover from `crypto/` to `tls/`: the first protocol code, pure framing
+over the verified AEAD, no networking (bytes in, bytes out).
+
+- `tls_record_seal(type, plaintext) -> TLSCiphertext` builds `TLSInnerPlaintext`
+  (`content || real_type`), derives the nonce, and AEAD-seals in place. The
+  on-wire `opaque_type` is always `application_data` (23); the real type is
+  hidden inside the encryption.
+- `tls_record_open(record) -> (type, content)` reconstructs the nonce from its
+  own sequence counter, AEAD-opens (verify-before-decrypt), then strips the
+  trailing zero padding and the inner type byte.
+- **nonce** = `write_iv XOR left-pad(seq, 12)` (§5.3); **AAD** = the 5-byte
+  record header (§5.2). The sequence number is implicit state on each side, so a
+  reordered or replayed record derives the wrong nonce and fails authentication.
+
+TLS 1.3 publishes no ChaCha20-Poly1305 record KAT, so `make tls-test` pins it
+three ways:
+
+```
+nonce (§5.3):     iv/seq combinations vs hand-computed values
+framing:          record == the verified AEAD invoked manually, byte-for-byte
+behaviour:        round-trip recovers (type, content); seq advances; identical
+                  plaintext at seq 0 vs 1 differs on the wire; tampered byte ->
+                  open == -1; wrong sequence number -> open == -1
+```
+
+This is the bridge to the handshake: ServerHello-onward is just records, and
+`EncryptedExtensions` / `Finished` are sealed/opened with exactly this code.
