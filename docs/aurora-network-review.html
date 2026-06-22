@@ -146,11 +146,12 @@
 <div class="wrap">
 
   <header class="hero">
-    <span class="badge">L2–L4 complete · TCP next</span>
+    <span class="badge">L2–L4 + TCP handshake · data next</span>
     <h1>AuroraOS <span class="x">Network Stack</span></h1>
-    <p class="sub">From a bare PCI device to resolving a real domain name: a full
-       link-to-transport stack — VirtIO-Net, Ethernet, ARP, IPv4, ICMP, UDP and
-       DNS — each layer built as a small, individually verified increment in QEMU.</p>
+    <p class="sub">From a bare PCI device to resolving a real domain name and
+       opening a TCP connection: VirtIO-Net, Ethernet, ARP, IPv4, ICMP, UDP, DNS
+       and the TCP three-way handshake — each built as a small, individually
+       verified increment in QEMU.</p>
     <div class="meta">
       device <code>virtio-net-pci</code> · runtime <code>qemu-system-i386</code> ·
       net <code>10.0.2.15</code> · gw <code>10.0.2.2</code> · dns <code>10.0.2.3</code>
@@ -160,18 +161,19 @@
   <div class="verdict">
     <div class="k">🌐</div>
     <div>AuroraOS now <b>pings the gateway, exchanges UDP datagrams with the host,
-      and resolves a real domain name from the internet on its own</b>
-      (<code>example.com → 104.20.23.154</code>). The whole L2–L4 stack is live and
-      verified. What remains for real internet services is the one big piece left
-      on purpose: <b>TCP</b>. The transport was hardened <i>before</i> any protocol
-      logic, so each layer above sits on a proven base with no DMA risk.</div>
+      resolves a real domain name from the internet</b> (<code>example.com →
+      104.20.23.154</code>), and <b>opens a TCP connection to ESTABLISHED</b>
+      (SYN → SYN-ACK → ACK). The whole L2–L4 stack plus the TCP handshake is live
+      and verified. What remains is TCP <b>data transfer + teardown</b> — then a
+      real <code>GET /</code>. The transport was hardened <i>before</i> any protocol
+      logic, so each layer sits on a proven base with no DMA risk.</div>
   </div>
 
   <h2>The stack — as built</h2>
   <div class="stack">
-    <div class="layer"><span class="nm">TCP</span>
-      <span class="ds">reliable byte stream — handshake, seq/ack, retransmit, state machine</span>
-      <span class="st next">next</span></div>
+    <div class="layer done"><span class="nm">TCP</span>
+      <span class="ds">full TCB + RFC state enum · <b>handshake → ESTABLISHED</b> · data/teardown next</span>
+      <span class="st done">8.1 ✓</span></div>
     <div class="arrowcol">▲ ▼</div>
     <div class="layer done"><span class="nm">DNS</span>
       <span class="ds">typed <code>dns_query(name, type)</code> → <b>real A record</b> via 10.0.2.3</span>
@@ -216,7 +218,11 @@
 <span class="b">[icmp]</span> 4/4 replies -- <span class="g">PING OK</span>
 
 <span class="b">[dns]</span> example.com -> <span class="g">104.20.23.154</span>
-<span class="d"># a real A record, resolved by Aurora itself</span></pre>
+<span class="d"># a real A record, resolved by Aurora itself</span>
+
+<span class="b">[tcp]</span> connect 10.0.2.2:80
+<span class="b">[tcp]</span> state=ESTABLISHED -- <span class="g">HANDSHAKE OK</span>
+<span class="d"># pcap: SYN -> SYN|ACK -> ACK</span></pre>
     <pre class="term"><span class="d"># tools/udptest.py  (host nc -u :9999)</span>
 [host] &lt;- guest: <span class="g">b'hello from aurora\n'</span>
 [host] -&gt; guest: reply from host
@@ -277,6 +283,7 @@
     <tr><td><code>5a62c4f</code></td><td>IPv4 + ICMP echo</td><td class="ok">ping 4/4</td></tr>
     <tr><td><code>d5898cb</code></td><td>UDP datagrams + round-trip test</td><td class="ok">TX+RX OK</td></tr>
     <tr><td><code>b69d6a9</code></td><td>DNS resolver (typed) + hostname ping</td><td class="ok">A record resolved</td></tr>
+    <tr><td><code>30945b5</code></td><td>TCP three-way handshake (connect only)</td><td class="ok">ESTABLISHED</td></tr>
   </table>
 
   <h2>Maturity — subsystem scorecard</h2>
@@ -289,7 +296,7 @@
     <div class="row"><div class="lbl">ARP</div><div class="bar"><i style="width:80%"></i></div><div class="v">8.0</div></div>
     <div class="row"><div class="lbl">IPv4 / ICMP</div><div class="bar"><i style="width:75%"></i></div><div class="v">7.5</div></div>
     <div class="row"><div class="lbl">UDP / DNS</div><div class="bar"><i style="width:70%"></i></div><div class="v">7.0</div></div>
-    <div class="row zero"><div class="lbl">TCP</div><div class="bar"><i style="width:0%"></i></div><div class="v">0</div></div>
+    <div class="row low"><div class="lbl">TCP (handshake)</div><div class="bar"><i style="width:30%"></i></div><div class="v">3.0</div></div>
     <div class="row zero"><div class="lbl">HTTP / TLS</div><div class="bar"><i style="width:0%"></i></div><div class="v">0</div></div>
   </div>
   <p style="color:var(--mut);font-size:13.5px;margin-top:14px">
@@ -309,17 +316,20 @@
     <span class="n done">ICMP</span><span class="a">→</span>
     <span class="n done">UDP</span><span class="a">→</span>
     <span class="n done">DNS</span><span class="a">→</span>
-    <span class="n next">TCP</span><span class="a">→</span>
+    <span class="n done">TCP·SYN</span><span class="a">→</span>
+    <span class="n next">TCP·data</span><span class="a">→</span>
     <span class="n">HTTP</span>
   </div>
 
   <div class="next">
-    <b style="color:#cfe0ff">Next step — Phase 8: TCP</b>
+    <b style="color:#cfe0ff">Next step — Phase 8.2: TCP data transfer</b>
     <ol>
-      <li>Three-way handshake (SYN / SYN-ACK / ACK) and connection state machine
-          (LISTEN, SYN_SENT, ESTABLISHED, FIN_WAIT, TIME_WAIT, …).</li>
-      <li>Sequence/acknowledgement numbers, a receive window, and retransmission.</li>
-      <li>Then HTTP GET — the first content fetched from the wider internet.</li>
+      <li><b>Done (8.1):</b> three-way handshake → ESTABLISHED, on a full TCB +
+          complete RFC state enum (only CLOSED/SYN_SENT/ESTABLISHED active).</li>
+      <li><b>Next (8.2):</b> <code>send()</code> / <code>recv()</code> over the open
+          connection — sequence/ack bookkeeping and a receive window — proved by a
+          <code>GET / HTTP/1.0</code> returning bytes.</li>
+      <li><b>Then (8.3):</b> teardown — FIN / CLOSE / TIME_WAIT.</li>
     </ol>
     <div class="note">
       <b>Architecture note.</b>
