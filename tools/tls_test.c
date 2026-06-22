@@ -10,7 +10,10 @@
 #include <string.h>
 #include <stdint.h>
 #include "record.h"
+#include "transcript.h"
+#include "key_schedule.h"
 #include "chacha20poly1305.h"
+#include "x25519.h"
 
 static int failures;
 
@@ -41,6 +44,17 @@ static void check_int(const char *name, int got, int want)
         printf("  FAIL  %s\n        got  %d\n        want %d\n", name, got, want);
         failures++;
     }
+}
+
+static int unhex(const char *s, uint8_t *out)
+{
+    int n = 0;
+    for (; s[0] && s[1]; s += 2) {
+        int hi = s[0] <= '9' ? s[0]-'0' : (s[0]|32)-'a'+10;
+        int lo = s[1] <= '9' ? s[1]-'0' : (s[1]|32)-'a'+10;
+        out[n++] = (uint8_t)((hi << 4) | lo);
+    }
+    return n;
 }
 
 int main(void)
@@ -134,6 +148,64 @@ int main(void)
 
         tls_record_keys r3; tls_record_init(&r3, key, iv);
         check_int("correct sequence -> ok", tls_record_open(&r3, rec, rl, out, sizeof out, &type), (int)mlen);
+    }
+
+    printf("TLS 1.3 transcript (RFC 8446 §4.4.1):\n");
+    {
+        tls_transcript t;
+        uint8_t h[32];
+
+        tls_transcript_init(&t);
+        tls_transcript_hash(&t, h);
+        check("empty == SHA-256(\"\")", h, 32,
+              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+
+        /* streaming: "ab" then "c" must equal SHA-256("abc") */
+        tls_transcript_init(&t);
+        tls_transcript_update(&t, "ab", 2);
+        tls_transcript_hash(&t, h);          /* snapshot must not end the stream */
+        tls_transcript_update(&t, "c", 1);
+        tls_transcript_hash(&t, h);
+        check("streamed \"ab\"+\"c\" == SHA-256(\"abc\")", h, 32,
+              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    printf("TLS 1.3 key schedule (RFC 8448 §3 trace):\n");
+    {
+        /* The RFC 8448 "Simple 1-RTT Handshake" trace. The key schedule depends
+         * only on SHA-256 + the ECDHE secret (not the AEAD), so its secrets are
+         * an authoritative reference even though that trace uses AES-128-GCM. */
+        uint8_t cpriv[32], spub[32], ecdhe[32], hello_hash[32];
+        unhex("49af42ba7f7994852d713ef2784bcbcaa7911de26adc5642cb634540e7ea5005", cpriv);
+        unhex("c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f", spub);
+
+        /* X25519 ties into the schedule: derive the shared secret ourselves */
+        x25519(ecdhe, cpriv, spub);
+        check("ECDHE shared secret", ecdhe, 32,
+              "8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d");
+
+        /* Transcript-Hash(ClientHello..ServerHello) — RFC 8448 published value */
+        unhex("860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8", hello_hash);
+
+        tls_key_schedule ks;
+        tls_key_schedule_derive(&ks, ecdhe, hello_hash);
+        check("early secret", ks.early_secret, 32,
+              "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a");
+        check("handshake secret", ks.handshake_secret, 32,
+              "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac");
+        check("master secret", ks.master_secret, 32,
+              "18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919");
+        check("client hs traffic secret", ks.client_hs_traffic, 32,
+              "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21");
+        check("server hs traffic secret", ks.server_hs_traffic, 32,
+              "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38");
+
+        /* HKDF-Expand-Label "key"/"iv" — RFC 8448 server handshake keys
+         * (16-byte AES-128 key, 12-byte iv: exercises the label encoding) */
+        uint8_t key[16], iv[12];
+        tls_traffic_keys(ks.server_hs_traffic, key, 16, iv, 12);
+        check("server write key (expand-label)", key, 16, "3fce516009c21727d0f2e4e86ee403bc");
+        check("server write iv  (expand-label)", iv, 12, "5d313eb2671276ee13000b30");
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);

@@ -24,8 +24,10 @@ Run the vectors: `make crypto-test`.
 | 5b | **ChaCha20-Poly1305 AEAD** (`crypto/chacha20poly1305.c`) | RFC 8439 §2.8.2 | ✅ |
 | 6 | **TLS 1.3 record layer** (`tls/record.c`) | RFC 8446 §5 round-trip | ✅ |
 | 7 | **X25519** (ECDHE key exchange) (`crypto/x25519.c`) | RFC 7748 | ✅ |
-| 8 | Transcript hash + HKDF-Expand-Label key schedule | RFC 8446 §7 | next |
-| 9 | TLS 1.3 client handshake → HTTPS GET | real `https://` site | later |
+| 8 | **Transcript hash + key schedule** (`tls/transcript.c`, `tls/key_schedule.c`) | RFC 8448 §3 trace | ✅ |
+| 9 | TLS 1.3 client handshake state machine | RFC 8446 §4 | next |
+| 10 | Certificate / signature validation | RFC 8446 §4.4 | later |
+| 11 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -237,3 +239,34 @@ now present and RFC-verified. The remaining work is protocol state, not crypto:
 key schedule (transcript hash + HKDF-Expand-Label), the handshake messages
 (ClientHello → ServerHello → EncryptedExtensions → Certificate → CertificateVerify
 → Finished), and certificate/signature validation.
+
+## Step 8 — transcript hash + key schedule (RFC 8446 §7.1)
+
+The deterministic key algebra that turns the ECDHE secret + handshake transcript
+into traffic secrets and AEAD keys — pure protocol over the verified primitives.
+
+- `tls/transcript.c`: a running SHA-256 over the handshake messages, with a
+  **non-destructive snapshot** (`tls_transcript_hash` copies the context before
+  finalizing) because the handshake needs the hash at several points while still
+  appending later messages.
+- `tls/key_schedule.c`: `tls_hkdf_expand_label` / `tls_derive_secret` (TLS
+  helpers over `hkdf_expand`, exactly as the layering note requires — not crypto
+  primitives), and `tls_key_schedule_derive` building Early → Handshake → Master
+  secrets and the client/server handshake-traffic secrets.
+
+Verified against the **RFC 8448** "Simple 1-RTT Handshake" trace. The schedule
+depends only on SHA-256 and the ECDHE secret (not the AEAD), so that trace is an
+authoritative reference even though it negotiates AES-128-GCM:
+
+```
+key schedule (RFC 8448 §3):  ECDHE secret (derived by our own X25519 from the
+                             trace's client priv + server pub)
+                             -> early / handshake / master secret
+                             -> client & server handshake-traffic secret
+                             -> server write key+iv via HKDF-Expand-Label   -> match
+```
+
+The chain is end-to-end: our X25519 produces the shared secret, which flows
+through the whole schedule to byte-exact agreement with the RFC. What is left is
+sequencing — feeding real ClientHello/ServerHello bytes through this code in a
+handshake state machine — plus certificate/signature validation.
