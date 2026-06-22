@@ -55,5 +55,16 @@ int         tcp_connect(uint32_t dst, uint16_t port);
 int         tcp_state(void);
 const char *tcp_state_name(int state);
 
+/* Phase 2: send one segment of `len` payload bytes (PSH|ACK) on the established
+ * connection. Returns bytes queued (one segment, no retransmission), or -1. */
+int         tcp_send(const void *data, size_t len);
+
+/* Copy up to `cap` received bytes out of the receive buffer (FIFO). Returns the
+ * number copied (0 if none pending). */
+int         tcp_recv(void *buf, size_t cap);
+
+/* Total payload bytes received on this connection so far. */
+int         tcp_rx_total(void);
+
 /* Handle one TCP segment (IPv4 payload) from host-order `src`. */
 void        tcp_input(uint32_t src, const void *segment, size_t len);

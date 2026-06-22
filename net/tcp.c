@@ -24,14 +24,20 @@ struct tcp_hdr {
 #define TCP_PSH  0x08
 #define TCP_ACK  0x10
 
-#define TCP_RCV_WND  8192
+#define TCP_RCV_WND   8192
+#define TCP_RX_CAP    8192          /* receive buffer (one in-order stream) */
+#define TCP_TX_MAX    1400          /* one segment, well under the MTU */
 
-static struct tcp_tcb tcb;          /* the single Phase-1 connection */
+static struct tcp_tcb tcb;          /* the single connection */
+static uint8_t  rx_buf[TCP_RX_CAP];
+static unsigned rx_len;             /* bytes accumulated */
+static unsigned rx_read;            /* bytes handed to tcp_recv */
 
 void tcp_init(void)
 {
     memset(&tcb, 0, sizeof(tcb));
     tcb.state = TCP_CLOSED;
+    rx_len = rx_read = 0;
 }
 
 int tcp_state(void) { return tcb.state; }
@@ -73,10 +79,14 @@ static uint16_t tcp_checksum(uint32_t src, uint32_t dst,
     return (uint16_t)~sum;
 }
 
-/* Send a header-only segment (no payload — all Phase 1 needs). */
-static int tcp_xmit(uint8_t flags, uint32_t seq, uint32_t ack)
+/* Send a segment with `flags`, optionally carrying `len` payload bytes. */
+static int tcp_xmit(uint8_t flags, uint32_t seq, uint32_t ack,
+                    const void *data, unsigned len)
 {
-    uint8_t buf[sizeof(struct tcp_hdr)];
+    static uint8_t buf[sizeof(struct tcp_hdr) + TCP_TX_MAX];
+    if (len > TCP_TX_MAX)
+        len = TCP_TX_MAX;
+
     struct tcp_hdr *h = (struct tcp_hdr *)buf;
     h->src_port = htons(tcb.local_port);
     h->dst_port = htons(tcb.remote_port);
@@ -87,14 +97,42 @@ static int tcp_xmit(uint8_t flags, uint32_t seq, uint32_t ack)
     h->window   = htons(tcb.rcv_wnd);
     h->checksum = 0;
     h->urg_ptr  = 0;
-    h->checksum = htons(tcp_checksum(tcb.local_ip, tcb.remote_ip,
-                                     buf, sizeof(buf)));
-    return ipv4_send(tcb.remote_ip, IPPROTO_TCP, buf, sizeof(buf));
+    if (len)
+        memcpy(buf + sizeof(struct tcp_hdr), data, len);
+
+    unsigned total = sizeof(struct tcp_hdr) + len;
+    h->checksum = htons(tcp_checksum(tcb.local_ip, tcb.remote_ip, buf, total));
+    return ipv4_send(tcb.remote_ip, IPPROTO_TCP, buf, total);
 }
+
+int tcp_send(const void *data, size_t len)
+{
+    if (tcb.state != TCP_ESTABLISHED || !data)
+        return -1;
+    if (len > TCP_TX_MAX)
+        len = TCP_TX_MAX;                        /* one segment only, no splitting */
+    if (tcp_xmit(TCP_PSH | TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, data, (unsigned)len) != 0)
+        return -1;
+    tcb.snd_nxt += (uint32_t)len;               /* data consumes sequence space */
+    return (int)len;
+}
+
+int tcp_recv(void *buf, size_t cap)
+{
+    unsigned avail = rx_len - rx_read;
+    unsigned n = avail < cap ? avail : (unsigned)cap;
+    if (n)
+        memcpy(buf, rx_buf + rx_read, n);
+    rx_read += n;
+    return (int)n;
+}
+
+int tcp_rx_total(void) { return (int)rx_len; }
 
 int tcp_connect(uint32_t dst, uint16_t port)
 {
     memset(&tcb, 0, sizeof(tcb));
+    rx_len = rx_read = 0;
     tcb.local_ip    = IP_LOCAL;
     tcb.remote_ip   = dst;
     tcb.remote_port = port;
@@ -111,7 +149,7 @@ int tcp_connect(uint32_t dst, uint16_t port)
     int sent = -1;
     uint64_t dl = net_now_ms() + 1500;
     while (net_now_ms() < dl) {
-        sent = tcp_xmit(TCP_SYN, tcb.iss, 0);
+        sent = tcp_xmit(TCP_SYN, tcb.iss, 0, NULL, 0);
         if (sent == 0)
             break;
         net_poll();
@@ -155,10 +193,34 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
             tcb.snd_una = ack;
             tcb.snd_wnd = ntohs(h->window);
             tcb.state   = TCP_ESTABLISHED;
-            tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt);   /* complete the handshake */
+            tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);  /* finish handshake */
         }
         return;
     }
 
-    /* ESTABLISHED and beyond: data transfer / teardown are Phase 2/3. */
+    if (tcb.state == TCP_ESTABLISHED) {
+        /* Track acknowledgements of our sent data (wrap-safe compare). */
+        if ((flags & TCP_ACK) && (int32_t)(ack - tcb.snd_una) > 0)
+            tcb.snd_una = ack;
+
+        unsigned hlen = (unsigned)((h->data_off >> 4) & 0x0f) * 4;
+        if (hlen < sizeof(struct tcp_hdr) || hlen > len)
+            hlen = sizeof(struct tcp_hdr);
+        const uint8_t *payload = (const uint8_t *)segment + hlen;
+        unsigned plen = (unsigned)len - hlen;
+
+        /* Accept only in-order data (no reassembly in this phase). */
+        if (plen > 0 && seq == tcb.rcv_nxt) {
+            unsigned space = (rx_len < TCP_RX_CAP) ? TCP_RX_CAP - rx_len : 0;
+            unsigned n = plen < space ? plen : space;
+            if (n)
+                memcpy(rx_buf + rx_len, payload, n);
+            rx_len += n;
+            tcb.rcv_nxt += plen;                 /* ack the whole in-order segment */
+            tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);  /* immediate ACK */
+        }
+        /* FIN / connection teardown is Phase 3; the peer's FIN is simply not
+         * acked here, which is harmless for a one-shot fetch. */
+        return;
+    }
 }

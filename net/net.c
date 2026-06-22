@@ -70,6 +70,48 @@ static void udp_test_handler(uint32_t src, uint16_t sport, const void *data, siz
     udp_send(src, UDP_TEST_PORT, sport, data, len);     /* echo back */
 }
 
+/* Phase 8.2: open a connection, send one HTTP GET, and report the first bytes of
+ * the response. Drives the whole stack including TCP data in/out. */
+static void tcp_http_get(uint32_t ip, uint16_t port, const char *host)
+{
+    kprintf("[tcp] connect %u.%u.%u.%u:%d (%s)\n", OCTETS(ip), port, host);
+    tcp_connect(ip, port);
+    uint64_t cdl = net_now_ms() + 4000;
+    while (net_now_ms() < cdl &&
+           tcp_state() != TCP_ESTABLISHED && tcp_state() != TCP_CLOSED)
+        net_poll();
+    if (tcp_state() != TCP_ESTABLISHED) {
+        kprintf("[tcp] %s: connect failed (state=%s)\n", host, tcp_state_name(tcp_state()));
+        return;
+    }
+    kprintf("[tcp] %s: ESTABLISHED\n", host);
+
+    /* Build "GET / HTTP/1.0\r\nHost: <host>\r\nConnection: close\r\n\r\n". */
+    char req[160];
+    int n = 0;
+    const char *a = "GET / HTTP/1.0\r\nHost: ";
+    for (int i = 0; a[i]; i++) req[n++] = a[i];
+    for (int i = 0; host[i]; i++) req[n++] = host[i];
+    const char *b = "\r\nConnection: close\r\n\r\n";
+    for (int i = 0; b[i]; i++) req[n++] = b[i];
+    tcp_send(req, n);
+
+    uint64_t rdl = net_now_ms() + 4000;          /* let the response arrive */
+    while (net_now_ms() < rdl)
+        net_poll();
+
+    char resp[128];
+    int got = tcp_recv(resp, sizeof(resp) - 1);
+    if (got > 0) {
+        int i = 0;
+        while (i < got && resp[i] != '\r' && resp[i] != '\n') i++;
+        resp[i] = '\0';
+        kprintf("[http] %s: %d bytes total, status: \"%s\"\n", host, tcp_rx_total(), resp);
+    } else {
+        kprintf("[http] %s: no data received\n", host);
+    }
+}
+
 /* Phase 6 milestone: ping `dst` `count` times, reporting RTT per reply. Drives
  * the whole stack (Ethernet/ARP/IPv4/ICMP/checksum) in one round-trip each.
  * Returns the number of replies received. */
@@ -201,17 +243,12 @@ void net_selftest(void)
         kprintf("[dns] %s: no answer (query sent; see pcap / network policy)\n", host);
     }
 
-    /* Phase 8.1: TCP three-way handshake (client connect only). Needs a TCP
-     * service reachable at 10.0.2.2:TCP_TEST_PORT (the tcptest.py harness, or any
-     * host listener); without one, SLIRP RSTs and the state goes to CLOSED. */
-    kprintf("[tcp] connect %u.%u.%u.%u:%d\n", OCTETS(IP_GATEWAY), TCP_TEST_PORT);
-    tcp_connect(IP_GATEWAY, TCP_TEST_PORT);
-    uint64_t cdl = net_now_ms() + 4000;
-    while (net_now_ms() < cdl &&
-           tcp_state() != TCP_ESTABLISHED && tcp_state() != TCP_CLOSED)
-        net_poll();
-    kprintf("[tcp] state=%s -- %s\n", tcp_state_name(tcp_state()),
-            tcp_state() == TCP_ESTABLISHED ? "HANDSHAKE OK" : "no connection");
+    /* Phase 8.2: TCP data. Fetch over HTTP from the local host server (the
+     * tcphttp.py harness on 10.0.2.2:80), then -- if DNS resolved and the network
+     * policy allows outbound TCP -- from the real site over the internet. */
+    tcp_http_get(IP_GATEWAY, TCP_TEST_PORT, "10.0.2.2");
+    if (hip)
+        tcp_http_get(hip, 80, host);
 
     net_get_stats(&s1);
     kprintf("[net] ipv4 rx_ok=%u rx_drop=%u; stats rx=%u/%u tx=%u/%u drop=%u/%u err=%u/%u irq=%u\n",

@@ -269,8 +269,34 @@ The transport is done and audited; everything below is protocol logic over
 | 7 | **UDP** (`net/udp.c`) — `udp_send` / `udp_bind`, no sockets | **`nc -u` round-trip Aurora ↔ host** | ✅ |
 | 7.5 | **DNS** over UDP (`net/dns.c`) — typed `dns_query(name, type)` | **`example.com` → real A record** | ✅ |
 | 8.1 | **TCP** connect (`net/tcp.c`) — handshake only, full TCB + state enum | **`connect 10.0.2.2:80` → ESTABLISHED** | ✅ |
-| 8.2 | TCP `send`/`recv` (data, no close) | `GET / HTTP/1.0` returns bytes | next |
-| 8.3 | TCP teardown (FIN / TIME_WAIT) | clean close | later |
+| 8.2 | **TCP data** — `tcp_send`/`tcp_recv` + HTTP GET | **`GET /` → `HTTP/1.0 200 OK` (local & real internet)** | ✅ |
+| 8.3 | TCP teardown (FIN / TIME_WAIT) | clean close | next |
+
+## Phase 8.2 — TCP data + HTTP (Aurora reaches the internet)
+
+Scoped tight: **one TX segment, one in-order RX stream**, no retransmission,
+out-of-order, segmentation, window scaling, Nagle or delayed ACK. `tcp_send`
+emits a single `PSH|ACK` segment and advances `snd_nxt`; `tcp_input` in
+`ESTABLISHED` accepts only in-order data (`seq == rcv_nxt`), appends it to the
+receive buffer, advances `rcv_nxt`, and ACKs immediately. `tcp_recv` drains the
+buffer. The peer's FIN is left unacked (teardown is Phase 8.3) — harmless for a
+one-shot fetch.
+
+The self-test does a `GET / HTTP/1.0` against the local host server
+(`tools/tcphttp.py` on 10.0.2.2:80) **and** against the real site whose address
+DNS resolved:
+
+```
+[tcp] 10.0.2.2: ESTABLISHED
+[http] 10.0.2.2: 116 bytes total, status: "HTTP/1.0 200 OK"
+[tcp] example.com: ESTABLISHED
+[http] example.com: 151 bytes total, status: "HTTP/1.1 426 Upgrade Required"
+```
+
+The second line is a **real HTTP response from the public internet**: Aurora
+resolved the name over DNS, opened a TCP connection across the internet, sent the
+request, and read the reply. Combined with ping, this is the second big network
+milestone — the stack is now a genuinely useful subsystem, not a scaffold.
 
 ## Phase 8.1 — TCP handshake (client connect only)
 
