@@ -17,42 +17,33 @@ static void wr32(uint8_t *p, uint32_t v)
     p[2] = (uint8_t)(v >> 16);  p[3] = (uint8_t)(v >> 24);
 }
 
-void poly1305_auth(uint8_t tag[POLY1305_TAG_LEN],
-                   const uint8_t *msg, size_t len,
-                   const uint8_t key[POLY1305_KEY_LEN])
+void poly1305_init(poly1305_ctx *st, const uint8_t key[POLY1305_KEY_LEN])
 {
     /* r = key[0..15], clamped per RFC (mask off the high bits of each word). */
-    uint32_t r0 = (rd32(key +  0)     ) & 0x3ffffff;
-    uint32_t r1 = (rd32(key +  3) >> 2) & 0x3ffff03;
-    uint32_t r2 = (rd32(key +  6) >> 4) & 0x3ffc0ff;
-    uint32_t r3 = (rd32(key +  9) >> 6) & 0x3f03fff;
-    uint32_t r4 = (rd32(key + 12) >> 8) & 0x00fffff;
+    st->r[0] = (rd32(key +  0)     ) & 0x3ffffff;
+    st->r[1] = (rd32(key +  3) >> 2) & 0x3ffff03;
+    st->r[2] = (rd32(key +  6) >> 4) & 0x3ffc0ff;
+    st->r[3] = (rd32(key +  9) >> 6) & 0x3f03fff;
+    st->r[4] = (rd32(key + 12) >> 8) & 0x00fffff;
 
-    /* precomputed r1..r4 * 5 for the reduction step */
+    st->h[0] = st->h[1] = st->h[2] = st->h[3] = st->h[4] = 0;
+
+    st->pad[0] = rd32(key + 16);  st->pad[1] = rd32(key + 20);
+    st->pad[2] = rd32(key + 24);  st->pad[3] = rd32(key + 28);   /* s */
+
+    st->leftover = 0;
+}
+
+/* Process whole 16-byte blocks from m. `final` is set only for the last
+ * (already-padded) block, where the implicit 2^128 high bit must NOT be added. */
+static void poly1305_blocks(poly1305_ctx *st, const uint8_t *m, size_t bytes, int final)
+{
+    const uint32_t hibit = final ? 0 : (1u << 24);
+    uint32_t r0 = st->r[0], r1 = st->r[1], r2 = st->r[2], r3 = st->r[3], r4 = st->r[4];
     uint32_t s1 = r1 * 5, s2 = r2 * 5, s3 = r3 * 5, s4 = r4 * 5;
+    uint32_t h0 = st->h[0], h1 = st->h[1], h2 = st->h[2], h3 = st->h[3], h4 = st->h[4];
 
-    uint32_t h0 = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0;   /* accumulator */
-
-    uint32_t pad0 = rd32(key + 16), pad1 = rd32(key + 20);
-    uint32_t pad2 = rd32(key + 24), pad3 = rd32(key + 28);    /* s = key[16..31] */
-
-    uint8_t block[16];
-    while (len > 0) {
-        size_t n = len < 16 ? len : 16;
-        const uint8_t *m;
-        uint32_t hibit;
-
-        if (n == 16) {                  /* full block: append the 2^128 bit */
-            m = msg;
-            hibit = (1u << 24);
-        } else {                        /* final partial block: copy, set the */
-            for (size_t i = 0; i < n; i++)  block[i] = msg[i];   /* 1 byte after */
-            block[n] = 1;                                        /* the message, */
-            for (size_t i = n + 1; i < 16; i++) block[i] = 0;    /* zero-pad     */
-            m = block;
-            hibit = 0;                  /* the high bit is already in the buffer */
-        }
-
+    while (bytes >= 16) {
         /* h += m */
         h0 += (rd32(m +  0)     ) & 0x3ffffff;
         h1 += (rd32(m +  3) >> 2) & 0x3ffffff;
@@ -77,9 +68,52 @@ void poly1305_auth(uint8_t tag[POLY1305_TAG_LEN],
         h0 += c * 5; c = (h0 >> 26); h0 = h0 & 0x3ffffff;
         h1 += c;
 
-        msg += n;
-        len -= n;
+        m += 16;
+        bytes -= 16;
     }
+
+    st->h[0] = h0; st->h[1] = h1; st->h[2] = h2; st->h[3] = h3; st->h[4] = h4;
+}
+
+void poly1305_update(poly1305_ctx *st, const uint8_t *m, size_t len)
+{
+    /* top off a partial block held from a previous update */
+    if (st->leftover) {
+        size_t want = 16 - st->leftover;
+        if (want > len) want = len;
+        for (size_t i = 0; i < want; i++) st->buffer[st->leftover + i] = m[i];
+        st->leftover += want;
+        m += want;
+        len -= want;
+        if (st->leftover < 16) return;
+        poly1305_blocks(st, st->buffer, 16, 0);
+        st->leftover = 0;
+    }
+
+    /* whole blocks straight from the input */
+    if (len >= 16) {
+        size_t want = len & ~(size_t)15;
+        poly1305_blocks(st, m, want, 0);
+        m += want;
+        len -= want;
+    }
+
+    /* stash the remainder */
+    for (size_t i = 0; i < len; i++) st->buffer[st->leftover + i] = m[i];
+    st->leftover += len;
+}
+
+void poly1305_final(poly1305_ctx *st, uint8_t tag[POLY1305_TAG_LEN])
+{
+    /* pad and process the final partial block, if any */
+    if (st->leftover) {
+        size_t i = st->leftover;
+        st->buffer[i++] = 1;
+        for (; i < 16; i++) st->buffer[i] = 0;
+        poly1305_blocks(st, st->buffer, 16, 1);
+    }
+
+    uint32_t h0 = st->h[0], h1 = st->h[1], h2 = st->h[2], h3 = st->h[3], h4 = st->h[4];
 
     /* fully carry h */
     uint32_t c;
@@ -116,13 +150,23 @@ void poly1305_auth(uint8_t tag[POLY1305_TAG_LEN],
 
     /* tag = (h + s) mod 2^128 */
     uint64_t f;
-    f = (uint64_t)h0 + pad0            ; h0 = (uint32_t)f;
-    f = (uint64_t)h1 + pad1 + (f >> 32); h1 = (uint32_t)f;
-    f = (uint64_t)h2 + pad2 + (f >> 32); h2 = (uint32_t)f;
-    f = (uint64_t)h3 + pad3 + (f >> 32); h3 = (uint32_t)f;
+    f = (uint64_t)h0 + st->pad[0]            ; h0 = (uint32_t)f;
+    f = (uint64_t)h1 + st->pad[1] + (f >> 32); h1 = (uint32_t)f;
+    f = (uint64_t)h2 + st->pad[2] + (f >> 32); h2 = (uint32_t)f;
+    f = (uint64_t)h3 + st->pad[3] + (f >> 32); h3 = (uint32_t)f;
 
     wr32(tag +  0, h0);
     wr32(tag +  4, h1);
     wr32(tag +  8, h2);
     wr32(tag + 12, h3);
+}
+
+void poly1305_auth(uint8_t tag[POLY1305_TAG_LEN],
+                   const uint8_t *msg, size_t len,
+                   const uint8_t key[POLY1305_KEY_LEN])
+{
+    poly1305_ctx st;
+    poly1305_init(&st, key);
+    poly1305_update(&st, msg, len);
+    poly1305_final(&st, tag);
 }

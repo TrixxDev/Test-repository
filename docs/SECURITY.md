@@ -21,9 +21,16 @@ Run the vectors: `make crypto-test`.
 | 3 | **HKDF** (Extract/Expand) (`crypto/hkdf.c`) | RFC 5869 | ✅ |
 | 4 | **ChaCha20** (`crypto/chacha20.c`) | RFC 8439 | ✅ |
 | 5 | **Poly1305** (`crypto/poly1305.c`) | RFC 8439 + OpenSSL | ✅ |
-| 5b | ChaCha20-Poly1305 AEAD | RFC 8439 | next |
-| 6 | TLS record layer (encrypt/decrypt, no handshake) | local round-trip | later |
-| 7 | TLS 1.3 client handshake → HTTPS GET | real `https://` site | later |
+| 5b | **ChaCha20-Poly1305 AEAD** (`crypto/chacha20poly1305.c`) | RFC 8439 §2.8.2 | ✅ |
+| 6 | TLS record layer (encrypt/decrypt, no handshake) | local round-trip | next |
+| 7 | X25519 (ECDHE key exchange) | RFC 7748 | later |
+| 8 | TLS 1.3 client handshake → HTTPS GET | real `https://` site | later |
+
+With AEAD done, the **symmetric** half of TLS 1.3 is essentially complete: hash,
+MAC, key schedule (HKDF), stream cipher and authenticated encryption are all
+RFC-verified. What remains is protocol logic (record framing, key schedule glue,
+handshake state machine) plus the asymmetric pieces (X25519, then certificate /
+signature verification) — a separate `tls/` layer over these primitives.
 
 Deliberately **out of scope for now**: X.509 / ASN.1 parsing, RSA, ECDSA,
 certificate-chain validation. Those are a separate layer; the symmetric
@@ -114,3 +121,48 @@ Poly1305 (RFC 8439):  RFC 2.5.2 (34-byte)
 
 > **One-time key:** Poly1305 is only secure if each key authenticates exactly one
 > message. The AEAD step derives a fresh Poly1305 key per record from ChaCha20.
+
+## Step 5b — ChaCha20-Poly1305 AEAD (RFC 8439 §2.8)
+
+The combined construction TLS 1.3 actually uses (`TLS_CHACHA20_POLY1305_SHA256`):
+
+- `seal(key, nonce, aad, pt) -> ct, tag` — derive a one-time Poly1305 key from
+  the ChaCha20 keystream at counter 0 (§2.6), encrypt with counter 1, then MAC
+  `aad | pad16 | ct | pad16 | le64(aadlen) | le64(ctlen)`.
+- `open(...)` — recompute the tag, compare it in **constant time**, and only then
+  decrypt. A bad tag returns `-1` and yields no plaintext.
+
+To MAC several non-contiguous spans without a big buffer (TLS records reach
+~16 KB), Poly1305 grew a streaming `init`/`update`/`final` context; the one-shot
+`poly1305_auth` is now a thin wrapper, so its KATs are unchanged.
+
+Beyond matching the §2.8.2 vector, the harness checks the security property the
+whole TLS record layer rests on — that authentication actually rejects tampering:
+
+```
+ChaCha20-Poly1305 AEAD:  seal ct / tag (§2.8.2)   -> match
+                         open(valid) -> 0, recovers plaintext
+                         flip 1 byte of ciphertext / AAD / tag -> open == -1
+```
+
+## Project maturity snapshot (at this milestone)
+
+A rough self-assessment after the AEAD step — the symmetric crypto is no longer
+the weak point; TLS/HTTPS now is:
+
+| Subsystem | Maturity |
+|-----------|----------|
+| Kernel (VM, IPC, SHM, timers) | █████████░ |
+| Window manager / compositor | █████████░ |
+| Desktop UX (Dock/Finder/Viewer/Settings) | ████████░░ |
+| Filesystem | ███████▌░░ |
+| Networking (L2–L4, DNS, sockets) | ████████▌░ |
+| TCP (retransmit; no RTT est. yet) | ███████▌░░ |
+| Crypto — symmetric primitives | █████████░ |
+| TLS / HTTPS | ░░░░░░░░░░ |
+| GPU acceleration | █░░░░░░░░░ |
+| x86_64 port | ░░░░░░░░░░ |
+
+The first real internet request from Aurora Fetch hit `426 Upgrade Required` —
+the web itself telling Aurora to learn HTTPS. That makes the TLS record layer the
+single highest-value next step, which is exactly what step 6 begins.

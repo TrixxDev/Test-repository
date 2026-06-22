@@ -10,6 +10,7 @@
 #include "hkdf.h"
 #include "chacha20.h"
 #include "poly1305.h"
+#include "chacha20poly1305.h"
 
 static int failures;
 
@@ -38,6 +39,16 @@ static void check_u32(const char *name, uint32_t got, uint32_t want)
         printf("  PASS  %s\n", name);
     } else {
         printf("  FAIL  %s\n        got  %08x\n        want %08x\n", name, got, want);
+        failures++;
+    }
+}
+
+static void check_int(const char *name, int got, int want)
+{
+    if (got == want) {
+        printf("  PASS  %s\n", name);
+    } else {
+        printf("  FAIL  %s\n        got  %d\n        want %d\n", name, got, want);
         failures++;
     }
 }
@@ -224,6 +235,50 @@ int main(void)
         check("len 16 (1 block)", t, 16, "d416d3589c8af931f434a38d19816811");
         poly1305_auth(t, msg, 17, key);
         check("len 17 (block+1)", t, 16, "540308e44971bfd8d85f717ad9bdfaac");
+    }
+
+    printf("ChaCha20-Poly1305 AEAD (RFC 8439 §2.8.2):\n");
+    {
+        uint8_t key[32], nonce[12], aad[12];
+        unhex("808182838485868788898a8b8c8d8e8f"
+              "909192939495969798999a9b9c9d9e9f", key);
+        unhex("070000004041424344454647", nonce);
+        int aadlen = unhex("50515253c0c1c2c3c4c5c6c7", aad);
+        const char *pt = "Ladies and Gentlemen of the class of '99: If I "
+                         "could offer you only one tip for the future, "
+                         "sunscreen would be it.";
+        size_t ptlen = strlen(pt);
+        const char *want_ct =
+            "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6"
+            "3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36"
+            "92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc"
+            "3ff4def08e4b7a9de576d26586cec64b6116";
+        const char *want_tag = "1ae10b594f09e26a7e902ecbd0600691";
+
+        uint8_t ct[114], tag[16];
+        chacha20poly1305_seal(ct, tag, key, nonce, aad, aadlen,
+                              (const uint8_t *)pt, ptlen);
+        check("seal ciphertext", ct, (int)ptlen, want_ct);
+        check("seal tag",        tag, 16, want_tag);
+
+        /* round-trip: open of an untampered record returns 0 and recovers pt */
+        uint8_t out[114];
+        char pthex[256];
+        tohex((const uint8_t *)pt, (int)ptlen, pthex);
+        check_int("open (valid) returns 0",
+                  chacha20poly1305_open(out, key, nonce, aad, aadlen, ct, ptlen, tag), 0);
+        check("open recovered plaintext", out, (int)ptlen, pthex);
+
+        /* the property TLS depends on: any single-byte tamper must FAIL open */
+        {   uint8_t bad[114]; for (size_t i=0;i<ptlen;i++) bad[i]=ct[i]; bad[0] ^= 1;
+            check_int("flip ciphertext -> FAIL",
+                      chacha20poly1305_open(out, key, nonce, aad, aadlen, bad, ptlen, tag), -1); }
+        {   uint8_t badaad[12]; for (int i=0;i<aadlen;i++) badaad[i]=aad[i]; badaad[0] ^= 1;
+            check_int("flip AAD -> FAIL",
+                      chacha20poly1305_open(out, key, nonce, badaad, aadlen, ct, ptlen, tag), -1); }
+        {   uint8_t badtag[16]; for (int i=0;i<16;i++) badtag[i]=tag[i]; badtag[15] ^= 0x80;
+            check_int("flip tag -> FAIL",
+                      chacha20poly1305_open(out, key, nonce, aad, aadlen, ct, ptlen, badtag), -1); }
     }
 
     printf(failures ? "\nCRYPTO TEST: %d FAILURE(S)\n" : "\nCRYPTO TEST: ALL PASS\n", failures);
