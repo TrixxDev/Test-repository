@@ -29,7 +29,10 @@ Run the vectors: `make crypto-test`.
 | 10 | **Client handshake FSM core** (`tls/client.c`) — event-driven, no network | RFC 8446 §4 / §A.1 | ✅ |
 | 11 | **Record binding** (`tls/conn.c`) — phase gating, key switch, reassembly | RFC 8446 §5 | ✅ |
 | 11b | **RFC 8448 trace runner** (`tools/tls_trace_test.c`) — engine vs real bytes | RFC 8448 §3 | ✅ |
-| 12 | Certificate / signature validation | RFC 8446 §4.4 | next |
+| 12.1 | **ASN.1 DER reader** (`x509/asn1.c`) — bounds-checked TLV cursor | X.690 / RFC 8448 cert | ✅ |
+| 12.2 | X.509 certificate parser (`x509/x509.c`) | RFC 5280 / RFC 8448 cert | next |
+| 12.3 | RSA signature verification (PKCS#1 v1.5) | RFC 8448 CertificateVerify | later |
+| 12.4 | Trust store (ISRG Root X1) + hostname (SAN) | RFC 6125 | later |
 | 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -43,9 +46,11 @@ RFC-verified. What remains is protocol logic (record framing, key schedule glue,
 handshake state machine) plus the asymmetric pieces (X25519, then certificate /
 signature verification) — a separate `tls/` layer over these primitives.
 
-Deliberately **out of scope for now**: X.509 / ASN.1 parsing, RSA, ECDSA,
-certificate-chain validation. Those are a separate layer; the symmetric
-primitives + key schedule + record layer come first.
+The PKI layer is now under way in `x509/` (ASN.1 DER reader done; X.509 parse,
+RSA verification and a minimal trust store to follow). Deliberately still **out of
+scope**: ECDSA (added after RSA, since the RFC 8448 reference cert is RSA), full
+certificate-chain path building, OCSP/CRL revocation, AIA fetching, name
+constraints, and wildcard corner cases — a later hardening pass.
 
 ### Planned layering
 
@@ -423,3 +428,44 @@ This is the proof the handshake math is RFC-correct independent of the AEAD and 
 certificates: both peers' Finished values and the application secrets reproduce
 the RFC to the byte. It freezes a regression baseline so the upcoming PKI layer
 can be debugged on its own, never confused with a handshake-engine bug.
+
+## Step 12.1 — ASN.1 DER reader (X.690)
+
+The bottom of the X.509 stack, and the start of a new `x509/` layer (PKI is
+neither a pure crypto primitive nor TLS protocol, so it gets its own tree; like
+`crypto/` and `tls/` it stays out of the kernel build). `x509/asn1.c` is a
+deliberately boring, strict DER reader: a cursor walks a caller-owned buffer one
+TLV at a time, with no allocation and no global state.
+
+The one invariant that matters: **the cursor can never read past its buffer.**
+`asn1_next` validates before it advances and only commits the cursor on success,
+so every downstream parser is automatically bounds-safe. DER (not BER) is
+enforced — indefinite length, non-minimal length, an oversized length-of-length,
+and the high-tag-number form are all rejected, leaving no encoding ambiguity for
+a forged signature to exploit. Helpers: `asn1_expect` (tag-checked read, restores
+the cursor on mismatch), `asn1_open` (descend into a constructed element),
+`asn1_peek_tag` (for OPTIONAL fields), `asn1_oid_equals`, and `asn1_get_uint`
+(minimality-checked, rejects negative / oversized).
+
+`make x509-test` covers every accept/reject path on synthetic TLVs, then walks
+the **real RFC 8448 server certificate** — the exact DER our TLS client will have
+to parse:
+
+```
+ASN.1 basics:    INTEGER / OCTET STRING / long-form length / nested SEQUENCE,
+                 peek without consume
+ASN.1 rejects:   empty / truncated length / length > buffer / indefinite /
+                 non-minimal long form / leading-zero length / high-tag form /
+                 oversized length-of-length / negative & non-minimal INTEGER
+RFC 8448 cert:   Certificate = SEQUENCE{ tbsCertificate, sigAlg, signatureValue },
+                 nothing trails it; descend tbs -> [0] version == 2 (v3),
+                 serial == 2, sigAlg OID == sha256WithRSAEncryption,
+                 validity = two UTCTime, notBefore == 160730012359Z
+```
+
+The RFC 8448 certificate is RSA with `sha256WithRSAEncryption`, which is exactly
+why the PKI work goes ASN.1 -> X.509 -> RSA before ECDSA: the same published trace
+becomes an end-to-end vector all the way to verifying CertificateVerify. Next
+(12.2) is the X.509 parser proper — turning these bytes into a `struct x509_cert`
+(subject, issuer, validity, SAN, SubjectPublicKeyInfo, signature) with no trust
+decisions yet.

@@ -188,6 +188,12 @@ tls-trace-test:
 	$(CC) -O2 -Icrypto -Itls tools/tls_trace_test.c tls/transcript.c tls/key_schedule.c tls/handshake.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/x25519.c -o /tmp/aurora_tls_trace_test
 	/tmp/aurora_tls_trace_test
 
+# Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
+.PHONY: x509-test
+x509-test:
+	$(CC) -O2 -Ix509 tools/x509_test.c x509/asn1.c -o /tmp/aurora_x509_test
+	/tmp/aurora_x509_test
+
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
 SCREENSHOT := aurora_desktop.png
