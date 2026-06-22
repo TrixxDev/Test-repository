@@ -223,6 +223,12 @@ int tcp_rx_total(int h)
     return c ? (int)c->rx_len : 0;
 }
 
+int tcp_tx_idle(int h)
+{
+    struct conn *c = conn_of(h);
+    return !c || !c->rtx.pending;
+}
+
 int tcp_close(int h)
 {
     struct conn *c = conn_of(h);

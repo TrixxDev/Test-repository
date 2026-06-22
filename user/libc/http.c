@@ -1,6 +1,39 @@
-/* HTTP/1.x response parser — see user/http.h. */
+/* HTTP/1.x response parser + a tiny GET client over the INET socket API.
+ * See user/http.h. */
 #include "http.h"
 #include "libc.h"
+
+int http_get(const char *host, void *buf, int cap)
+{
+    int s = inet_socket();
+    if (s < 0)
+        return -1;
+    int r = inet_connect(s, host, 80);
+    if (r != 0) {                               /* -2 DNS, -3 connect */
+        close(s);
+        return r;
+    }
+
+    /* "GET / HTTP/1.0\r\nHost: <host>\r\nConnection: close\r\n\r\n" */
+    char req[200]; int n = 0;
+    const char *a = "GET / HTTP/1.0\r\nHost: ";
+    for (int i = 0; a[i]; i++) req[n++] = a[i];
+    for (int i = 0; host[i] && n < 170; i++) req[n++] = host[i];
+    const char *b = "\r\nConnection: close\r\n\r\n";
+    for (int i = 0; b[i]; i++) req[n++] = b[i];
+    if (write(s, req, n) < 0) { close(s); return -3; }
+
+    char *out = (char *)buf;
+    int total = 0;
+    while (total < cap) {
+        int g = read(s, out + total, cap - total);   /* blocks; 0 = EOF (peer closed) */
+        if (g <= 0)
+            break;
+        total += g;
+    }
+    close(s);
+    return total;
+}
 
 /* Case-insensitive test: does `s` begin with `prefix`? */
 static int ci_starts(const char *s, int slen, const char *prefix)

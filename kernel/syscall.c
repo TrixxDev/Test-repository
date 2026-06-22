@@ -200,6 +200,11 @@ void syscall_handler(registers_t *regs)
                                           (void *)regs->ecx, (int)regs->edx);
         break;
 
+    case SYS_INET_CONNECT:
+        regs->eax = (uint32_t)sys_inet_connect((int)regs->ebx,
+                                               (const char *)regs->ecx, (int)regs->edx);
+        break;
+
     case SYS_SHMDEL:
         regs->eax = (uint32_t)shm_destroy((int)regs->ebx);
         break;

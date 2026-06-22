@@ -71,6 +71,10 @@ int         tcp_recv(int h, void *buf, size_t cap);
 /* Total payload bytes received on connection `h` so far. */
 int         tcp_rx_total(int h);
 
+/* 1 if connection `h` has no unacknowledged segment outstanding (safe to send the
+ * next one under the single-segment retransmit cache). */
+int         tcp_tx_idle(int h);
+
 /* Begin an orderly close of connection `h`. From ESTABLISHED this sends FIN and
  * enters FIN_WAIT_1 (active close); from CLOSE_WAIT it sends FIN and enters
  * LAST_ACK (finishing a passive close). Returns 0 if a FIN was sent, -1. */

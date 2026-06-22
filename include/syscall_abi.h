@@ -59,6 +59,7 @@
 #define SYS_NETSTAT 41  /* netstat(struct net_stats *out) -> 0/-1               */
 #define SYS_TCPSTAT 42  /* tcpstat(struct tcp_stats *out) -> 0/-1               */
 #define SYS_HTTPGET 43  /* http_get(host, buf, cap) -> bytes / <0 (DNS->TCP->GET) */
+#define SYS_INET_CONNECT 44 /* inet_connect(fd, host, port) -> 0/-2 DNS/-3 (AF_INET) */
 
 /* shm_create() flags (arg2). */
 #define SHM_PUBLIC  1   /* any process may shm_map the object (e.g. clipboard) */
@@ -120,10 +121,11 @@ struct dirent {
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
 
-#define SYS_MAX    44   /* one past the last valid syscall number    */
+#define SYS_MAX    45   /* one past the last valid syscall number    */
 
-/* ---- socket layer (AF_LOOPBACK only for now) ---- */
+/* ---- socket layer ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */
+#define AF_INET      2  /* IPv4 stream sockets over the TCP stack    */
 #define SOCK_STREAM  1  /* reliable, ordered byte stream             */
 
 /* A kernel socket is named across processes by a packed (pid, fd) handle so the

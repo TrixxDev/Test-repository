@@ -275,8 +275,36 @@ The transport is done and audited; everything below is protocol logic over
 | 8.6 | **Multiple TCBs** — connection table + handle-based API | several connections at once | ✅ |
 | 8.7 | **TCP retransmission** — RTO timer + 1-segment cache | **dropped GET recovers** | ✅ |
 | 8.9 | **Aurora Fetch 2.0** — HTTP response parser + result UI | **status/headers/size/time shown; body in Viewer** | ✅ |
-| 8.10 | HTTP redirects (301/302/307/308, `Location:`) | follow up to 5 hops | next |
-| 8.8 | Socket API (`socket/connect/send/recv/close`) | user sockets, netd boundary | later |
+| 8.8 | **Socket API** (`AF_INET` fds; `send`/`recv` = `write`/`read`) | **HTTP client runs in user space over sockets** | ✅ |
+| 9.1 | TLS groundwork (SHA-256 / HMAC / AES / ChaCha20-Poly1305) | crypto primitives (test vectors) | next |
+| 9.2 | TLS 1.2/1.3 client → HTTPS | open `https://` sites | later |
+
+## Phase 8.8 — Socket API (the boundary TLS will sit on)
+
+TCP gets a real BSD-style front door so applications (and, next, a TLS library)
+talk to **sockets**, not TCP internals. An `AF_INET`/`SOCK_STREAM` socket is a
+VFS-node-backed file descriptor exactly like the loopback sockets, but its node
+ops drive the TCP stack — so `send`/`recv` are just `write`/`read`:
+
+```c
+int s = inet_socket();                 /* socket(AF_INET, SOCK_STREAM) */
+inet_connect(s, "example.com", 80);    /* DNS + TCP connect            */
+write(s, request, len);                /* = send                       */
+int n = read(s, buf, cap);             /* = recv; 0 = peer closed (EOF) */
+close(s);                              /* FIN / teardown               */
+```
+
+The socket node's `read` blocks (interrupts on, so the GUI keeps rendering) until
+data arrives or the peer closes; `write` sends in MSS segments stop-and-wait
+under the single-segment retransmit cache. `sys_socket` routes `AF_INET` to the
+new `tcpsock` node; `close`/`poll` dispatch by node type.
+
+**HTTP moved out of the kernel.** `http_get()` is now a user-space function
+(`user/libc/http.c`) built on the socket API — the kernel no longer needs to know
+about HTTP. Aurora Fetch is unchanged externally and still fetches `example.com`
+into the Viewer, now entirely through `socket → connect → write → read → close`.
+This is the clean seam TLS will plug into: a TLS session over a socket, not over
+TCP guts.
 
 ## Phase 8.9 — Aurora Fetch 2.0 (a real response object)
 

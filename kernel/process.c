@@ -15,6 +15,7 @@
 #include "virtio_net.h"
 #include "tcp.h"
 #include "netstack.h"
+#include "tcpsock.h"
 
 #define MAX_PROCS    32
 #define USTACK_TOP   0xC0000000u
@@ -62,8 +63,12 @@ static void file_unref(file_t *f)
             pipe_close_end(f->node, 0);
         else if (f->role == FD_PIPE_W)
             pipe_close_end(f->node, 1);
-        else if (f->role == FD_SOCKET)
-            sock_close(f->node);
+        else if (f->role == FD_SOCKET) {
+            if (tcpsock_is(f->node))
+                tcpsock_close(f->node);
+            else
+                sock_close(f->node);
+        }
         kfree(f);
     }
 }
@@ -647,15 +652,33 @@ int sys_kill(int pid)
 
 int sys_socket(int domain, int type)
 {
-    vfs_node_t *node = sock_create(domain, type);
+    vfs_node_t *node = (domain == AF_INET) ? tcpsock_create()
+                                           : sock_create(domain, type);
     if (!node)
         return -1;
     int fd = fd_install_role(process_current(), node, FD_SOCKET);
     if (fd < 0) {
-        sock_close(node);
+        if (tcpsock_is(node)) tcpsock_close(node);
+        else                  sock_close(node);
         return -1;
     }
     return fd;
+}
+
+/* Connect an AF_INET socket fd to host:port (DNS + TCP). */
+int sys_inet_connect(int fd, const char *uhost, int port)
+{
+    process_t *p = process_current();
+    if (fd < 0 || fd >= MAX_FDS || !p->fds[fd] || p->fds[fd]->role != FD_SOCKET)
+        return -1;
+    vfs_node_t *node = p->fds[fd]->node;
+    if (!tcpsock_is(node))
+        return -1;
+    char host[128];
+    if (copy_str_from_user(host, uhost, sizeof(host)) < 0)
+        return -1;
+    __asm__ volatile("sti");        /* DNS+connect run with IRQs on (clock+poll) */
+    return tcpsock_connect(node, host, port);
 }
 
 vfs_node_t *proc_socket_node(int pid, int fd)
@@ -687,10 +710,10 @@ int sys_poll(struct pollfd *fds, int nfds, int timeout)
             int re;
             if (fd < 0 || fd >= MAX_FDS || !p->fds[fd])
                 re = POLLERR;
-            else if (p->fds[fd]->role == FD_SOCKET)
+            else if (p->fds[fd]->role == FD_SOCKET && !tcpsock_is(p->fds[fd]->node))
                 re = sock_poll(p->fds[fd]->node, want);
             else
-                re = want & (POLLIN | POLLOUT);     /* non-sockets: assume ready */
+                re = want & (POLLIN | POLLOUT);     /* non/tcp-sockets: assume ready */
             re &= (want | POLLERR);
             if (re) {
                 fds[i].revents = (short)re;
@@ -704,13 +727,15 @@ int sys_poll(struct pollfd *fds, int nfds, int timeout)
         /* Arm a poll waiter on each socket fd, block, then disarm and re-scan. */
         for (int i = 0; i < nfds; i++) {
             int fd = fds[i].fd;
-            if (fd >= 0 && fd < MAX_FDS && p->fds[fd] && p->fds[fd]->role == FD_SOCKET)
+            if (fd >= 0 && fd < MAX_FDS && p->fds[fd] && p->fds[fd]->role == FD_SOCKET
+                && !tcpsock_is(p->fds[fd]->node))
                 sock_poll_arm(p->fds[fd]->node, thread_current());
         }
         thread_block();
         for (int i = 0; i < nfds; i++) {
             int fd = fds[i].fd;
-            if (fd >= 0 && fd < MAX_FDS && p->fds[fd] && p->fds[fd]->role == FD_SOCKET)
+            if (fd >= 0 && fd < MAX_FDS && p->fds[fd] && p->fds[fd]->role == FD_SOCKET
+                && !tcpsock_is(p->fds[fd]->node))
                 sock_poll_disarm(p->fds[fd]->node, thread_current());
         }
         __asm__ volatile("sti");

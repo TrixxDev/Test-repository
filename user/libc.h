@@ -74,9 +74,11 @@ static inline int   sysinfo(struct sysinfo *out)        { return _syscall(SYS_SY
 static inline int   netstat(struct net_stats *out)      { return _syscall(SYS_NETSTAT, (int)out, 0, 0); }
 /* Fill *out with TCP counters (connects/established/resets/fins/drops). 0/-1. */
 static inline int   tcpstat(struct tcp_stats *out)      { return _syscall(SYS_TCPSTAT, (int)out, 0, 0); }
-/* Fetch "/" from host:80 over HTTP/1.0 into buf (DNS->TCP->GET->close). Returns
- * bytes received, or <0 (-1 no NIC, -2 DNS fail, -3 connect fail). Blocks. */
-static inline int   http_get(const char *host, void *buf, int cap) { return _syscall(SYS_HTTPGET, (int)host, (int)buf, cap); }
+/* AF_INET stream sockets over the TCP stack. socket -> connect -> send/recv
+ * (= write/read) -> close. inet_connect resolves the host (DNS) and opens the
+ * connection; returns 0, -2 (DNS), -3 (connect). */
+static inline int   inet_socket(void)                     { return _syscall(SYS_SOCKET, AF_INET, SOCK_STREAM, 0); }
+static inline int   inet_connect(int fd, const char *host, int port) { return _syscall(SYS_INET_CONNECT, fd, (int)host, port); }
 /* Block this thread for ~ms milliseconds (10 ms granularity; the PIT is 100 Hz). */
 static inline int   msleep(int ms)                      { return _syscall(SYS_SLEEP, ms, 0, 0); }
 /* High-resolution monotonic clock: microseconds since boot (low 32 bits, wraps

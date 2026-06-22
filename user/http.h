@@ -18,3 +18,8 @@ struct http_response {
 /* Parse `len` bytes of an HTTP response into *out. Returns 0 on success (it
  * looked like HTTP and `status` is set), -1 otherwise. */
 int http_parse(const char *buf, int len, struct http_response *out);
+
+/* Fetch "/" from host:80 over HTTP/1.0 into buf, using the INET socket API
+ * (socket -> connect -> send -> recv -> close), entirely in user space. Returns
+ * bytes received, or <0 (-1 socket, -2 DNS fail, -3 connect fail). */
+int http_get(const char *host, void *buf, int cap);
