@@ -12,9 +12,10 @@
 #include "libc.h"
 #include "wm.h"
 #include "keys.h"
+#include "http.h"
 
 #define DEF_W  440
-#define DEF_H  180
+#define DEF_H  264
 #define URL_MAX 100
 #define RESP_MAX 16384
 
@@ -28,6 +29,11 @@ static int  url_len = 11;                 /* strlen("example.com") */
 static char status[96] = "Enter a URL and click Fetch.";
 static char resp[RESP_MAX];
 
+/* Last result (Fetch 2.0): the parsed response + timing, shown in the window. */
+static struct http_response R;
+static int have_result;
+static int last_bytes, last_ms;
+
 static int sx(int v) { int r = v * S / 100; return r < 1 ? 1 : r; }
 
 /* Fetch button rectangle (content-local), scaled. */
@@ -38,6 +44,25 @@ static int btn_h(void) { return sx(30); }
 
 static void rect(int x, int y, int w, int h, uint32_t c) { gfx_fill_rect(&surf, x, y, w, h, c); }
 static void text(int x, int y, const char *s, uint32_t c) { gfx_draw_text_s(&surf, x, y, s, c, S); }
+
+static int utoa(unsigned v, char *d)
+{
+    char t[12]; int n = 0;
+    do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    int p = 0; while (n > 0) d[p++] = t[--n];
+    d[p] = '\0';
+    return p;
+}
+
+/* "label" + "value", drawn at row y in the result block. */
+static void label_val(int y, const char *label, const char *val)
+{
+    char b[160]; int p = 0;
+    for (int i = 0; label[i]; i++) b[p++] = label[i];
+    for (int i = 0; val[i] && p < 159; i++) b[p++] = val[i];
+    b[p] = '\0';
+    text(sx(16), y, b, GFX_RGB(0x33, 0x33, 0x40));
+}
 
 static void present(void)
 {
@@ -70,7 +95,28 @@ static void redraw(void)
     text(hx + sx(24), hy + sx(8), "Fetch", GFX_RGB(0xff, 0xff, 0xff));
 
     /* Status line. */
-    text(sx(16), sx(140), status, GFX_RGB(0x33, 0x33, 0x40));
+    text(sx(16), sx(132), status, GFX_RGB(0x33, 0x33, 0x40));
+
+    /* Result block (Fetch 2.0): the parsed response, once we have one. */
+    if (have_result) {
+        rect(sx(16), sx(150), W - sx(32), 1, GFX_RGB(0xd5, 0xd5, 0xdc));
+        char num[16], line[96];
+        utoa((unsigned)R.status, num);
+        label_val(sx(158), "Status:  ", R.status ? num : "(not HTTP)");
+        if (R.server[0])       label_val(sx(176), "Server:  ", R.server);
+        if (R.content_type[0]) label_val(sx(194), "Type:    ", R.content_type);
+
+        int p = 0; const char *a = "Size:    ";
+        for (int i = 0; a[i]; i++) line[p++] = a[i];
+        p += utoa((unsigned)last_bytes, line + p);
+        const char *b = " bytes    Time: ";
+        for (int i = 0; b[i]; i++) line[p++] = b[i];
+        p += utoa((unsigned)last_ms, line + p);
+        line[p++] = ' '; line[p++] = 'm'; line[p++] = 's'; line[p] = '\0';
+        text(sx(16), sx(212), line, GFX_RGB(0x33, 0x33, 0x40));
+
+        if (R.location[0]) label_val(sx(230), "-> ", R.location);
+    }
     present();
 }
 
@@ -105,31 +151,36 @@ static void do_fetch(void)
     if (url_len == 0) { set_status("Type a hostname first."); redraw(); return; }
     url[url_len] = '\0';
 
+    have_result = 0;
     status_url("Fetching http://");
     redraw();                                   /* shown while the syscall blocks */
 
+    unsigned t0 = perf_us();
     int n = http_get(url, resp, sizeof(resp));
+    unsigned t1 = perf_us();
     printf("[fetch] http_get(%s) = %d bytes\n", url, n);
     if (n == -1)      { set_status("No network. Boot Aurora with a NIC to fetch."); redraw(); return; }
     if (n == -2)      { status_url("DNS failed: ");        redraw(); return; }
     if (n == -3)      { status_url("Connection refused: "); redraw(); return; }
     if (n <= 0)       { set_status("No data received.");    redraw(); return; }
 
+    /* Fetch 2.0: parse the response into a structured object. */
+    http_parse(resp, n, &R);
+    last_bytes = n;
+    last_ms = (int)((t1 - t0) / 1000);
+    have_result = 1;
+
+    /* Save the body (headers stripped) for the Viewer; fall back to the whole
+     * response if there is no body. */
+    const char *save = resp; int savelen = n;
+    if (R.header_len > 0 && R.header_len < n) { save = resp + R.header_len; savelen = n - R.header_len; }
+
     int fd = open("/tmp/fetch.txt", O_WRONLY | O_CREAT | O_TRUNC);
     if (fd < 0)       { set_status("Fetched, but cannot write /tmp/fetch.txt"); redraw(); return; }
-    write(fd, resp, n);
+    write(fd, save, savelen);
     close(fd);
 
-    char msg[64]; int p = 0;
-    const char *a = "Fetched ";
-    for (int i = 0; a[i]; i++) msg[p++] = a[i];
-    char tmp[12]; int v = n, q = 0;
-    do { tmp[q++] = (char)('0' + v % 10); v /= 10; } while (v);
-    while (q > 0) msg[p++] = tmp[--q];
-    const char *b = " bytes -> Viewer";
-    for (int i = 0; b[i]; i++) msg[p++] = b[i];
-    msg[p] = '\0';
-    set_status(msg);
+    set_status("Done. Body opened in Viewer.");
     redraw();
     spawn_viewer("/tmp/fetch.txt");
 }

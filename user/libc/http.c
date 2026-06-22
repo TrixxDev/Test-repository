@@ -1,0 +1,80 @@
+/* HTTP/1.x response parser — see user/http.h. */
+#include "http.h"
+#include "libc.h"
+
+/* Case-insensitive test: does `s` begin with `prefix`? */
+static int ci_starts(const char *s, int slen, const char *prefix)
+{
+    for (int i = 0; prefix[i]; i++) {
+        if (i >= slen) return 0;
+        char a = s[i], b = prefix[i];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static void copy_field(char *dst, int cap, const char *src, int len)
+{
+    int n = len < cap - 1 ? len : cap - 1;
+    for (int i = 0; i < n; i++) dst[i] = src[i];
+    dst[n] = '\0';
+}
+
+int http_parse(const char *buf, int len, struct http_response *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->content_length = -1;
+    out->header_len = len;
+
+    if (len < 12 || !ci_starts(buf, len, "http/1."))
+        return -1;
+
+    /* Status code: after "HTTP/1.x " comes a 3-digit code. */
+    int i = 0;
+    while (i < len && buf[i] != ' ') i++;
+    while (i < len && buf[i] == ' ') i++;
+    int code = 0;
+    while (i < len && buf[i] >= '0' && buf[i] <= '9') { code = code * 10 + (buf[i] - '0'); i++; }
+    out->status = code;
+
+    /* Walk the header lines until the blank line that ends the header block. */
+    int p = 0;
+    while (p < len && buf[p] != '\n') p++;       /* skip the status line */
+    p++;
+    while (p < len) {
+        int e = p;
+        while (e < len && buf[e] != '\n') e++;   /* e = end of line ('\n' or len) */
+        int end = e;
+        if (end > p && buf[end - 1] == '\r') end--;   /* strip CR */
+
+        if (end == p) {                          /* blank line: headers done */
+            out->header_len = (e < len) ? e + 1 : len;
+            break;
+        }
+
+        int linelen = end - p;
+        int c = p;
+        while (c < end && buf[c] != ':') c++;
+        if (c < end) {
+            int v = c + 1;
+            while (v < end && buf[v] == ' ') v++;
+            int vlen = end - v;
+            if (ci_starts(buf + p, linelen, "content-length:")) {
+                int nlen = 0;
+                for (int k = v; k < end && buf[k] >= '0' && buf[k] <= '9'; k++)
+                    nlen = nlen * 10 + (buf[k] - '0');
+                out->content_length = nlen;
+            } else if (ci_starts(buf + p, linelen, "content-type:")) {
+                copy_field(out->content_type, sizeof(out->content_type), buf + v, vlen);
+            } else if (ci_starts(buf + p, linelen, "server:")) {
+                copy_field(out->server, sizeof(out->server), buf + v, vlen);
+            } else if (ci_starts(buf + p, linelen, "location:")) {
+                copy_field(out->location, sizeof(out->location), buf + v, vlen);
+            }
+        }
+        p = (e < len) ? e + 1 : len;
+    }
+    return 0;
+}

@@ -274,7 +274,27 @@ The transport is done and audited; everything below is protocol logic over
 | 8.5 | **Aurora Fetch** — first network GUI app (`http_get` syscall) | **fetch a web page from the internet, show it in the Viewer** | ✅ |
 | 8.6 | **Multiple TCBs** — connection table + handle-based API | several connections at once | ✅ |
 | 8.7 | **TCP retransmission** — RTO timer + 1-segment cache | **dropped GET recovers** | ✅ |
-| 8.8 | Socket API (`socket/connect/send/recv/close`) | user sockets, netd boundary | next |
+| 8.9 | **Aurora Fetch 2.0** — HTTP response parser + result UI | **status/headers/size/time shown; body in Viewer** | ✅ |
+| 8.10 | HTTP redirects (301/302/307/308, `Location:`) | follow up to 5 hops | next |
+| 8.8 | Socket API (`socket/connect/send/recv/close`) | user sockets, netd boundary | later |
+
+## Phase 8.9 — Aurora Fetch 2.0 (a real response object)
+
+The fetch path stops being an opaque byte stream. `http_parse()` (`user/libc/http.c`)
+turns the raw response into a `struct http_response` — status code, Content-Length,
+Content-Type, Server, Location, and where the body begins. Aurora Fetch now shows
+the **parsed result** in its window (Status / Server / Type / Size / Time, timed
+with `perf_us()`), strips the headers, and opens just the **body** in the Viewer:
+
+```
+Status:  426
+Type:    text/plain
+Size:    151 bytes    Time: 41 ms
+```
+
+This is the first time the network layer produces a structured object instead of
+`char *response` — the foundation redirects (the `Location` field is already
+parsed), a cache, file downloads and a real browser will build on.
 
 ## Phase 8.7 — Retransmission (survive packet loss)
 
