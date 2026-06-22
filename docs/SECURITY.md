@@ -26,9 +26,10 @@ Run the vectors: `make crypto-test`.
 | 7 | **X25519** (ECDHE key exchange) (`crypto/x25519.c`) | RFC 7748 | ✅ |
 | 8 | **Transcript hash + key schedule** (`tls/transcript.c`, `tls/key_schedule.c`) | RFC 8448 §3 trace | ✅ |
 | 9 | **Handshake messages v1** (`tls/handshake.c`) — ClientHello/ServerHello/Finished | RFC 8446 §4 | ✅ |
-| 10 | Handshake state machine + record integration | RFC 8446 §4 | next |
-| 11 | Certificate / signature validation | RFC 8446 §4.4 | later |
-| 12 | HTTPS GET in Aurora Fetch | real `https://` site | later |
+| 10 | **Client handshake FSM core** (`tls/client.c`) — event-driven, no network | RFC 8446 §4 / §A.1 | ✅ |
+| 11 | Record binding (phase gating, key switch over the record layer) | RFC 8446 §5–6 | next |
+| 12 | Certificate / signature validation | RFC 8446 §4.4 | later |
+| 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -303,3 +304,41 @@ handshake (loopback):  client builds ClientHello, server builds ServerHello
 This is the proof the whole pipeline composes: two independent peers exchange
 real handshake bytes and converge on the same keys. What remains is driving it as
 an event-driven state machine over the record layer, then certificate trust.
+
+## Step 10 — client handshake FSM core (RFC 8446 §4 / §A.1)
+
+A deterministic, event-driven engine over *plaintext* handshake messages. It owns
+the transcript, the key schedule, and a **(state, key_phase) pair kept
+deliberately separate** — `state` is which message is expected next, `phase`
+(EARLY → HANDSHAKE → APPLICATION) is which traffic keys the record layer should
+use. No network, no record layer, no certificate validation (v1); the ephemeral
+key and client random are injected, so a given event sequence always replays to
+the same bytes.
+
+Three invariants are enforced exactly where TLS implementations usually drift:
+
+- **transcript phasing.** ServerHello is added before deriving the handshake
+  secrets (so they bind `Transcript(CH..SH)`); the server Finished is verified
+  over `Transcript(CH..CertificateVerify)` *before* it is appended; the client
+  Finished and the application secrets are computed over `Transcript(CH..server
+  Finished)`. One message out of place and the secrets diverge.
+- **key-phase anchors.** Phase flips to HANDSHAKE only at ServerHello and to
+  APPLICATION only at the server Finished — never ad hoc.
+- **handshake-only progress.** The FSM consumes handshake messages; record/AEAD
+  failures are the caller's concern and never advance it.
+
+Verified by a full **deterministic loopback handshake** through the FSM — a test
+"server" emits ServerHello + (dummy) EncryptedExtensions/Certificate/
+CertificateVerify + a correctly-keyed Finished, and:
+
+```
+FSM loopback:  START -> WAIT_SH -> WAIT_EE -> WAIT_CERT -> WAIT_CV
+               -> WAIT_FINISHED -> CONNECTED, phase EARLY -> HANDSHAKE -> APPLICATION
+   FSM and server agree on the handshake- and application-traffic secrets
+   server-side check of the client's emitted Finished passes
+   tampered server Finished -> -1 and the FSM enters ERROR
+   out-of-order message (EE while WAIT_SH) -> -1
+```
+
+Next is binding this to `tls_record_seal/open` (plaintext gating, key switch on
+each phase anchor, per-phase sequence numbers), then certificate trust.

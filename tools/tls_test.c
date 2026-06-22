@@ -13,6 +13,7 @@
 #include "transcript.h"
 #include "key_schedule.h"
 #include "handshake.h"
+#include "client.h"
 #include "chacha20poly1305.h"
 #include "x25519.h"
 
@@ -93,6 +94,14 @@ static int build_server_hello(uint8_t *o, const uint8_t random[32],
     int body = n - 4;
     o[lenpos] = (uint8_t)(body>>8); o[lenpos+1] = (uint8_t)body;  /* 24-bit len, hi byte 0 */
     return n;
+}
+
+/* Build a generic handshake message: type | uint24(len) | body. */
+static int build_hs(uint8_t *o, uint8_t type, const uint8_t *body, int blen)
+{
+    o[0] = type; o[1] = 0; o[2] = (uint8_t)(blen >> 8); o[3] = (uint8_t)blen;
+    for (int i = 0; i < blen; i++) o[4 + i] = body[i];
+    return 4 + blen;
 }
 
 int main(void)
@@ -301,6 +310,109 @@ int main(void)
         check_int("peer Finished verifies", tls_check_finished(fk, thash, vd), 0);
         uint8_t bad[32]; memcpy(bad, vd, 32); bad[0] ^= 1;
         check_int("tampered Finished rejected", tls_check_finished(fk, thash, bad), -1);
+    }
+
+    printf("TLS 1.3 client FSM (deterministic loopback handshake):\n");
+    {
+        uint8_t cpriv[32], spriv[32], crand[32], srand[32];
+        for (int i=0;i<32;i++){ cpriv[i]=(uint8_t)(i+3); spriv[i]=(uint8_t)(0x90+i);
+                                crand[i]=(uint8_t)(0x11+i); srand[i]=(uint8_t)(0x22+i); }
+
+        tls_client cl;
+        tls_client_init(&cl, "example.com", cpriv, crand);
+        check_int("init state START", cl.state, TLS_ST_START);
+        check_int("init phase EARLY", cl.phase, TLS_PHASE_EARLY);
+
+        uint8_t ch[1024];
+        int chlen = tls_client_start(&cl, ch, sizeof ch);
+        check_int("start emits ClientHello", (chlen > 0 && ch[0] == TLS_HS_CLIENT_HELLO), 1);
+        check_int("after start: WAIT_SH", cl.state, TLS_ST_WAIT_SH);
+
+        /* server side: mirror the transcript and derive the same keys */
+        uint8_t spub[32], cpub[32];
+        x25519_base(spub, spriv);
+        x25519_base(cpub, cpriv);
+
+        tls_transcript ts; tls_transcript_init(&ts);
+        tls_transcript_update(&ts, ch, chlen);
+        uint8_t sh[256];
+        int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        tls_transcript_update(&ts, sh, shlen);
+
+        uint8_t hello_hash[32], ecdhe[32];
+        tls_transcript_hash(&ts, hello_hash);
+        x25519(ecdhe, spriv, cpub);
+        tls_key_schedule kss;
+        tls_key_schedule_derive(&kss, ecdhe, hello_hash);
+
+        /* dummy EE / Certificate / CertificateVerify (client only transcripts them) */
+        uint8_t ee[64], cert[64], cv[64];
+        int eelen   = build_hs(ee,   TLS_HS_ENCRYPTED_EXTENSIONS, (const uint8_t*)"\x00\x00", 2);
+        int certlen = build_hs(cert, TLS_HS_CERTIFICATE,          (const uint8_t*)"\x00\x00\x00\x00", 4);
+        int cvlen   = build_hs(cv,   TLS_HS_CERTIFICATE_VERIFY,   (const uint8_t*)"\x08\x04\x00\x00", 4);
+        tls_transcript_update(&ts, ee, eelen);
+        tls_transcript_update(&ts, cert, certlen);
+        tls_transcript_update(&ts, cv, cvlen);
+
+        /* server Finished over Transcript(CH..CV) */
+        uint8_t sfk[32], thash_cv[32], svd[32], sfin[64];
+        tls_finished_key(sfk, kss.server_hs_traffic);
+        tls_transcript_hash(&ts, thash_cv);
+        tls_finished_verify_data(svd, sfk, thash_cv);
+        int sfinlen = build_hs(sfin, TLS_HS_FINISHED, svd, 32);
+        tls_transcript_update(&ts, sfin, sfinlen);
+
+        /* drive the client FSM through the server flight */
+        uint8_t out[64]; size_t outlen;
+        check_int("recv SH -> 0", tls_client_recv_handshake(&cl, sh, shlen, out, sizeof out, &outlen), 0);
+        check_int("after SH: WAIT_EE", cl.state, TLS_ST_WAIT_EE);
+        check_int("after SH: phase HANDSHAKE", cl.phase, TLS_PHASE_HANDSHAKE);
+        check_int("FSM/server agree: hs traffic secret",
+                  memcmp(cl.ks.server_hs_traffic, kss.server_hs_traffic, 32) == 0, 1);
+
+        tls_client_recv_handshake(&cl, ee, eelen, out, sizeof out, &outlen);
+        check_int("after EE: WAIT_CERT", cl.state, TLS_ST_WAIT_CERT);
+        tls_client_recv_handshake(&cl, cert, certlen, out, sizeof out, &outlen);
+        check_int("after Cert: WAIT_CV", cl.state, TLS_ST_WAIT_CV);
+        tls_client_recv_handshake(&cl, cv, cvlen, out, sizeof out, &outlen);
+        check_int("after CV: WAIT_FINISHED", cl.state, TLS_ST_WAIT_FINISHED);
+
+        int rc = tls_client_recv_handshake(&cl, sfin, sfinlen, out, sizeof out, &outlen);
+        check_int("recv server Finished -> 0 (verified)", rc, 0);
+        check_int("after Finished: CONNECTED", cl.state, TLS_ST_CONNECTED);
+        check_int("after Finished: phase APPLICATION", cl.phase, TLS_PHASE_APPLICATION);
+        check_int("client emitted its Finished", (outlen == 36 && out[0] == TLS_HS_FINISHED), 1);
+
+        /* server verifies the client's Finished over Transcript(CH..server Finished) */
+        uint8_t cfk[32], thash_sf[32];
+        tls_finished_key(cfk, kss.client_hs_traffic);
+        tls_transcript_hash(&ts, thash_sf);
+        check_int("client Finished verifies server-side", tls_check_finished(cfk, thash_sf, out + 4), 0);
+
+        /* application traffic secrets agree on both sides */
+        uint8_t cap[32], sap[32];
+        tls_derive_secret(cap, kss.master_secret, "c ap traffic", thash_sf);
+        tls_derive_secret(sap, kss.master_secret, "s ap traffic", thash_sf);
+        check_int("client ap secret agrees", memcmp(cl.client_ap_secret, cap, 32) == 0, 1);
+        check_int("server ap secret agrees", memcmp(cl.server_ap_secret, sap, 32) == 0, 1);
+
+        /* negative: a tampered server Finished must move the FSM to ERROR */
+        tls_client c2; tls_client_init(&c2, "example.com", cpriv, crand);
+        uint8_t ch2[1024]; tls_client_start(&c2, ch2, sizeof ch2);
+        tls_client_recv_handshake(&c2, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c2, ee, eelen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c2, cert, certlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c2, cv, cvlen, out, sizeof out, &outlen);
+        uint8_t badfin[64]; memcpy(badfin, sfin, sfinlen); badfin[4] ^= 1;
+        check_int("tampered server Finished -> -1",
+                  tls_client_recv_handshake(&c2, badfin, sfinlen, out, sizeof out, &outlen), -1);
+        check_int("FSM enters ERROR", c2.state, TLS_ST_ERROR);
+
+        /* negative: out-of-order message (EE while WAIT_SH) -> error */
+        tls_client c3; tls_client_init(&c3, "example.com", cpriv, crand);
+        uint8_t ch3[1024]; tls_client_start(&c3, ch3, sizeof ch3);
+        check_int("unexpected EE in WAIT_SH -> -1",
+                  tls_client_recv_handshake(&c3, ee, eelen, out, sizeof out, &outlen), -1);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);
