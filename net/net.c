@@ -28,13 +28,14 @@ uint16_t inet_csum(const void *data, uint32_t len)
 
 void net_init(void) { arp_init(); ipv4_init(); udp_init(); tcp_init(); }
 
-/* Drain every pending RX frame up into the dispatcher. */
+/* Drain every pending RX frame up into the dispatcher, then run net timers. */
 void net_poll(void)
 {
     uint8_t frame[1600];
     int n;
     while ((n = net_recv_frame(frame, sizeof(frame))) > 0)
         eth_input(frame, (size_t)n);
+    tcp_tick();             /* TIME_WAIT -> CLOSED */
 }
 
 /* Poll the wire until `ip` resolves in the cache, or `timeout_ms` elapses. */
@@ -110,6 +111,13 @@ static void tcp_http_get(uint32_t ip, uint16_t port, const char *host)
     } else {
         kprintf("[http] %s: no data received\n", host);
     }
+
+    /* Phase 3: close the connection and watch the teardown reach CLOSED. */
+    tcp_close();
+    uint64_t tdl = net_now_ms() + 3000;
+    while (net_now_ms() < tdl && tcp_state() != TCP_CLOSED)
+        net_poll();
+    kprintf("[tcp] %s: closed (final state=%s)\n", host, tcp_state_name(tcp_state()));
 }
 
 /* Phase 6 milestone: ping `dst` `count` times, reporting RTT per reply. Drives

@@ -27,11 +27,13 @@ struct tcp_hdr {
 #define TCP_RCV_WND   8192
 #define TCP_RX_CAP    8192          /* receive buffer (one in-order stream) */
 #define TCP_TX_MAX    1400          /* one segment, well under the MTU */
+#define TCP_TIME_WAIT_MS 1000       /* shortened 2*MSL (real TCP: minutes) */
 
 static struct tcp_tcb tcb;          /* the single connection */
 static uint8_t  rx_buf[TCP_RX_CAP];
 static unsigned rx_len;             /* bytes accumulated */
 static unsigned rx_read;            /* bytes handed to tcp_recv */
+static uint64_t tw_deadline;        /* TIME_WAIT -> CLOSED moment */
 
 void tcp_init(void)
 {
@@ -129,6 +131,29 @@ int tcp_recv(void *buf, size_t cap)
 
 int tcp_rx_total(void) { return (int)rx_len; }
 
+int tcp_close(void)
+{
+    if (tcb.state == TCP_ESTABLISHED) {                 /* active close */
+        tcp_xmit(TCP_FIN | TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);
+        tcb.snd_nxt += 1;                               /* FIN consumes a seq */
+        tcb.state = TCP_FIN_WAIT_1;
+        return 0;
+    }
+    if (tcb.state == TCP_CLOSE_WAIT) {                  /* finish passive close */
+        tcp_xmit(TCP_FIN | TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);
+        tcb.snd_nxt += 1;
+        tcb.state = TCP_LAST_ACK;
+        return 0;
+    }
+    return -1;
+}
+
+void tcp_tick(void)
+{
+    if (tcb.state == TCP_TIME_WAIT && net_now_ms() >= tw_deadline)
+        tcb.state = TCP_CLOSED;
+}
+
 int tcp_connect(uint32_t dst, uint16_t port)
 {
     memset(&tcb, 0, sizeof(tcb));
@@ -198,29 +223,68 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
         return;
     }
 
-    if (tcb.state == TCP_ESTABLISHED) {
-        /* Track acknowledgements of our sent data (wrap-safe compare). */
-        if ((flags & TCP_ACK) && (int32_t)(ack - tcb.snd_una) > 0)
-            tcb.snd_una = ack;
-
-        unsigned hlen = (unsigned)((h->data_off >> 4) & 0x0f) * 4;
-        if (hlen < sizeof(struct tcp_hdr) || hlen > len)
-            hlen = sizeof(struct tcp_hdr);
-        const uint8_t *payload = (const uint8_t *)segment + hlen;
-        unsigned plen = (unsigned)len - hlen;
-
-        /* Accept only in-order data (no reassembly in this phase). */
-        if (plen > 0 && seq == tcb.rcv_nxt) {
-            unsigned space = (rx_len < TCP_RX_CAP) ? TCP_RX_CAP - rx_len : 0;
-            unsigned n = plen < space ? plen : space;
-            if (n)
-                memcpy(rx_buf + rx_len, payload, n);
-            rx_len += n;
-            tcb.rcv_nxt += plen;                 /* ack the whole in-order segment */
-            tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);  /* immediate ACK */
-        }
-        /* FIN / connection teardown is Phase 3; the peer's FIN is simply not
-         * acked here, which is harmless for a one-shot fetch. */
+    if (tcb.state == TCP_CLOSED || tcb.state == TCP_SYN_RECEIVED)
         return;
+
+    /* ESTABLISHED and every closing state: track ACKs, accept in-order data,
+     * consume an in-order FIN, then advance the state machine. */
+    if ((flags & TCP_ACK) && (int32_t)(ack - tcb.snd_una) > 0)
+        tcb.snd_una = ack;                       /* wrap-safe */
+
+    unsigned hlen = (unsigned)((h->data_off >> 4) & 0x0f) * 4;
+    if (hlen < sizeof(struct tcp_hdr) || hlen > len)
+        hlen = sizeof(struct tcp_hdr);
+    const uint8_t *payload = (const uint8_t *)segment + hlen;
+    unsigned plen = (unsigned)len - hlen;
+
+    int receiving = (tcb.state == TCP_ESTABLISHED ||
+                     tcb.state == TCP_FIN_WAIT_1 ||
+                     tcb.state == TCP_FIN_WAIT_2);
+
+    uint32_t before = tcb.rcv_nxt;
+    if (plen > 0 && seq == tcb.rcv_nxt && receiving) {   /* in-order data only */
+        unsigned space = (rx_len < TCP_RX_CAP) ? TCP_RX_CAP - rx_len : 0;
+        unsigned n = plen < space ? plen : space;
+        if (n)
+            memcpy(rx_buf + rx_len, payload, n);
+        rx_len += n;
+        tcb.rcv_nxt += plen;
+    }
+
+    int fin = 0;
+    if ((flags & TCP_FIN) && (seq + plen) == tcb.rcv_nxt) {  /* in-order FIN */
+        tcb.rcv_nxt += 1;                        /* FIN consumes a seq */
+        fin = 1;
+    }
+    if (tcb.rcv_nxt != before)
+        tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);
+
+    int our_fin_acked = (tcb.snd_una == tcb.snd_nxt);
+
+    switch (tcb.state) {
+    case TCP_ESTABLISHED:
+        if (fin)
+            tcb.state = TCP_CLOSE_WAIT;          /* peer closed first (passive) */
+        break;
+    case TCP_FIN_WAIT_1:
+        if (our_fin_acked && fin) { tcb.state = TCP_TIME_WAIT; tw_deadline = net_now_ms() + TCP_TIME_WAIT_MS; }
+        else if (our_fin_acked)   tcb.state = TCP_FIN_WAIT_2;
+        else if (fin)             tcb.state = TCP_CLOSING;
+        break;
+    case TCP_FIN_WAIT_2:
+        if (fin) { tcb.state = TCP_TIME_WAIT; tw_deadline = net_now_ms() + TCP_TIME_WAIT_MS; }
+        break;
+    case TCP_CLOSING:
+        if (our_fin_acked) { tcb.state = TCP_TIME_WAIT; tw_deadline = net_now_ms() + TCP_TIME_WAIT_MS; }
+        break;
+    case TCP_LAST_ACK:
+        if (our_fin_acked) tcb.state = TCP_CLOSED;
+        break;
+    case TCP_TIME_WAIT:
+        if (flags & TCP_FIN)                     /* re-ack a retransmitted FIN */
+            tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);
+        break;
+    default:
+        break;
     }
 }

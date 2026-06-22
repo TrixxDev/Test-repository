@@ -270,7 +270,32 @@ The transport is done and audited; everything below is protocol logic over
 | 7.5 | **DNS** over UDP (`net/dns.c`) — typed `dns_query(name, type)` | **`example.com` → real A record** | ✅ |
 | 8.1 | **TCP** connect (`net/tcp.c`) — handshake only, full TCB + state enum | **`connect 10.0.2.2:80` → ESTABLISHED** | ✅ |
 | 8.2 | **TCP data** — `tcp_send`/`tcp_recv` + HTTP GET | **`GET /` → `HTTP/1.0 200 OK` (local & real internet)** | ✅ |
-| 8.3 | TCP teardown (FIN / TIME_WAIT) | clean close | next |
+| 8.3 | **TCP teardown** — FIN_WAIT_1/2, CLOSING, CLOSE_WAIT, LAST_ACK, TIME_WAIT | **HTTP fetch closes to CLOSED** | ✅ |
+| 8.4 | TCP retransmission + multiple connections + socket API | reliability, then user sockets | next |
+
+## Phase 8.3 — TCP teardown (full lifecycle)
+
+`tcp_close()` drives an orderly shutdown from either side:
+
+- **Active close** (we close first): ESTABLISHED → send FIN → `FIN_WAIT_1`; the
+  peer's ACK → `FIN_WAIT_2`; its FIN → ACK → `TIME_WAIT` → (timer) → `CLOSED`.
+  Simultaneous close (FIN before our FIN is acked) goes through `CLOSING`.
+- **Passive close** (peer closes first, e.g. an HTTP/1.0 server): its FIN → ACK
+  → `CLOSE_WAIT`; we `tcp_close()` → send FIN → `LAST_ACK`; its ACK → `CLOSED`.
+
+`tcp_input` now accepts in-order data *and* an in-order FIN (FIN consumes one
+sequence number), ACKs whatever advanced `rcv_nxt`, and steps the state machine.
+`tcp_tick()` (called from `net_poll`) expires `TIME_WAIT` to `CLOSED` after a
+(shortened) 2·MSL. The HTTP self-test now closes after the fetch:
+
+```
+[http] 10.0.2.2: 116 bytes total, status: "HTTP/1.0 200 OK"
+[tcp]  10.0.2.2: closed (final state=CLOSED)
+```
+
+pcap: server FIN → our ACK → our FIN → server ACK — a clean four-way close. The
+connection now completes its full lifecycle, which is the prerequisite for
+retransmission and multiple connections next.
 
 ## Phase 8.2 — TCP data + HTTP (Aurora reaches the internet)
 

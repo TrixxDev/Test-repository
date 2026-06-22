@@ -66,5 +66,13 @@ int         tcp_recv(void *buf, size_t cap);
 /* Total payload bytes received on this connection so far. */
 int         tcp_rx_total(void);
 
+/* Phase 3: begin an orderly close. From ESTABLISHED this sends FIN and enters
+ * FIN_WAIT_1 (active close); from CLOSE_WAIT it sends FIN and enters LAST_ACK
+ * (finishing a passive close). Returns 0 if a FIN was sent, -1 otherwise. */
+int         tcp_close(void);
+
+/* Drive time-based transitions (TIME_WAIT -> CLOSED). Call periodically. */
+void        tcp_tick(void);
+
 /* Handle one TCP segment (IPv4 payload) from host-order `src`. */
 void        tcp_input(uint32_t src, const void *segment, size_t len);
