@@ -191,8 +191,14 @@ tls-trace-test:
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
 .PHONY: x509-test
 x509-test:
-	$(CC) -O2 -Ix509 tools/x509_test.c x509/asn1.c x509/x509.c -o /tmp/aurora_x509_test
+	$(CC) -O2 -Ix509 -Icrypto tools/x509_test.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/bignum.c crypto/rsa.c -o /tmp/aurora_x509_test
 	/tmp/aurora_x509_test
+
+# Host-side RSA / big-integer math tests (crypto/ layer: pure math, no ASN.1).
+.PHONY: rsa-test
+rsa-test:
+	$(CC) -O2 -Icrypto tools/rsa_test.c crypto/bignum.c crypto/rsa.c crypto/sha256.c -o /tmp/aurora_rsa_test
+	/tmp/aurora_rsa_test
 
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
