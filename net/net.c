@@ -120,6 +120,62 @@ static void tcp_http_get(uint32_t ip, uint16_t port, const char *host)
     kprintf("[tcp] %s: closed (final state=%s)\n", host, tcp_state_name(tcp_state()));
 }
 
+/* Build "GET <path> HTTP/1.0\r\nHost: <host>\r\nConnection: close\r\n\r\n". */
+static unsigned build_request(char *req, unsigned cap, const char *host, const char *path)
+{
+    unsigned n = 0;
+    const char *g = "GET ";
+    for (int i = 0; g[i] && n < cap; i++) req[n++] = g[i];
+    for (int i = 0; path[i] && n < cap - 40; i++) req[n++] = path[i];
+    const char *h1 = " HTTP/1.0\r\nHost: ";
+    for (int i = 0; h1[i] && n < cap; i++) req[n++] = h1[i];
+    for (int i = 0; host[i] && n < cap - 26; i++) req[n++] = host[i];
+    const char *h2 = "\r\nConnection: close\r\n\r\n";
+    for (int i = 0; h2[i] && n < cap; i++) req[n++] = h2[i];
+    return n;
+}
+
+int net_http_get(const char *host, const char *path, char *buf, unsigned cap)
+{
+    if (!virtio_net_present() || !host || !buf || cap == 0)
+        return -1;
+
+    uint32_t ip;
+    if (dns_query(host, DNS_A, &ip) != 0)
+        return -2;                              /* DNS failed */
+
+    tcp_connect(ip, 80);
+    uint64_t cdl = net_now_ms() + 5000;
+    while (net_now_ms() < cdl &&
+           tcp_state() != TCP_ESTABLISHED && tcp_state() != TCP_CLOSED)
+        net_poll();
+    if (tcp_state() != TCP_ESTABLISHED)
+        return -3;                              /* connect failed / refused */
+
+    char req[256];
+    unsigned rn = build_request(req, sizeof(req), host, path);
+    tcp_send(req, rn);
+
+    /* Drain the response into buf as it arrives (so the 8 KiB rx buffer never
+     * overflows for pages up to `cap`). Stop on close or an idle timeout. */
+    unsigned total = 0;
+    uint64_t idle = net_now_ms() + 6000;
+    while (net_now_ms() < idle && total < cap) {
+        net_poll();
+        int g = tcp_recv(buf + total, cap - total);
+        if (g > 0) { total += (unsigned)g; idle = net_now_ms() + 2000; }
+        if (tcp_state() == TCP_CLOSED || tcp_state() == TCP_TIME_WAIT)
+            break;
+    }
+    total += (unsigned)tcp_recv(buf + total, cap - total);   /* final bytes */
+
+    tcp_close();
+    uint64_t tdl = net_now_ms() + 1500;
+    while (net_now_ms() < tdl && tcp_state() != TCP_CLOSED)
+        net_poll();
+    return (int)total;
+}
+
 /* Phase 6 milestone: ping `dst` `count` times, reporting RTT per reply. Drives
  * the whole stack (Ethernet/ARP/IPv4/ICMP/checksum) in one round-trip each.
  * Returns the number of replies received. */

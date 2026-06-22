@@ -32,7 +32,7 @@ USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/cat.elf user/grep.elf user/orphan.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
               user/wserver.elf user/term.elf user/dock.elf user/files.elf \
-              user/viewer.elf user/wmstress.elf user/settings.elf
+              user/viewer.elf user/wmstress.elf user/settings.elf user/fetch.elf
 LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o user/libc/clip.o
 # Portable graphics/compositor code, built for userspace and linked into wserver.
 WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
@@ -93,6 +93,9 @@ user/files.elf: user/files.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) user/
 user/viewer.elf: user/viewer.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) user/gfx_u.o user/user.ld
 	$(CC) $(UCFLAGS) -c user/viewer.c -o user/viewer.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/viewer.o user/gfx_u.o $(LIBC_OBJ) -o $@
+user/fetch.elf: user/fetch.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) user/gfx_u.o user/user.ld
+	$(CC) $(UCFLAGS) -c user/fetch.c -o user/fetch.o
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/fetch.o user/gfx_u.o $(LIBC_OBJ) -o $@
 
 $(EMBEDDED): user/init.elf tools/bin2c.py
 	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
@@ -106,7 +109,7 @@ $(DISK): $(USER_PROGS) user/poem.txt user/about.txt tools/mkfat32.py
 	    SAVE.ELF user/save.elf WSERVER.ELF user/wserver.elf TERM.ELF user/term.elf \
 	    DOCK.ELF user/dock.elf FILES.ELF user/files.elf VIEWER.ELF user/viewer.elf \
 	    ABOUT.TXT user/about.txt POEM.TXT user/poem.txt WMSTRESS.ELF user/wmstress.elf \
-	    SETTINGS.ELF user/settings.elf
+	    SETTINGS.ELF user/settings.elf FETCH.ELF user/fetch.elf
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

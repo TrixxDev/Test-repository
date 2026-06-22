@@ -271,7 +271,34 @@ The transport is done and audited; everything below is protocol logic over
 | 8.1 | **TCP** connect (`net/tcp.c`) — handshake only, full TCB + state enum | **`connect 10.0.2.2:80` → ESTABLISHED** | ✅ |
 | 8.2 | **TCP data** — `tcp_send`/`tcp_recv` + HTTP GET | **`GET /` → `HTTP/1.0 200 OK` (local & real internet)** | ✅ |
 | 8.3 | **TCP teardown** — FIN_WAIT_1/2, CLOSING, CLOSE_WAIT, LAST_ACK, TIME_WAIT | **HTTP fetch closes to CLOSED** | ✅ |
+| 8.5 | **Aurora Fetch** — first network GUI app (`http_get` syscall) | **fetch a web page from the internet, show it in the Viewer** | ✅ |
 | 8.4 | TCP retransmission + multiple connections + socket API | reliability, then user sockets | next |
+
+## Phase 8.5 — Aurora Fetch (the first network application)
+
+The network stack now has a real user-facing consumer. `net_http_get(host, path,
+buf, cap)` runs the whole stack synchronously — DNS → TCP connect → HTTP GET →
+teardown — into a buffer. It is exposed to user space as `http_get(host, buf, cap)`
+(`SYS_HTTPGET`); because the `int 0x80` gate is an interrupt gate (IF cleared),
+the handler does `sti` first so the PIT clock advances and the window server is
+preempted in to keep rendering during the (bounded-blocking) fetch.
+
+**Aurora Fetch** (`user/fetch.c`) is a small GUI client: a URL field, a Fetch
+button, a status line. On Fetch it calls `http_get`, writes the response to
+`/tmp/fetch.txt`, and launches the Viewer on it — the same Dock → app → Viewer
+pattern as the Finder. It is the `N` icon in the Dock.
+
+```
+[fetch]  ready (pid 12), window 4
+[fetch]  http_get(example.com) = 151 bytes      # DNS+TCP+HTTP from a ring-3 app
+[viewer] ready (pid 14), window 5, /tmp/fetch.txt (7 lines)
+```
+
+The Viewer shows the real response (`HTTP/1.1 426 Upgrade Required` from the
+public internet). This is the threshold the stack was built for: **AuroraOS goes
+out to the internet on its own and displays the page it fetched.** (Required a
+one-line fix making the tmpfs root world-writable, like Unix `/tmp`, so a uid-1000
+app can create the temp file.)
 
 ## Phase 8.3 — TCP teardown (full lifecycle)
 

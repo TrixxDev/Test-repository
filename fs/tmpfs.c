@@ -126,5 +126,7 @@ static vfs_ops_t tmpfs_ops = {
 vfs_node_t *tmpfs_create(void)
 {
     tnode_t *root = new_node("/", VFS_DIR);
+    if (root)
+        root->v.mode = 0777;        /* world-writable scratch space (Unix /tmp) */
     return root ? &root->v : NULL;
 }

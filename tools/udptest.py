@@ -36,7 +36,7 @@ qemu = subprocess.Popen([
     '-drive', f'file={DISK},format=raw,if=ide',
     '-netdev', 'user,id=n0', '-device', 'virtio-net-pci,netdev=n0',
     '-object', f'filter-dump,id=d0,netdev=n0,file={PCAP}',
-    '-display', 'none', '-serial', f'file:{SERIAL}', '-no-reboot',
+    '-display', 'none', '-serial', f'file:{SERIAL}', '-no-reboot', '-append', 'nettest',
 ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 got_tx = got_echo = False

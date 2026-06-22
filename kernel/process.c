@@ -14,6 +14,7 @@
 #include "shm.h"
 #include "virtio_net.h"
 #include "tcp.h"
+#include "netstack.h"
 
 #define MAX_PROCS    32
 #define USTACK_TOP   0xC0000000u
@@ -198,6 +199,21 @@ int sys_tcpstat(struct tcp_stats *out)
     tcp_get_stats(&ts);
     memcpy(out, &ts, sizeof(ts));
     return 0;
+}
+
+/* Synchronous HTTP GET for user space: http_get(host, buf, cap). Fetches "/" from
+ * `host`:80 and writes the response into the user buffer. Interrupts are enabled
+ * for the duration so the PIT clock advances and the GUI keeps rendering (the
+ * window server is preempted in); only one fetch should be in flight at a time. */
+int sys_httpget(const char *uhost, void *ubuf, int cap)
+{
+    if (cap <= 0 || !is_user_addr((uint32_t)ubuf, (size_t)cap))
+        return -1;
+    char host[128];
+    if (copy_str_from_user(host, uhost, sizeof(host)) < 0)
+        return -1;
+    __asm__ volatile("sti");        /* fetch runs with IRQs on (clock + preemption) */
+    return net_http_get(host, "/", (char *)ubuf, (unsigned)cap);
 }
 
 /* Block the calling thread for ~`ms` milliseconds (PIT runs at 100 Hz -> 10 ms

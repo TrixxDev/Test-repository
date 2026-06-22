@@ -137,7 +137,9 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     kprintf("[boot] probing network...\n");
     virtio_net_init();      /* PCI scan for virtio-net (no-op if absent) */
     net_init();             /* ARP cache + protocol layers */
-    net_selftest();         /* Phase 4/5 proof: Ethernet + ARP (no-op if absent) */
+    if (cmdline_has_word(mb, "nettest"))
+        net_selftest();     /* opt-in self-test (ping/UDP/DNS/TCP); off by default
+                             * so a NIC-equipped GUI boot reaches the desktop fast */
 
     kprintf("[boot] scheduler + process model...\n");
     scheduler_init();

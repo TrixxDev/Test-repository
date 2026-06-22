@@ -156,6 +156,8 @@ def main():
     ap.add_argument("--append", default="", help="extra kernel cmdline words (after 'vbe')")
     ap.add_argument("--delay", type=float, default=6.0, help="boot settle seconds")
     ap.add_argument("--serial", default="", help="write the serial log here too")
+    ap.add_argument("--net", action="store_true", help="attach a virtio-net NIC (user/SLIRP)")
+    ap.add_argument("--pcap", default="", help="dump NIC traffic to this pcap file")
     args = ap.parse_args()
 
     tmp = tempfile.mkdtemp(prefix="aurora-shot-")
@@ -173,6 +175,10 @@ def main():
         "-qmp", "unix:%s,server,nowait" % qmps,
         "-no-reboot", "-no-shutdown",
     ]
+    if args.net:
+        qemu += ["-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0"]
+        if args.pcap:
+            qemu += ["-object", "filter-dump,id=d0,netdev=n0,file=" + args.pcap]
     proc = subprocess.Popen(qemu, stderr=subprocess.DEVNULL)
     s = None
     try:
