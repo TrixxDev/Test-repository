@@ -9,6 +9,7 @@
 #include "hmac_sha256.h"
 #include "hkdf.h"
 #include "chacha20.h"
+#include "poly1305.h"
 
 static int failures;
 
@@ -194,6 +195,35 @@ int main(void)
               "f91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d8"
               "07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736"
               "5af90bbf74a35be6b40b8eedf2785e42874d");
+    }
+
+    printf("Poly1305 (RFC 8439):\n");
+    {   /* §2.5.2 — the canonical vector */
+        uint8_t key[32], t[16];
+        unhex("85d6be7857556d337f4452fe42d506a8"
+              "0103808afb0db2fd4abff6af4149f51b", key);
+        const char *m = "Cryptographic Forum Research Group";
+        poly1305_auth(t, (const uint8_t *)m, 34, key);
+        check("RFC 2.5.2 (34-byte)", t, 16, "a8061dc1305136c6c22b8baf0c0127a9");
+    }
+    {   /* Block-boundary lengths 0/1/15/16/17. Expected tags are from an
+         * independent reference (OpenSSL 3 `openssl mac POLY1305`), key =
+         * ASCII "this is 32-byte key for Poly1305", msg = bytes 0x01,0x02,... */
+        uint8_t key[32], msg[17], t[16];
+        for (int i = 0; i < 32; i++)
+            key[i] = (uint8_t)"this is 32-byte key for Poly1305"[i];
+        for (int i = 0; i < 17; i++) msg[i] = (uint8_t)(i + 1);
+
+        poly1305_auth(t, msg, 0,  key);   /* empty -> tag == s == key[16..31] */
+        check("len 0  (empty)",  t, 16, "6b657920666f7220506f6c7931333035");
+        poly1305_auth(t, msg, 1,  key);
+        check("len 1",           t, 16, "df414b8d89f84e9480d1cba8ab1f0a9b");
+        poly1305_auth(t, msg, 15, key);
+        check("len 15 (partial)", t, 16, "db5b4f3c41d3602dcbe6c1c03b41e244");
+        poly1305_auth(t, msg, 16, key);
+        check("len 16 (1 block)", t, 16, "d416d3589c8af931f434a38d19816811");
+        poly1305_auth(t, msg, 17, key);
+        check("len 17 (block+1)", t, 16, "540308e44971bfd8d85f717ad9bdfaac");
     }
 
     printf(failures ? "\nCRYPTO TEST: %d FAILURE(S)\n" : "\nCRYPTO TEST: ALL PASS\n", failures);

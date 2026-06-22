@@ -20,7 +20,8 @@ Run the vectors: `make crypto-test`.
 | 2 | **HMAC-SHA256** (`crypto/hmac_sha256.c`) | RFC 4231 | ✅ |
 | 3 | **HKDF** (Extract/Expand) (`crypto/hkdf.c`) | RFC 5869 | ✅ |
 | 4 | **ChaCha20** (`crypto/chacha20.c`) | RFC 8439 | ✅ |
-| 5 | Poly1305 → ChaCha20-Poly1305 AEAD | RFC 8439 | next |
+| 5 | **Poly1305** (`crypto/poly1305.c`) | RFC 8439 + OpenSSL | ✅ |
+| 5b | ChaCha20-Poly1305 AEAD | RFC 8439 | next |
 | 6 | TLS record layer (encrypt/decrypt, no handshake) | local round-trip | later |
 | 7 | TLS 1.3 client handshake → HTTPS GET | real `https://` site | later |
 
@@ -91,3 +92,25 @@ ChaCha20 (RFC 8439):  quarter-round (§2.1.1) / state quarter-round (§2.2.1)
 
 A bug at any level invalidates everything above it, so the quarter-round is
 proven first, then the block function, then real XOR encryption end-to-end.
+
+## Step 5 — Poly1305 (RFC 8439)
+
+A pure one-time authenticator: `poly1305_auth(tag, msg, len, key)` — message plus
+a one-time 32-byte key → a 16-byte tag, nothing TLS-specific. Arithmetic is mod
+2^130-5 in five 26-bit limbs (the "donna-32" representation), so it needs only
+32×32→64-bit multiplies and no 128-bit type — fine for plain i686.
+
+Block boundaries are where Poly1305 implementations usually break, so beyond the
+canonical RFC §2.5.2 vector the harness checks lengths 0, 1, 15, 16, 17. Those
+expected tags come from an **independent** reference (OpenSSL 3's
+`openssl mac POLY1305`), not from this code, so they are real known-answer tests:
+
+```
+Poly1305 (RFC 8439):  RFC 2.5.2 (34-byte)
+                      len 0 / 1 / 15 / 16 / 17  (vs OpenSSL)   -> PASS
+```
+
+`len 0` lands on `tag == s == key[16..31]`, confirming the empty-message path.
+
+> **One-time key:** Poly1305 is only secure if each key authenticates exactly one
+> message. The AEAD step derives a fresh Poly1305 key per record from ChaCha20.
