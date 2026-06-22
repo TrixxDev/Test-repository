@@ -8,6 +8,7 @@
 #include "sha256.h"
 #include "hmac_sha256.h"
 #include "hkdf.h"
+#include "chacha20.h"
 
 static int failures;
 
@@ -20,12 +21,22 @@ static void tohex(const uint8_t *b, int n, char *out)
 
 static void check(const char *name, const uint8_t *got, int n, const char *want)
 {
-    char hex[129];
+    char hex[513];      /* up to 256 bytes -> 512 hex chars + NUL */
     tohex(got, n, hex);
     if (strcmp(hex, want) == 0) {
         printf("  PASS  %s\n", name);
     } else {
         printf("  FAIL  %s\n        got  %s\n        want %s\n", name, hex, want);
+        failures++;
+    }
+}
+
+static void check_u32(const char *name, uint32_t got, uint32_t want)
+{
+    if (got == want) {
+        printf("  PASS  %s\n", name);
+    } else {
+        printf("  FAIL  %s\n        got  %08x\n        want %08x\n", name, got, want);
         failures++;
     }
 }
@@ -138,6 +149,51 @@ int main(void)
         check("case 3 OKM (no info)", okm, 42,
               "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d"
               "9d201395faa4b61a96c8");
+    }
+
+    printf("ChaCha20 (RFC 8439):\n");
+    {   /* §2.1.1 — the quarter-round on four words */
+        uint32_t a = 0x11111111, b = 0x01020304, c = 0x9b8d6f43, e = 0x01234567;
+        chacha20_quarterround(&a, &b, &c, &e);
+        check_u32("quarter-round a", a, 0xea2a92f4);
+        check_u32("quarter-round b", b, 0xcb1cf8ce);
+        check_u32("quarter-round c", c, 0x4581472e);
+        check_u32("quarter-round d", e, 0x5881c4bb);
+    }
+    {   /* §2.2.1 — the quarter-round applied to indices (2,7,8,13) of a state */
+        uint32_t s[16] = {
+            0x879531e0, 0xc5ecf37d, 0x516461b1, 0xc9a62f8a,
+            0x44c20ef3, 0x3390af7f, 0xd9fc690b, 0x2a5f714c,
+            0x53372767, 0xb00a5631, 0x974c541a, 0x359e9963,
+            0x5c971061, 0x3d631689, 0x2098d9d6, 0x91dbd320 };
+        chacha20_quarterround(&s[2], &s[7], &s[8], &s[13]);
+        check_u32("state QR x[2]",  s[2],  0xbdb886dc);
+        check_u32("state QR x[7]",  s[7],  0xcfacafd2);
+        check_u32("state QR x[8]",  s[8],  0xe46bea80);
+        check_u32("state QR x[13]", s[13], 0xccc07c79);
+    }
+    {   /* §2.3.2 — the block function: key 00..1f, nonce ..0900..4a.., counter 1 */
+        uint8_t key[32], nonce[12] = {0,0,0,0x09, 0,0,0,0x4a, 0,0,0,0}, ks[64];
+        for (int i = 0; i < 32; i++) key[i] = (uint8_t)i;
+        chacha20_ctx c; chacha20_init(&c, key, nonce, 1);
+        chacha20_block(&c, ks);
+        check("block keystream (counter 1)", ks, 64,
+              "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4e"
+              "d2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e");
+    }
+    {   /* §2.4.2 — full encryption: same key, nonce ..00..4a.., counter 1 */
+        uint8_t key[32], nonce[12] = {0,0,0,0, 0,0,0,0x4a, 0,0,0,0}, out[114];
+        for (int i = 0; i < 32; i++) key[i] = (uint8_t)i;
+        const char *pt = "Ladies and Gentlemen of the class of '99: If I "
+                         "could offer you only one tip for the future, "
+                         "sunscreen would be it.";
+        chacha20_ctx c; chacha20_init(&c, key, nonce, 1);
+        chacha20_xor(&c, (const uint8_t *)pt, out, strlen(pt));
+        check("encrypt 114-byte plaintext", out, 114,
+              "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0b"
+              "f91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d8"
+              "07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736"
+              "5af90bbf74a35be6b40b8eedf2785e42874d");
     }
 
     printf(failures ? "\nCRYPTO TEST: %d FAILURE(S)\n" : "\nCRYPTO TEST: ALL PASS\n", failures);
