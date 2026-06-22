@@ -28,6 +28,7 @@ Run the vectors: `make crypto-test`.
 | 9 | **Handshake messages v1** (`tls/handshake.c`) — ClientHello/ServerHello/Finished | RFC 8446 §4 | ✅ |
 | 10 | **Client handshake FSM core** (`tls/client.c`) — event-driven, no network | RFC 8446 §4 / §A.1 | ✅ |
 | 11 | **Record binding** (`tls/conn.c`) — phase gating, key switch, reassembly | RFC 8446 §5 | ✅ |
+| 11b | **RFC 8448 trace runner** (`tools/tls_trace_test.c`) — engine vs real bytes | RFC 8448 §3 | ✅ |
 | 12 | Certificate / signature validation | RFC 8446 §4.4 | next |
 | 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
@@ -171,7 +172,7 @@ the weak point; TLS/HTTPS now is:
 | Networking (L2–L4, DNS, sockets) | ████████▌░ |
 | TCP (retransmit; no RTT est. yet) | ███████▌░░ |
 | Crypto — symmetric primitives | █████████░ |
-| TLS 1.3 client (handshake + record binding; no cert trust) | ███████░░░ |
+| TLS 1.3 client (handshake + record binding, RFC 8448-verified; no cert trust) | ████████░░ |
 | Certificate / X.509 PKI | ░░░░░░░░░░ |
 | GPU acceleration | █░░░░░░░░░ |
 | x86_64 port | ░░░░░░░░░░ |
@@ -388,3 +389,37 @@ With the FSM now driven over real encrypted records, the only thing standing
 between Aurora and a live `https://` server is trust: parsing the Certificate
 chain and verifying CertificateVerify — the X.509 / signature layer (step 12),
 which `conn.c` deliberately leaves as a blind transcript for now.
+
+## Step 11b — RFC 8448 trace runner (RFC 8448 §3)
+
+Before touching certificates, the whole protocol engine is frozen against an
+authoritative reference: `make tls-trace-test` replays RFC 8448's published
+"Simple 1-RTT Handshake" and checks **every derived value byte-for-byte** against
+the document. The constants are extracted programmatically from the RFC text, not
+transcribed by hand, so the test is a real known-answer baseline.
+
+RFC 8448 negotiates `TLS_AES_128_GCM_SHA256`, while our record layer is
+ChaCha20-Poly1305, so the trace's *encrypted records* can't be opened by our AEAD
+(that would need AES-GCM, which we don't implement). That is fine: the record
+layer is already pinned separately (step 6 + step 11), and what this runner
+validates is the **cipher-independent protocol engine** on real RFC bytes — the
+same operations the FSM / conn perform internally:
+
+```
+RFC 8448 trace:  X25519: client/server public keys + ECDHE shared secret
+                 ServerHello parses (cipher 0x1301, key_share) from real bytes
+                 Transcript-Hash(ClientHello..ServerHello)
+                 Early / Handshake / Master + client&server hs-traffic secrets
+                 handshake-epoch write key+iv (server & client) via Expand-Label
+                 EncryptedExtensions / Certificate / CertificateVerify framing
+                 server Finished verify_data        (== RFC, and our checker accepts it)
+                 Transcript-Hash(ClientHello..server Finished)
+                 client Finished verify_data        (== RFC)
+                 client&server application-traffic secrets + write key+iv
+   -> 30 byte-exact checks, TLS TRACE: ALL PASS
+```
+
+This is the proof the handshake math is RFC-correct independent of the AEAD and of
+certificates: both peers' Finished values and the application secrets reproduce
+the RFC to the byte. It freezes a regression baseline so the upcoming PKI layer
+can be debugged on its own, never confused with a handshake-engine bug.

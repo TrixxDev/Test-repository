@@ -181,6 +181,13 @@ tls-test:
 	$(CC) -O2 -Icrypto -Itls tools/tls_test.c tls/record.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c -o /tmp/aurora_tls_test
 	/tmp/aurora_tls_test
 
+# RFC 8448 trace runner: replays the published Simple 1-RTT Handshake through the
+# tls/ engine and checks every derived value byte-for-byte against the RFC.
+.PHONY: tls-trace-test
+tls-trace-test:
+	$(CC) -O2 -Icrypto -Itls tools/tls_trace_test.c tls/transcript.c tls/key_schedule.c tls/handshake.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/x25519.c -o /tmp/aurora_tls_trace_test
+	/tmp/aurora_tls_trace_test
+
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
 SCREENSHOT := aurora_desktop.png
