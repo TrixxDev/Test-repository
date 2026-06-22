@@ -25,9 +25,10 @@ Run the vectors: `make crypto-test`.
 | 6 | **TLS 1.3 record layer** (`tls/record.c`) | RFC 8446 §5 round-trip | ✅ |
 | 7 | **X25519** (ECDHE key exchange) (`crypto/x25519.c`) | RFC 7748 | ✅ |
 | 8 | **Transcript hash + key schedule** (`tls/transcript.c`, `tls/key_schedule.c`) | RFC 8448 §3 trace | ✅ |
-| 9 | TLS 1.3 client handshake state machine | RFC 8446 §4 | next |
-| 10 | Certificate / signature validation | RFC 8446 §4.4 | later |
-| 11 | HTTPS GET in Aurora Fetch | real `https://` site | later |
+| 9 | **Handshake messages v1** (`tls/handshake.c`) — ClientHello/ServerHello/Finished | RFC 8446 §4 | ✅ |
+| 10 | Handshake state machine + record integration | RFC 8446 §4 | next |
+| 11 | Certificate / signature validation | RFC 8446 §4.4 | later |
+| 12 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -270,3 +271,35 @@ The chain is end-to-end: our X25519 produces the shared secret, which flows
 through the whole schedule to byte-exact agreement with the RFC. What is left is
 sequencing — feeding real ClientHello/ServerHello bytes through this code in a
 handshake state machine — plus certificate/signature validation.
+
+## Step 9 — handshake messages v1 (RFC 8446 §4)
+
+The deterministic message core, no certificates yet: build ClientHello, parse
+ServerHello, and the Finished verify_data. Only the extensions 1-RTT ECDHE needs
+(key_share, supported_versions, supported_groups, signature_algorithms, SNI).
+
+- `tls_build_client_hello` serializes a real ClientHello (length-back-patched
+  writer) offering `TLS_CHACHA20_POLY1305_SHA256` + an x25519 key_share.
+- `tls_parse_server_hello` is bounds-checked, walks the extensions, and pulls out
+  the negotiated cipher suite and the server's x25519 key_share.
+- `tls_finished_key` / `tls_finished_verify_data` / `tls_check_finished` — the
+  Finished danger zone, kept tiny: `finished_key = HKDF-Expand-Label(secret,
+  "finished", "", 32)` and `verify_data = HMAC(finished_key, transcript_hash)`,
+  checked in constant time. HKDF-Expand-Label is already pinned to RFC 8448 for
+  the `key`/`iv` labels, so `finished` is correct by the same code path.
+
+The headline test is a full **loopback handshake** — no hardcoded server, no
+network:
+
+```
+handshake (loopback):  client builds ClientHello, server builds ServerHello
+                       -> ServerHello parses, cipher + key_share extracted
+                       -> X25519 agrees on both sides
+                       -> client & server derive identical handshake-traffic
+                          secrets from transcript(CH||SH)
+                       -> Finished verifies; one flipped byte is rejected
+```
+
+This is the proof the whole pipeline composes: two independent peers exchange
+real handshake bytes and converge on the same keys. What remains is driving it as
+an event-driven state machine over the record layer, then certificate trust.

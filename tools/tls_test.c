@@ -12,6 +12,7 @@
 #include "record.h"
 #include "transcript.h"
 #include "key_schedule.h"
+#include "handshake.h"
 #include "chacha20poly1305.h"
 #include "x25519.h"
 
@@ -54,6 +55,43 @@ static int unhex(const char *s, uint8_t *out)
         int lo = s[1] <= '9' ? s[1]-'0' : (s[1]|32)-'a'+10;
         out[n++] = (uint8_t)((hi << 4) | lo);
     }
+    return n;
+}
+
+/* Does haystack contain needle? (for structural ClientHello checks) */
+static int contains(const uint8_t *hay, size_t hn, const uint8_t *need, size_t nn)
+{
+    if (nn > hn) return 0;
+    for (size_t i = 0; i + nn <= hn; i++) {
+        size_t j = 0; while (j < nn && hay[i+j] == need[j]) j++;
+        if (j == nn) return 1;
+    }
+    return 0;
+}
+
+/* Minimal ServerHello builder for exercising the parser (the client never builds
+ * one; a loopback "server" does). Returns the message length. */
+static int build_server_hello(uint8_t *o, const uint8_t random[32],
+                              uint16_t cipher, const uint8_t pub[32])
+{
+    int n = 0;
+    o[n++] = TLS_HS_SERVER_HELLO; o[n++] = 0; /* len hi24 patched below */
+    int lenpos = n; n += 2;
+    o[n++] = 0x03; o[n++] = 0x03;             /* legacy_version */
+    for (int i=0;i<32;i++) o[n++] = random[i];
+    o[n++] = 32; for (int i=0;i<32;i++) o[n++] = 0;   /* session_id_echo */
+    o[n++] = (uint8_t)(cipher>>8); o[n++] = (uint8_t)cipher;
+    o[n++] = 0;                               /* legacy_compression_method */
+    int extpos = n; n += 2;                    /* extensions length */
+    /* supported_versions (43): selected_version 0x0304 (no list in SH) */
+    o[n++]=0;o[n++]=43; o[n++]=0;o[n++]=2; o[n++]=0x03;o[n++]=0x04;
+    /* key_share (51): single KeyShareEntry { group, klen, key } */
+    o[n++]=0;o[n++]=51; o[n++]=0;o[n++]=36;
+    o[n++]=0x00;o[n++]=0x1d; o[n++]=0;o[n++]=32; for(int i=0;i<32;i++) o[n++]=pub[i];
+    int extlen = n - extpos - 2;
+    o[extpos] = (uint8_t)(extlen>>8); o[extpos+1] = (uint8_t)extlen;
+    int body = n - 4;
+    o[lenpos] = (uint8_t)(body>>8); o[lenpos+1] = (uint8_t)body;  /* 24-bit len, hi byte 0 */
     return n;
 }
 
@@ -206,6 +244,63 @@ int main(void)
         tls_traffic_keys(ks.server_hs_traffic, key, 16, iv, 12);
         check("server write key (expand-label)", key, 16, "3fce516009c21727d0f2e4e86ee403bc");
         check("server write iv  (expand-label)", iv, 12, "5d313eb2671276ee13000b30");
+    }
+
+    printf("TLS 1.3 handshake messages (RFC 8446 §4):\n");
+    {
+        /* deterministic ephemeral keys for client and server */
+        uint8_t cpriv[32], cpub[32], spriv[32], spub[32], crand[32], srand[32];
+        for (int i=0;i<32;i++) { cpriv[i]=(uint8_t)(i+1); spriv[i]=(uint8_t)(0x80+i);
+                                 crand[i]=(uint8_t)(0xa0+i); srand[i]=(uint8_t)(0x50+i); }
+        x25519_base(cpub, cpriv);
+        x25519_base(spub, spriv);
+
+        /* ClientHello: structurally well-formed, carries our key_share + SNI */
+        uint8_t ch[1024];
+        int chlen = tls_build_client_hello(ch, sizeof ch, crand, cpub, "example.com");
+        check_int("ClientHello builds", chlen > 0, 1);
+        check_int("ClientHello type == client_hello", ch[0], TLS_HS_CLIENT_HELLO);
+        check_int("ClientHello length field consistent",
+                  (int)(((ch[1]<<16)|(ch[2]<<8)|ch[3]) == chlen - 4), 1);
+        check_int("ClientHello carries our key_share", contains(ch, chlen, cpub, 32), 1);
+        check_int("ClientHello carries SNI host",
+                  contains(ch, chlen, (const uint8_t*)"example.com", 11), 1);
+
+        /* ServerHello: parse extracts the cipher suite and server key_share */
+        uint8_t sh[256];
+        int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        uint16_t suite = 0; uint8_t got_spub[32];
+        check_int("ServerHello parses", tls_parse_server_hello(sh, shlen, &suite, got_spub), 0);
+        check_int("negotiated ChaCha20-Poly1305", suite == TLS_CIPHER_CHACHA20_POLY1305_SHA256, 1);
+        check_int("server key_share extracted", memcmp(got_spub, spub, 32) == 0, 1);
+
+        /* end-to-end loopback: both sides reach identical handshake secrets */
+        uint8_t cs[32], ss[32], hello_hash[32];
+        x25519(cs, cpriv, got_spub);    /* client: priv_c * pub_s */
+        x25519(ss, spriv, cpub);        /* server: priv_s * pub_c */
+        check_int("ECDHE agrees on both sides", memcmp(cs, ss, 32) == 0, 1);
+
+        tls_transcript tr; tls_transcript_init(&tr);
+        tls_transcript_update(&tr, ch, chlen);
+        tls_transcript_update(&tr, sh, shlen);
+        tls_transcript_hash(&tr, hello_hash);
+
+        tls_key_schedule kc, ksv;
+        tls_key_schedule_derive(&kc, cs, hello_hash);
+        tls_key_schedule_derive(&ksv, ss, hello_hash);
+        check_int("client/server agree: server hs traffic",
+                  memcmp(kc.server_hs_traffic, ksv.server_hs_traffic, 32) == 0, 1);
+        check_int("client/server agree: client hs traffic",
+                  memcmp(kc.client_hs_traffic, ksv.client_hs_traffic, 32) == 0, 1);
+
+        /* Finished round-trip over a transcript hash */
+        uint8_t fk[32], vd[32], thash[32];
+        tls_transcript_hash(&tr, thash);             /* stand-in transcript point */
+        tls_finished_key(fk, ksv.server_hs_traffic);
+        tls_finished_verify_data(vd, fk, thash);
+        check_int("peer Finished verifies", tls_check_finished(fk, thash, vd), 0);
+        uint8_t bad[32]; memcpy(bad, vd, 32); bad[0] ^= 1;
+        check_int("tampered Finished rejected", tls_check_finished(fk, thash, bad), -1);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);
