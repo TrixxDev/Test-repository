@@ -18,8 +18,8 @@ Run the vectors: `make crypto-test`.
 |------|-------|------------------|--------|
 | 1 | **SHA-256** (`crypto/sha256.c`) | NIST FIPS 180-4 | ✅ |
 | 2 | **HMAC-SHA256** (`crypto/hmac_sha256.c`) | RFC 4231 | ✅ |
-| 3 | HKDF (Extract/Expand) | RFC 5869 | next |
-| 4 | ChaCha20 | RFC 8439 | later |
+| 3 | **HKDF** (Extract/Expand) (`crypto/hkdf.c`) | RFC 5869 | ✅ |
+| 4 | ChaCha20 | RFC 8439 | next |
 | 5 | Poly1305 → ChaCha20-Poly1305 AEAD | RFC 8439 | later |
 | 6 | TLS record layer (encrypt/decrypt, no handshake) | local round-trip | later |
 | 7 | TLS 1.3 client handshake → HTTPS GET | real `https://` site | later |
@@ -41,3 +41,20 @@ CRYPTO TEST: ALL PASS
 
 HMAC-SHA256 is the workhorse the next steps build on: HKDF (TLS 1.3's entire key
 schedule), Poly1305 keying, and token/signature checks.
+
+## Step 3 — HKDF (RFC 5869)
+
+`hkdf_extract(salt, ikm) -> prk` is just `HMAC-SHA256(salt, ikm)` (a zero salt of
+`HashLen` bytes when none is given); `hkdf_expand(prk, info, len) -> okm` is the
+`T(i) = HMAC(prk, T(i-1) | info | i)` counter loop, truncated to `len`. Both are
+freestanding (a single fixed `T(i-1) | info | i` buffer, no allocation). `make
+crypto-test` runs all three RFC 5869 SHA-256 vectors (PRK **and** OKM):
+
+```
+HKDF-SHA256 (RFC 5869):  case 1 (salt+info) / case 2 (80-byte inputs, 82-byte OKM)
+                         / case 3 (no salt, no info)   -> PASS
+```
+
+This is the pivot point for TLS 1.3: its key schedule is `HKDF-Extract` plus
+`Derive-Secret`/`HKDF-Expand-Label`, both thin wrappers over these two calls, so
+the handshake's secret derivation becomes mechanical once the AEAD is in place.
