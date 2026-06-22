@@ -168,6 +168,13 @@ gui-vnc: iso
 	    -drive file=aurora.iso,format=raw,if=ide,index=2,media=cdrom \
 	    -boot order=d
 
+# Verify the portable crypto/ primitives against known-answer vectors (NIST /
+# RFC 4231), natively on the host — no QEMU, each primitive checked in isolation.
+.PHONY: crypto-test
+crypto-test:
+	$(CC) -O2 -Icrypto tools/crypto_test.c crypto/sha256.c crypto/hmac_sha256.c -o /tmp/aurora_crypto_test
+	/tmp/aurora_crypto_test
+
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
 SCREENSHOT := aurora_desktop.png
