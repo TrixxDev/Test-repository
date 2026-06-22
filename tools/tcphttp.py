@@ -41,10 +41,16 @@ qemu = subprocess.Popen([
     '-display', 'none', '-serial', f'file:{SERIAL}', '-no-reboot', '-append', 'nettest',
 ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-served = False
-try:
-    conn, peer = srv.accept()
-    conn.settimeout(5)
+served = 0
+srv.settimeout(20)
+# Serve every connection the guest opens (the self-test makes several: a plain
+# fetch and the retransmission test), until the guest goes quiet.
+while True:
+    try:
+        conn, peer = srv.accept()
+    except socket.timeout:
+        break
+    conn.settimeout(6)
     req = b''
     try:
         while b"\r\n\r\n" not in req:
@@ -58,9 +64,10 @@ try:
         if line: print('   |', line)
     conn.sendall(RESP)
     print(f'[host] sent {len(RESP)}-byte HTTP/1.0 200 response')
-    served = bool(req)
+    served += bool(req)
     conn.close()
-except socket.timeout:
+    srv.settimeout(6)               # shorter wait for any further connections
+if served == 0:
     print('[host] TIMEOUT: no TCP connection from guest')
 
 time.sleep(8)

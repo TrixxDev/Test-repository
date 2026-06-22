@@ -179,6 +179,44 @@ int net_http_get(const char *host, const char *path, char *buf, unsigned cap)
     return (int)total;
 }
 
+/* Phase 8.7: open a connection, drop the GET's first transmission, and confirm
+ * the RTO timer resends it and the fetch still completes. Uses a low-latency
+ * target (the local harness) so the retransmit count is exactly the induced one. */
+static void tcp_retransmit_test(uint32_t ip, uint16_t port, const char *label)
+{
+    int h = tcp_connect(ip, port);
+    if (h < 0) { kprintf("[tcp] retransmit test: no free connection\n"); return; }
+    uint64_t cdl = net_now_ms() + 4000;
+    while (net_now_ms() < cdl &&
+           tcp_state(h) != TCP_ESTABLISHED && tcp_state(h) != TCP_CLOSED)
+        net_poll();
+    if (tcp_state(h) != TCP_ESTABLISHED) {
+        kprintf("[tcp] retransmit test (%s): no server, skipped\n", label);
+        return;
+    }
+
+    struct tcp_stats rb, ra;
+    tcp_get_stats(&rb);
+    tcp_test_drop_next_data();                  /* lose the GET on first send */
+    const char *req = "GET / HTTP/1.0\r\nHost: aurora\r\nConnection: close\r\n\r\n";
+    int rl = 0; while (req[rl]) rl++;
+    tcp_send(h, req, rl);
+
+    char page[256]; int total = 0;
+    uint64_t dl = net_now_ms() + 6000;
+    while (net_now_ms() < dl) {
+        net_poll();
+        int g = tcp_recv(h, page + total, sizeof(page) - total);
+        if (g > 0) total += g;
+        if (tcp_state(h) == TCP_CLOSED || tcp_state(h) == TCP_TIME_WAIT) break;
+    }
+    tcp_get_stats(&ra);
+    tcp_close(h);
+    kprintf("[tcp] retransmit test (%s): dropped GET, got %d bytes, retransmits %u->%u (%s)\n",
+            label, total, rb.retransmits, ra.retransmits,
+            (ra.retransmits > rb.retransmits && total > 0) ? "RECOVERED" : "FAIL");
+}
+
 /* Phase 6 milestone: ping `dst` `count` times, reporting RTT per reply. Drives
  * the whole stack (Ethernet/ARP/IPv4/ICMP/checksum) in one round-trip each.
  * Returns the number of replies received. */
@@ -314,6 +352,13 @@ void net_selftest(void)
      * tcphttp.py harness on 10.0.2.2:80), then -- if DNS resolved and the network
      * policy allows outbound TCP -- from the real site over the internet. */
     tcp_http_get(IP_GATEWAY, TCP_TEST_PORT, "10.0.2.2");
+
+    /* Phase 8.7: retransmission. Drop the GET on its first send against the local
+     * harness (low latency -> the only retransmit is the induced one); the RTO
+     * timer must resend it and the fetch must still complete. Kept next to the
+     * local fetch so both harness connections happen back to back. */
+    tcp_retransmit_test(IP_GATEWAY, TCP_TEST_PORT, "10.0.2.2");
+
     if (hip)
         tcp_http_get(hip, 80, host);
 

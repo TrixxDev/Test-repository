@@ -273,8 +273,30 @@ The transport is done and audited; everything below is protocol logic over
 | 8.3 | **TCP teardown** — FIN_WAIT_1/2, CLOSING, CLOSE_WAIT, LAST_ACK, TIME_WAIT | **HTTP fetch closes to CLOSED** | ✅ |
 | 8.5 | **Aurora Fetch** — first network GUI app (`http_get` syscall) | **fetch a web page from the internet, show it in the Viewer** | ✅ |
 | 8.6 | **Multiple TCBs** — connection table + handle-based API | several connections at once | ✅ |
-| 8.7 | TCP retransmission | reliability on a lossy path | next |
-| 8.8 | Socket API (`socket/connect/send/recv/close`) | user sockets, netd boundary | later |
+| 8.7 | **TCP retransmission** — RTO timer + 1-segment cache | **dropped GET recovers** | ✅ |
+| 8.8 | Socket API (`socket/connect/send/recv/close`) | user sockets, netd boundary | next |
+
+## Phase 8.7 — Retransmission (survive packet loss)
+
+In QEMU/SLIRP packets almost never drop, but on a real path loss is inevitable —
+a lost SYN, GET or ACK would otherwise hang a connection forever. Minimal,
+deliberately not RFC 6298: each connection caches **its one outstanding
+sequence-consuming segment** (SYN / data / FIN — a pure ACK is never resent). On
+RTO with no acknowledgement, `tcp_tick` resends it (refreshing the ack/window);
+an ACK past the segment's end clears the cache. Initial RTO 1 s, doubling to an
+8 s cap, giving up after 5 tries (→ CLOSED). Adaptive RTO from RTT samples is the
+future refinement that would also remove the occasional spurious retransmit on a
+slow path.
+
+Proven with a test hook that drops the GET's first transmission against the
+low-latency local harness, so the only retransmit is the induced one:
+
+```
+[tcp] retransmit test (10.0.2.2): dropped GET, got 116 bytes, retransmits 0->1 (RECOVERED)
+```
+
+The RTO timer resent the lost segment and the fetch completed — exactly one
+retransmission, full response received.
 
 ## Phase 8.6 — Multiple connections (off the singleton)
 

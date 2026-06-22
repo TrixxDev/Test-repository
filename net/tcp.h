@@ -85,3 +85,7 @@ void        tcp_get_stats(struct tcp_stats *out);
 /* Handle one TCP segment (IPv4 payload) from host-order `src` (demuxed to the
  * matching connection by 4-tuple). */
 void        tcp_input(uint32_t src, const void *segment, size_t len);
+
+/* Test hook: silently drop the next data segment's first transmission, forcing a
+ * retransmission (used by the self-test to exercise loss recovery). */
+void        tcp_test_drop_next_data(void);

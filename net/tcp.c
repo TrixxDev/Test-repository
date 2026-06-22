@@ -28,6 +28,23 @@ struct tcp_hdr {
 #define TCP_RX_CAP    8192          /* per-connection receive buffer */
 #define TCP_TX_MAX    1400          /* one segment, well under the MTU */
 #define TCP_TIME_WAIT_MS 1000       /* shortened 2*MSL (real TCP: minutes) */
+#define TCP_RTO_MS    1000          /* initial retransmit timeout (RFC 6298) */
+#define TCP_RTO_MAX   8000          /* backoff cap */
+#define TCP_MAX_RETX  5             /* give up after this many resends */
+
+/* Minimal retransmission: cache the one outstanding sequence-consuming segment
+ * (SYN / data / FIN); a pure ACK is never retransmitted. On RTO with no ACK, the
+ * segment is resent (with a refreshed ack/window); on ACK past its end, cleared. */
+struct rtx {
+    uint8_t   data[TCP_TX_MAX];
+    unsigned  len;              /* payload bytes */
+    uint8_t   flags;
+    uint32_t  seq;
+    int       pending;
+    uint64_t  last_ms;
+    uint32_t  rto_ms;
+    uint8_t   retries;
+};
 
 /* One connection: its control block plus the buffering/timer state the public
  * TCB shape doesn't carry. `used` slots that reach CLOSED are reused by the next
@@ -37,8 +54,11 @@ struct conn {
     uint8_t   rx_buf[TCP_RX_CAP];
     unsigned  rx_len, rx_read;
     uint64_t  tw_deadline;      /* TIME_WAIT -> CLOSED moment */
+    struct rtx rtx;
     int       used;
 };
+
+static int test_drop_data;      /* test hook: drop the next data segment once */
 
 static struct conn conns[TCP_MAX_CONN];
 static struct tcp_stats stats;
@@ -127,6 +147,50 @@ static int tcp_xmit(struct conn *c, uint8_t flags, uint32_t seq, uint32_t ack,
     return ipv4_send(c->tcb.remote_ip, IPPROTO_TCP, buf, total);
 }
 
+/* Sequence-consuming length of a segment (SYN and FIN each occupy one). */
+static uint32_t seg_len(uint8_t flags, unsigned len)
+{
+    return len + ((flags & TCP_SYN) ? 1 : 0) + ((flags & TCP_FIN) ? 1 : 0);
+}
+
+/* Send a sequence-consuming segment and cache it for retransmission. */
+static int tcp_xmit_track(struct conn *c, uint8_t flags, uint32_t seq,
+                          const void *data, unsigned len)
+{
+    if (len > TCP_TX_MAX) len = TCP_TX_MAX;
+
+    int r = 0;
+    if ((flags & TCP_PSH) && test_drop_data) {
+        test_drop_data = 0;             /* test hook: pretend this one was lost */
+    } else {
+        r = tcp_xmit(c, flags, seq, c->tcb.rcv_nxt, data, len);
+    }
+
+    if (data && len) memcpy(c->rtx.data, data, len);
+    c->rtx.len     = len;
+    c->rtx.flags   = flags;
+    c->rtx.seq     = seq;
+    c->rtx.pending = 1;
+    c->rtx.last_ms = net_now_ms();
+    c->rtx.rto_ms  = TCP_RTO_MS;
+    c->rtx.retries = 0;
+    return r;
+}
+
+void tcp_test_drop_next_data(void) { test_drop_data = 1; }
+
+/* Arm SYN retransmission (the SYN itself is sent by tcp_connect's ARP loop). */
+static void rtx_save_syn(struct conn *c)
+{
+    c->rtx.len = 0;
+    c->rtx.flags   = TCP_SYN;
+    c->rtx.seq     = c->tcb.iss;
+    c->rtx.pending = 1;
+    c->rtx.last_ms = net_now_ms();
+    c->rtx.rto_ms  = TCP_RTO_MS;
+    c->rtx.retries = 0;
+}
+
 int tcp_send(int h, const void *data, size_t len)
 {
     struct conn *c = conn_of(h);
@@ -134,7 +198,7 @@ int tcp_send(int h, const void *data, size_t len)
         return -1;
     if (len > TCP_TX_MAX)
         len = TCP_TX_MAX;                        /* one segment only, no splitting */
-    if (tcp_xmit(c, TCP_PSH | TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, data, (unsigned)len) != 0)
+    if (tcp_xmit_track(c, TCP_PSH | TCP_ACK, c->tcb.snd_nxt, data, (unsigned)len) != 0)
         return -1;
     c->tcb.snd_nxt += (uint32_t)len;            /* data consumes sequence space */
     return (int)len;
@@ -165,13 +229,13 @@ int tcp_close(int h)
     if (!c)
         return -1;
     if (c->tcb.state == TCP_ESTABLISHED) {              /* active close */
-        tcp_xmit(c, TCP_FIN | TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
+        tcp_xmit_track(c, TCP_FIN | TCP_ACK, c->tcb.snd_nxt, NULL, 0);
         c->tcb.snd_nxt += 1;                            /* FIN consumes a seq */
         c->tcb.state = TCP_FIN_WAIT_1;
         return 0;
     }
     if (c->tcb.state == TCP_CLOSE_WAIT) {               /* finish passive close */
-        tcp_xmit(c, TCP_FIN | TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
+        tcp_xmit_track(c, TCP_FIN | TCP_ACK, c->tcb.snd_nxt, NULL, 0);
         c->tcb.snd_nxt += 1;
         c->tcb.state = TCP_LAST_ACK;
         return 0;
@@ -182,10 +246,30 @@ int tcp_close(int h)
 void tcp_tick(void)
 {
     uint64_t now = net_now_ms();
-    for (int i = 0; i < TCP_MAX_CONN; i++)
-        if (conns[i].used && conns[i].tcb.state == TCP_TIME_WAIT &&
-            now >= conns[i].tw_deadline)
-            conns[i].tcb.state = TCP_CLOSED;
+    for (int i = 0; i < TCP_MAX_CONN; i++) {
+        struct conn *c = &conns[i];
+        if (!c->used)
+            continue;
+
+        /* Retransmit the outstanding segment if its RTO elapsed. */
+        if (c->rtx.pending && now - c->rtx.last_ms >= c->rtx.rto_ms) {
+            if (c->rtx.retries >= TCP_MAX_RETX) {       /* give up */
+                c->rtx.pending = 0;
+                c->tcb.state = TCP_CLOSED;
+            } else {
+                tcp_xmit(c, c->rtx.flags, c->rtx.seq, c->tcb.rcv_nxt,
+                         c->rtx.data, c->rtx.len);
+                c->rtx.last_ms = now;
+                c->rtx.retries++;
+                c->rtx.rto_ms = c->rtx.rto_ms < TCP_RTO_MAX / 2
+                              ? c->rtx.rto_ms * 2 : TCP_RTO_MAX;   /* backoff */
+                stats.retransmits++;
+            }
+        }
+
+        if (c->tcb.state == TCP_TIME_WAIT && now >= c->tw_deadline)
+            c->tcb.state = TCP_CLOSED;
+    }
 }
 
 /* Allocate a slot: prefer a never-used one, else reuse a CLOSED one. */
@@ -235,6 +319,7 @@ int tcp_connect(uint32_t dst, uint16_t port)
         c->tcb.state = TCP_CLOSED;
         return -1;
     }
+    rtx_save_syn(c);                            /* arm SYN retransmission */
     return h;
 }
 
@@ -287,6 +372,7 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
             c->tcb.snd_una = ack;
             c->tcb.snd_wnd = ntohs(h->window);
             c->tcb.state   = TCP_ESTABLISHED;
+            c->rtx.pending = 0;                  /* our SYN is acknowledged */
             stats.established++;
             tcp_xmit(c, TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);  /* finish */
         }
@@ -295,8 +381,15 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
 
     /* ESTABLISHED and every closing state: track ACKs, accept in-order data,
      * consume an in-order FIN, then advance the state machine. */
-    if ((flags & TCP_ACK) && (int32_t)(ack - c->tcb.snd_una) > 0)
+    if ((flags & TCP_ACK) && (int32_t)(ack - c->tcb.snd_una) > 0) {
         c->tcb.snd_una = ack;                    /* wrap-safe */
+        /* Clear the retransmit cache once its segment is fully acknowledged. */
+        if (c->rtx.pending) {
+            uint32_t end = c->rtx.seq + seg_len(c->rtx.flags, c->rtx.len);
+            if ((int32_t)(c->tcb.snd_una - end) >= 0)
+                c->rtx.pending = 0;
+        }
+    }
 
     unsigned hlen = (unsigned)((h->data_off >> 4) & 0x0f) * 4;
     if (hlen < sizeof(struct tcp_hdr) || hlen > len)
