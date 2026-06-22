@@ -79,6 +79,7 @@ int  sys_close(int fd);
 int  sys_readdir(const char *path, int index, struct dirent *out);
 int  sys_sysinfo(struct sysinfo *out);
 int  sys_netstat(struct net_stats *out);
+int  sys_tcpstat(struct tcp_stats *out);
 int  sys_sleep(int ms);
 int  sys_uiscale(int set);
 int  process_count(void);

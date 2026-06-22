@@ -57,6 +57,7 @@
 #define SYS_PERFUS  40  /* perf_us() -> microseconds since boot (low 32 bits),  */
                         /*   a high-resolution monotonic clock (RDTSC-based)    */
 #define SYS_NETSTAT 41  /* netstat(struct net_stats *out) -> 0/-1               */
+#define SYS_TCPSTAT 42  /* tcpstat(struct tcp_stats *out) -> 0/-1               */
 
 /* shm_create() flags (arg2). */
 #define SHM_PUBLIC  1   /* any process may shm_map the object (e.g. clipboard) */
@@ -81,6 +82,16 @@ struct net_stats {
     unsigned rx_dropped, tx_dropped;  /* frames rejected by bounds checks */
     unsigned rx_errors,  tx_errors;   /* runts/oversize (rx), timeouts (tx) */
     unsigned rx_irqs;           /* device interrupts serviced            */
+};
+
+/* ---- TCP statistics (SYS_TCPSTAT) ---- */
+struct tcp_stats {
+    unsigned connects;      /* tcp_connect() calls            */
+    unsigned established;   /* connections reaching ESTABLISHED */
+    unsigned resets;        /* RST segments received          */
+    unsigned retransmits;   /* (reserved; 0 until Phase 8.4)  */
+    unsigned fins;          /* in-order FINs consumed         */
+    unsigned drops;         /* segments dropped (csum/match)  */
 };
 
 /* ---- directory enumeration (SYS_READDIR) ---- */
@@ -108,7 +119,7 @@ struct dirent {
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
 
-#define SYS_MAX    42   /* one past the last valid syscall number    */
+#define SYS_MAX    43   /* one past the last valid syscall number    */
 
 /* ---- socket layer (AF_LOOPBACK only for now) ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

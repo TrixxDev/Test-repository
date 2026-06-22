@@ -263,4 +263,9 @@ void net_selftest(void)
             ipv4_rx_ok(), ipv4_rx_dropped(),
             s1.rx_packets, s1.rx_bytes, s1.tx_packets, s1.tx_bytes,
             s1.rx_dropped, s1.tx_dropped, s1.rx_errors, s1.tx_errors, s1.rx_irqs);
+
+    struct tcp_stats ts;
+    tcp_get_stats(&ts);
+    kprintf("[tcp] stats connects=%u established=%u resets=%u fins=%u drops=%u\n",
+            ts.connects, ts.established, ts.resets, ts.fins, ts.drops);
 }

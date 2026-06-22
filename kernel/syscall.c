@@ -191,6 +191,10 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)sys_netstat((struct net_stats *)regs->ebx);
         break;
 
+    case SYS_TCPSTAT:
+        regs->eax = (uint32_t)sys_tcpstat((struct tcp_stats *)regs->ebx);
+        break;
+
     case SYS_SHMDEL:
         regs->eax = (uint32_t)shm_destroy((int)regs->ebx);
         break;

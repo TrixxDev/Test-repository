@@ -34,13 +34,17 @@ static uint8_t  rx_buf[TCP_RX_CAP];
 static unsigned rx_len;             /* bytes accumulated */
 static unsigned rx_read;            /* bytes handed to tcp_recv */
 static uint64_t tw_deadline;        /* TIME_WAIT -> CLOSED moment */
+static struct tcp_stats stats;      /* lifetime counters */
 
 void tcp_init(void)
 {
     memset(&tcb, 0, sizeof(tcb));
     tcb.state = TCP_CLOSED;
     rx_len = rx_read = 0;
+    memset(&stats, 0, sizeof(stats));
 }
+
+void tcp_get_stats(struct tcp_stats *out) { if (out) *out = stats; }
 
 int tcp_state(void) { return tcb.state; }
 
@@ -167,6 +171,7 @@ int tcp_connect(uint32_t dst, uint16_t port)
     tcb.snd_nxt     = tcb.iss + 1;              /* SYN consumes one sequence */
     tcb.rcv_wnd     = TCP_RCV_WND;
     tcb.state       = TCP_SYN_SENT;
+    stats.connects++;
 
     /* Transmit the SYN; retry only while the next-hop ARP is still resolving
      * (this is not TCP retransmission — just getting the first SYN onto the
@@ -188,24 +193,33 @@ int tcp_connect(uint32_t dst, uint16_t port)
 
 void tcp_input(uint32_t src, const void *segment, size_t len)
 {
-    if (len < sizeof(struct tcp_hdr) || tcb.state == TCP_CLOSED)
+    if (tcb.state == TCP_CLOSED)
         return;
-    if (tcp_checksum(src, tcb.local_ip, (const uint8_t *)segment, (unsigned)len) != 0)
-        return;                                 /* bad checksum: drop */
+    if (len < sizeof(struct tcp_hdr)) {
+        stats.drops++;
+        return;
+    }
+    if (tcp_checksum(src, tcb.local_ip, (const uint8_t *)segment, (unsigned)len) != 0) {
+        stats.drops++;                          /* bad checksum: drop */
+        return;
+    }
 
     const struct tcp_hdr *h = (const struct tcp_hdr *)segment;
 
     /* Single-connection demux: must match our 4-tuple. */
     if (src != tcb.remote_ip ||
         ntohs(h->src_port) != tcb.remote_port ||
-        ntohs(h->dst_port) != tcb.local_port)
+        ntohs(h->dst_port) != tcb.local_port) {
+        stats.drops++;
         return;
+    }
 
     uint8_t  flags = h->flags;
     uint32_t seq   = ntohl(h->seq);
     uint32_t ack   = ntohl(h->ack);
 
     if (flags & TCP_RST) {                       /* peer refused / reset */
+        stats.resets++;
         tcb.state = TCP_CLOSED;
         return;
     }
@@ -218,6 +232,7 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
             tcb.snd_una = ack;
             tcb.snd_wnd = ntohs(h->window);
             tcb.state   = TCP_ESTABLISHED;
+            stats.established++;
             tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);  /* finish handshake */
         }
         return;
@@ -255,6 +270,7 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
     if ((flags & TCP_FIN) && (seq + plen) == tcb.rcv_nxt) {  /* in-order FIN */
         tcb.rcv_nxt += 1;                        /* FIN consumes a seq */
         fin = 1;
+        stats.fins++;
     }
     if (tcb.rcv_nxt != before)
         tcp_xmit(TCP_ACK, tcb.snd_nxt, tcb.rcv_nxt, NULL, 0);

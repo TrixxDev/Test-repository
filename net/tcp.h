@@ -8,6 +8,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include "syscall_abi.h"        /* struct tcp_stats (shared kernel/user ABI) */
 
 /* Full RFC 793 state set; only CLOSED / SYN_SENT / ESTABLISHED are reached in
  * Phase 1. The rest are declared so later phases don't renumber the enum. */
@@ -73,6 +74,9 @@ int         tcp_close(void);
 
 /* Drive time-based transitions (TIME_WAIT -> CLOSED). Call periodically. */
 void        tcp_tick(void);
+
+/* Snapshot the TCP counters. */
+void        tcp_get_stats(struct tcp_stats *out);
 
 /* Handle one TCP segment (IPv4 payload) from host-order `src`. */
 void        tcp_input(uint32_t src, const void *segment, size_t len);

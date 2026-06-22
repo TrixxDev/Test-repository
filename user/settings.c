@@ -186,6 +186,12 @@ static void redraw(void)
             line_kv(sx(238), "TX packets: ", ns.tx_packets, 0);
             line_kv(sx(258), "Dropped:    ",
                     ns.rx_dropped + ns.tx_dropped + ns.rx_errors + ns.tx_errors, 0);
+
+            struct tcp_stats ts;
+            memset(&ts, 0, sizeof(ts));
+            tcpstat(&ts);
+            line_kv(sx(278), "TCP conns:  ", ts.connects, 0);
+            line_kv(sx(298), "TCP estab:  ", ts.established, 0);
         } else {
             text(X0, sx(198), "(no interface)", GFX_RGB(0x80, 0x80, 0x88));
         }
