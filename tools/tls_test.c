@@ -283,6 +283,26 @@ static int build_cert_msg(uint8_t *o, const uint8_t *der, int derlen)
     return n;
 }
 
+/* Build a Certificate message carrying several certs (a realistic leaf+CA chain),
+ * each as its own CertificateEntry with empty extensions. */
+static int build_cert_msg_n(uint8_t *o, const uint8_t *const ders[], const int lens[], int ncerts)
+{
+    int n = 0;
+    o[n++] = TLS_HS_CERTIFICATE; o[n++] = 0; o[n++] = 0; o[n++] = 0;   /* len patched below */
+    o[n++] = 0;                                                        /* request context: empty */
+    int listlen = 0;
+    for (int i = 0; i < ncerts; i++) listlen += 3 + lens[i] + 2;
+    o[n++] = (uint8_t)(listlen >> 16); o[n++] = (uint8_t)(listlen >> 8); o[n++] = (uint8_t)listlen;
+    for (int i = 0; i < ncerts; i++) {
+        o[n++] = (uint8_t)(lens[i] >> 16); o[n++] = (uint8_t)(lens[i] >> 8); o[n++] = (uint8_t)lens[i];
+        for (int j = 0; j < lens[i]; j++) o[n++] = ders[i][j];
+        o[n++] = 0; o[n++] = 0;                                        /* entry extensions: empty */
+    }
+    int body = n - 4;
+    o[1] = (uint8_t)(body >> 16); o[2] = (uint8_t)(body >> 8); o[3] = (uint8_t)body;
+    return n;
+}
+
 /* an unrelated self-signed RSA certificate (RFC 8448 §3) — a "wrong" root */
 #define RFC_DER_CERT "308201ac30820115a003020102020102300d06092a864886f70d01010b0500300e310c300a06035504031303727361301e170d3136303733303031323335395a170d3236303733303031323335395a300e310c300a0603550403130372736130819f300d06092a864886f70d010101050003818d0030818902818100b4bb498f8279303d980836399b36c6988c0c68de55e1bdb826d3901a2461eafd2de49a91d015abbc9a95137ace6c1af19eaa6af98c7ced43120998e187a80ee0ccb0524b1b018c3e0b63264d449a6d38e22a5fda430846748030530ef0461c8ca9d9efbfae8ea6d1d03e2bd193eff0ab9a8002c47428a6d35a8d88d79f7f1e3f0203010001a31a301830090603551d1304023000300b0603551d0f0404030205a0300d06092a864886f70d01010b05000381810085aad2a0e5b9276b908c65f73a7267170618a54c5f8a7b337d2df7a594365417f2eae8f8a58c8f8172f9319cf36b7fd6c55b80f21a03015156726096fd335e5e67f2dbf102702e608ccae6bec1fc63a42a99be5c3eb7107c3c54e9b9eb2bd5203b1c3b84e0a8b2f759409ba3eac9d91d402dcc0cc8f8961229ac9187b42b4de1"
 
@@ -1264,6 +1284,98 @@ int main(void)
         arec[7] ^= 1;
         check_int("tampered app record -> ERR_RECORD",
                   tls_conn_recv_app(&dcn, arec, a3, cp, sizeof cp, &cl2), TLS_CONN_ERR_RECORD);
+    }
+
+    printf("TLS 1.3 oversized certificate chain (multi-cert, many records):\n");
+    {
+        /* A realistic two-cert chain (leaf + CA), several hundred bytes, sealed
+         * into MANY tiny records so the Certificate message spans ~20 records and
+         * the read boundaries are misaligned to record boundaries -- the worst
+         * case for the conn's reassembly and the reader's framing together. */
+        uint8_t cad[700]; x509_cert ca;
+        int calen = unhex(T_CA_CERT, cad);
+        x509_parse(cad, calen, &ca);
+        uint8_t leafd[700]; int leaflen = unhex(T_LEAF_CERT, leafd);
+        const uint8_t *ders[2] = { leafd, cad };
+        const int      lens[2] = { leaflen, calen };
+        uint8_t certmsg[1600]; int cmlen = build_cert_msg_n(certmsg, ders, lens, 2);
+        uint8_t ln[128], ld[128]; int lnlen = unhex(T_LEAF_N, ln), ldlen = unhex(T_LEAF_D, ld);
+        uint64_t now2026 = 1767225600ULL;
+
+        uint8_t cpriv[32], spriv[32], crand[32], srand[32];
+        for (int i=0;i<32;i++){ cpriv[i]=(uint8_t)(i+31); spriv[i]=(uint8_t)(0x10+i);
+                                crand[i]=(uint8_t)(0xC1+i); srand[i]=(uint8_t)(0xD2+i); }
+        uint8_t spub[32], cpub[32]; x25519_base(spub, spriv); x25519_base(cpub, cpriv);
+
+        tls_client ref; tls_client_init(&ref, "example.com", cpriv, crand);
+        uint8_t ch[1024]; int chlen = tls_client_start(&ref, ch, sizeof ch);
+
+        tls_transcript ts; tls_transcript_init(&ts);
+        tls_transcript_update(&ts, ch, chlen);
+        uint8_t sh[256]; int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        tls_transcript_update(&ts, sh, shlen);
+        uint8_t hello_hash[32], ecdhe[32]; tls_transcript_hash(&ts, hello_hash);
+        x25519(ecdhe, spriv, cpub);
+        tls_key_schedule kss; tls_key_schedule_derive(&kss, ecdhe, hello_hash);
+
+        uint8_t ee[64]; int eelen = build_hs(ee, TLS_HS_ENCRYPTED_EXTENSIONS, (const uint8_t*)"\x00\x00", 2);
+        tls_transcript_update(&ts, ee, eelen);
+        tls_transcript_update(&ts, certmsg, cmlen);
+        uint8_t th_cert[32]; tls_transcript_hash(&ts, th_cert);
+        uint8_t cvmsg[256]; int cvlen = pss_sign_cv(cvmsg, th_cert, ln, lnlen, ld, ldlen);
+        tls_transcript_update(&ts, cvmsg, cvlen);
+        uint8_t sfk[32], th_cv[32], svd[32], sfin[64];
+        tls_finished_key(sfk, kss.server_hs_traffic);
+        tls_transcript_hash(&ts, th_cv);
+        tls_finished_verify_data(svd, sfk, th_cv);
+        int sfinlen = build_hs(sfin, TLS_HS_FINISHED, svd, 32);
+
+        /* coalesce the four messages, then chop into 48-byte record bodies */
+        static uint8_t flight[2048]; int fl = 0;
+        for (int i=0;i<eelen;i++)   flight[fl++] = ee[i];
+        for (int i=0;i<cmlen;i++)   flight[fl++] = certmsg[i];
+        for (int i=0;i<cvlen;i++)   flight[fl++] = cvmsg[i];
+        for (int i=0;i<sfinlen;i++) flight[fl++] = sfin[i];
+
+        tls_record_keys s_tx; epoch_from_secret(&s_tx, kss.server_hs_traffic);
+        static uint8_t stream[8192]; int sn = 0;
+        sn += plaintext_wrap(stream + sn, TLS_CONTENT_HANDSHAKE, sh, shlen);
+        int nrecs = 0;
+        for (int off = 0; off < fl; off += 48) {
+            int chunk = (fl - off < 48) ? fl - off : 48;
+            uint8_t rec[128];
+            int rl = tls_record_seal(&s_tx, TLS_CONTENT_HANDSHAKE, flight + off, chunk, rec, sizeof rec);
+            for (int i=0;i<rl;i++) stream[sn++] = rec[i];
+            nrecs++;
+        }
+        check_int("flight chopped into many records (>15)", nrecs > 15, 1);
+
+        static tls_conn dcn; static tls_record_reader drd; mockx mx;
+        memset(&mx,0,sizeof mx); mx.read_chunk = 40;   /* reads misaligned to records */
+        check_int("oversized chain across many records -> CONNECTED",
+                  drive_once(&dcn,&drd,cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+        check_int("oversized chain: full milestone trace", milestones_ok(), 1);
+        check_int("parsed both chain certs (leaf + CA)", (int)dcn.fsm.certs.count, 2);
+
+        /* buffer-safety: a Certificate message declaring a length beyond the
+         * reassembly buffer must be rejected cleanly (ERR_CAPACITY), never
+         * overflowed. Get into the handshake epoch, then feed one record whose
+         * plaintext is a Certificate header claiming 0x010000 (> hs_buf) bytes. */
+        static tls_conn ocn; static tls_record_reader ord;
+        tls_conn_init(&ocn, "example.com", cpriv, crand);
+        tls_client_set_trust(&ocn.fsm, &ca, 1, now2026);
+        tls_reader_init(&ord);
+        uint8_t crec[1100]; tls_conn_start(&ocn, crec, sizeof crec);
+        uint8_t shrec[300]; int shrl = plaintext_wrap(shrec, TLS_CONTENT_HANDSHAKE, sh, shlen);
+        uint8_t o2[64]; size_t ol2;
+        tls_conn_recv_record(&ocn, shrec, shrl, o2, sizeof o2, &ol2);   /* -> HANDSHAKE epoch */
+        tls_record_keys s_tx2; epoch_from_secret(&s_tx2, kss.server_hs_traffic);
+        uint8_t huge_hdr[4] = { TLS_HS_CERTIFICATE, 0x01, 0x00, 0x00 }; /* len = 65536 > 32768 */
+        uint8_t hrec[64]; int hrl = tls_record_seal(&s_tx2, TLS_CONTENT_HANDSHAKE, huge_hdr, 4, hrec, sizeof hrec);
+        uint8_t ho[64]; size_t hol;
+        check_int("over-buffer Certificate length -> ERR_CAPACITY",
+                  tls_conn_recv_record(&ocn, hrec, hrl, ho, sizeof ho, &hol), TLS_CONN_ERR_CAPACITY);
+        check_int("over-buffer Certificate did not reach CONNECTED", tls_conn_connected(&ocn), 0);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);

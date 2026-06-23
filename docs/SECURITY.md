@@ -42,6 +42,7 @@ Run the vectors: `make crypto-test`.
 | 13.0b.2a | **IP-literal connect** (`net/tcpsock.c`) — reach a numeric host without DNS | kernel build | ✅ |
 | 13.0b.2b | **`tlsconnect`** (`user/tlsconnect.c`) — socket → driver → CONNECTED, embedded root | builds; QEMU run on Aurora side | ✅ code |
 | 13.0b.3 | **Application-data smoke test** — send/recv one app record over the live epoch | host app-data test; QEMU echo | ✅ code |
+| 13.0b.4 | **Oversized cert chain** — multi-cert, many records, buffer-limit safety | host test | ✅ |
 | 13.0c | Real internet RSA endpoint: `GET /` → 200 OK | real `https://` site | later |
 | 13.x | **ECDSA P-256** (`ecdsa_secp256r1_sha256`) — most of the real web | wycheproof / RFC 6979 | next major |
 | 13.x | Intermediate CAs, then ECDSA P-256 | real chains / wycheproof | later |
@@ -946,3 +947,18 @@ With that, the highest remaining risk for the real web is no longer the handshak
 or app data but the **signature scheme**: most sites authenticate with ECDSA
 P-256 (`ecdsa_secp256r1_sha256`), which the dispatcher currently answers
 UNSUPPORTED. That, not an HTTPS client, is the next major block (13.x).
+
+## Step 13.0b.4 — oversized certificate chain (the next buffer risk)
+
+A local self-signed cert barely exercises reassembly; a real server sends a
+multi-cert chain (leaf + intermediate + extensions) of several KB. The previous
+buffer defect (`rx_buf`) was found by reasoning about lifetime; this one is found
+the same way, before the wire. `make tls-test` now drives a **two-cert** chain
+(leaf + CA) sealed into ~20 tiny records, with the transport reads deliberately
+misaligned to record boundaries — the worst case for the reader's framing and the
+conn's message reassembly at once. It reaches CONNECTED with both certificates
+parsed. The companion check is the safety guard: a Certificate message whose
+declared length exceeds the reassembly buffer (`TLS_CONN_HS_BUF`) is rejected with
+`ERR_CAPACITY` the moment its header is seen — never buffered, never overflowed,
+never a silent CONNECTED. So a genuinely large or hostile chain fails closed
+rather than corrupting memory.
