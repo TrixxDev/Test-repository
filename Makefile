@@ -32,7 +32,8 @@ USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/cat.elf user/grep.elf user/orphan.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
               user/wserver.elf user/term.elf user/dock.elf user/files.elf \
-              user/viewer.elf user/wmstress.elf user/settings.elf user/fetch.elf
+              user/viewer.elf user/wmstress.elf user/settings.elf user/fetch.elf \
+              user/tlsconnect.elf
 LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o user/libc/clip.o user/libc/http.o
 # Portable graphics/compositor code, built for userspace and linked into wserver.
 WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
@@ -54,6 +55,19 @@ $(KERNEL): $(OBJ) linker.ld
 UCFLAGS := --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
            -mno-sse -mno-mmx -mno-sse2 \
            -O2 -Iinclude -Iuser -Ikernel
+
+# The portable crypto/tls/x509 trees compiled for userspace (freestanding, same
+# sources as the host tests and the kernel-excluded build). tlsconnect links them.
+TLS_U_SRC := crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c \
+             crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c \
+             crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c \
+             tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c \
+             tls/handshake.c tls/client.c tls/conn.c tls/cert.c tls/trace.c tls/driver.c \
+             x509/asn1.c x509/x509.c x509/verify_cert.c
+TLS_U_OBJ := $(TLS_U_SRC:.c=.tlsu.o)
+
+%.tlsu.o: %.c
+	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -c $< -o $@
 
 user/crt0.o: user/crt0.S
 	$(CC) --target=$(TARGET) -m32 -ffreestanding -Iinclude -c user/crt0.S -o $@
@@ -97,6 +111,12 @@ user/fetch.elf: user/fetch.c user/wm.h user/libc.h user/crt0.o $(LIBC_OBJ) user/
 	$(CC) $(UCFLAGS) -c user/fetch.c -o user/fetch.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/fetch.o user/gfx_u.o $(LIBC_OBJ) -o $@
 
+# tlsconnect links the freestanding TLS stack (no WM/gfx). Needs the crypto/tls/
+# x509 include paths for its own compile plus the embedded trust-root header.
+user/tlsconnect.elf: user/tlsconnect.c user/tls_test_root.h user/libc.h user/crt0.o $(LIBC_OBJ) $(TLS_U_OBJ) user/user.ld
+	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -c user/tlsconnect.c -o user/tlsconnect.o
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/tlsconnect.o $(TLS_U_OBJ) $(LIBC_OBJ) -o $@
+
 $(EMBEDDED): user/init.elf tools/bin2c.py
 	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
 
@@ -109,7 +129,8 @@ $(DISK): $(USER_PROGS) user/poem.txt user/about.txt tools/mkfat32.py
 	    SAVE.ELF user/save.elf WSERVER.ELF user/wserver.elf TERM.ELF user/term.elf \
 	    DOCK.ELF user/dock.elf FILES.ELF user/files.elf VIEWER.ELF user/viewer.elf \
 	    ABOUT.TXT user/about.txt POEM.TXT user/poem.txt WMSTRESS.ELF user/wmstress.elf \
-	    SETTINGS.ELF user/settings.elf FETCH.ELF user/fetch.elf
+	    SETTINGS.ELF user/settings.elf FETCH.ELF user/fetch.elf \
+	    TLSCONN.ELF user/tlsconnect.elf
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -304,5 +325,5 @@ stress: $(KERNEL) $(DISK)
 	@grep -E "wmstress|wm\] stat" aurora_stress.log || echo "(no stress output captured)"
 
 clean:
-	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o
+	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o $(TLS_U_OBJ)
 	rm -rf isodir aurora.iso

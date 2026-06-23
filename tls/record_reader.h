@@ -38,9 +38,9 @@ void tls_reader_init(tls_record_reader *r);
  * caller must drain with next() between feeds). */
 int  tls_reader_feed(tls_record_reader *r, const uint8_t *data, size_t len);
 
-/* Pull the next complete record. Returns 1 and sets *rec/*reclen (valid until the
- * next feed), 0 if more bytes are needed, or -1 if the framed length exceeds the
- * wire limit (malformed; sticky). */
+/* Pull the next complete record. Returns 1 and sets rec and reclen (valid until
+ * the next feed), 0 if more bytes are needed, or -1 if the framed length exceeds
+ * the wire limit (malformed; sticky). */
 int  tls_reader_next(tls_record_reader *r, const uint8_t **rec, size_t *reclen);
 
 /* Bytes buffered but not yet a complete record. A driver uses this at EOF: bytes

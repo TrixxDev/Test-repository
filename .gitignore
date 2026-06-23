@@ -37,3 +37,6 @@ __pycache__/
 # Backup files
 *.bak
 *.backup
+
+# Throwaway TLS test private key (local s_server only; never commit a key)
+test/tls/key.pem
