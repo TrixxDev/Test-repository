@@ -32,6 +32,7 @@ static tls_conn          g_conn;
 static tls_record_reader g_reader;
 static x509_cert         g_root;
 static uint8_t           g_scratch[2048];
+static uint8_t           g_plain[2048];
 static int               g_fd;
 
 static int xport_read(void *ctx, uint8_t *buf, size_t cap)
@@ -39,6 +40,10 @@ static int xport_read(void *ctx, uint8_t *buf, size_t cap)
 
 static int xport_write(void *ctx, const uint8_t *buf, size_t len)
 { (void)ctx; return write(g_fd, buf, (int)len); }
+
+/* Write every byte (tolerate short writes), like the driver's send_all. */
+static int write_all(const uint8_t *b, int n)
+{ int s = 0; while (s < n) { int w = write(g_fd, b + s, n - s); if (w <= 0) return -1; s += w; } return 0; }
 
 static void trace_sink(void *ctx, tls_event ev, uint32_t detail)
 { (void)ctx; (void)detail; printf("[TLS] %s\n", tls_event_name(ev)); }
@@ -88,9 +93,7 @@ int main(int argc, char **argv)
     tls_transport t = { xport_read, xport_write, 0 };
     int r = tls_driver_handshake(&g_conn, &g_reader, &t, g_scratch, sizeof g_scratch);
 
-    if (r == TLS_DRIVE_OK) {
-        printf("[tlsconnect] SUCCESS: TLS 1.3 handshake complete, CONNECTED\n");
-    } else {
+    if (r != TLS_DRIVE_OK) {
         const char *why;
         switch (r) {
         case TLS_DRIVE_EOF:       why = "peer closed before CONNECTED"; break;
@@ -103,8 +106,43 @@ int main(int argc, char **argv)
         }
         fprintf(2, "[tlsconnect] FAILED: %s (driver=%d, tls_error=%d)\n",
                 why, r, (int)g_conn.fsm.error);
+        close(g_fd);
+        return 1;
     }
+    printf("[tlsconnect] handshake complete, CONNECTED\n");
 
+    /* ---- application-data smoke test (13.0b.3): send one record over the
+     * application epoch, then print whatever the peer sends back. This exercises
+     * the application traffic keys, the per-epoch sequence numbers, nonce
+     * derivation, and tls_record_seal/open against OpenSSL on *app* data, not
+     * just the handshake. NewSessionTickets (handshake inside app-data) are
+     * accepted and ignored by tls_conn_recv_app. */
+    const char *msg = (argc > 3) ? argv[3] : "PING\n";
+    int mlen = 0; while (msg[mlen]) mlen++;
+    int sl = tls_conn_send_app(&g_conn, (const uint8_t *)msg, (size_t)mlen, g_scratch, sizeof g_scratch);
+    if (sl < 0 || write_all(g_scratch, sl) != 0) {
+        fprintf(2, "[tlsconnect] application send failed\n"); close(g_fd); return 1;
+    }
+    printf("[tlsconnect] sent %d app bytes (\"%s\"); reading replies...\n", mlen, msg);
+
+    int got_reply = 0;
+    for (;;) {
+        const uint8_t *rec; size_t rl; int rc;
+        while ((rc = tls_reader_next(&g_reader, &rec, &rl)) == 1) {
+            size_t pl = 0;
+            int cc = tls_conn_recv_app(&g_conn, rec, rl, g_plain, sizeof g_plain - 1, &pl);
+            if (cc == TLS_CONN_ERR_ALERT) { printf("[tlsconnect] peer sent alert (close_notify)\n"); goto done; }
+            if (cc < 0) { fprintf(2, "[tlsconnect] application recv error %d\n", cc); goto done; }
+            if (pl > 0) { g_plain[pl] = 0; printf("[tlsconnect] recv %d bytes: %s\n", (int)pl, g_plain); got_reply = 1; }
+        }
+        if (rc < 0) { fprintf(2, "[tlsconnect] malformed record on app stream\n"); break; }
+        int n = read(g_fd, g_scratch, sizeof g_scratch);
+        if (n <= 0) break;                      /* 0 = peer closed or idle timeout */
+        tls_reader_feed(&g_reader, g_scratch, (size_t)n);
+    }
+done:
+    if (got_reply) printf("[tlsconnect] SUCCESS: application data round-trip over the live TLS channel\n");
+    else           printf("[tlsconnect] CONNECTED + app data sent (no reply within the idle window)\n");
     close(g_fd);
-    return r == TLS_DRIVE_OK ? 0 : 1;
+    return 0;
 }

@@ -185,18 +185,19 @@ static int mx_write(void *ctx, const uint8_t *buf, size_t len)
 /* Run the driver to CONNECTED over the mock transport. The conn/reader are static
  * (large) to keep the stack small; caller pre-sets mx->{first_read,read_chunk,
  * write_chunk}. Trust + trace are installed so the milestone trace is recorded. */
-static int drive_once(const uint8_t *cpriv, const uint8_t *crand,
+static int drive_once(tls_conn *cn, tls_record_reader *rd,
+                      const uint8_t *cpriv, const uint8_t *crand,
                       const x509_cert *ca, uint64_t now,
                       const uint8_t *stream, int streamlen, mockx *mx)
 {
-    static tls_conn cn; static tls_record_reader rd; static uint8_t scratch[2048];
-    tls_conn_init(&cn, "example.com", cpriv, crand);
-    tls_client_set_trust(&cn.fsm, ca, 1, now);
-    g_evn = 0; tls_conn_set_trace(&cn, rec_sink, 0);
-    tls_reader_init(&rd);
+    static uint8_t scratch[2048];
+    tls_conn_init(cn, "example.com", cpriv, crand);
+    tls_client_set_trust(&cn->fsm, ca, 1, now);
+    g_evn = 0; tls_conn_set_trace(cn, rec_sink, 0);
+    tls_reader_init(rd);
     mx->in = stream; mx->in_len = streamlen; mx->in_pos = 0; mx->first_done = 0; mx->out_len = 0;
     tls_transport t = { mx_read, mx_write, mx };
-    return tls_driver_handshake(&cn, &rd, &t, scratch, sizeof scratch);
+    return tls_driver_handshake(cn, rd, &t, scratch, sizeof scratch);
 }
 
 /* The full client-visible milestone trace, in order, for a clean handshake. */
@@ -1157,11 +1158,12 @@ int main(void)
         int fin_off = sn;                                   /* Finished record begins here */
         for (int i=0;i<rl;i++) stream[sn++] = r[i];
 
+        static tls_conn dcn; static tls_record_reader drd;  /* big: keep off the stack */
         mockx mx;
 
         /* scenario 2: the whole flight (5 records) arrives in one read */
         memset(&mx,0,sizeof mx); mx.read_chunk = 0; mx.write_chunk = 0;
-        check_int("all-at-once: driver reaches CONNECTED", drive_once(cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+        check_int("all-at-once: driver reaches CONNECTED", drive_once(&dcn,&drd,cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
         check_int("all-at-once: full milestone trace", milestones_ok(), 1);
         check_int("all-at-once: one read consumed the stream", mx.in_pos, sn);
 
@@ -1184,20 +1186,20 @@ int main(void)
 
         /* scenario 1: every byte delivered separately (read 1, write 1) */
         memset(&mx,0,sizeof mx); mx.read_chunk = 1; mx.write_chunk = 1;
-        check_int("byte-by-byte: driver reaches CONNECTED", drive_once(cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+        check_int("byte-by-byte: driver reaches CONNECTED", drive_once(&dcn,&drd,cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
         check_int("byte-by-byte: full milestone trace", milestones_ok(), 1);
 
         /* scenario 3: a read boundary lands inside the Certificate record (first
          * read = SH+EE+half the cert; the reader reassembles across the split) */
         memset(&mx,0,sizeof mx); mx.first_read = cert_mid; mx.read_chunk = 0; mx.write_chunk = 0;
-        check_int("split mid-Certificate: driver reaches CONNECTED", drive_once(cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+        check_int("split mid-Certificate: driver reaches CONNECTED", drive_once(&dcn,&drd,cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
         check_int("split mid-Certificate: full milestone trace", milestones_ok(), 1);
 
         /* scenario 4: send() only ever accepts 1 byte -> send_all must loop, yet
          * the captured output is byte-identical to the clean run (nothing lost or
          * reordered by the partial writes) */
         memset(&mx,0,sizeof mx); mx.read_chunk = 0; mx.write_chunk = 1;
-        check_int("partial writes: driver reaches CONNECTED", drive_once(cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+        check_int("partial writes: driver reaches CONNECTED", drive_once(&dcn,&drd,cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
         check_int("partial writes: output byte-identical despite 1-byte send()",
                   (mx.out_len == ref_outlen && memcmp(mx.out, ref_out, (size_t)ref_outlen) == 0), 1);
 
@@ -1205,7 +1207,63 @@ int main(void)
          * "connected". The driver must report EOF before CONNECTED as fatal. */
         memset(&mx,0,sizeof mx); mx.read_chunk = 0; mx.write_chunk = 0;
         check_int("truncated flight (no Finished) -> EOF, not CONNECTED",
-                  drive_once(cpriv,crand,&ca,now2026,stream,fin_off,&mx), TLS_DRIVE_EOF);
+                  drive_once(&dcn,&drd,cpriv,crand,&ca,now2026,stream,fin_off,&mx), TLS_DRIVE_EOF);
+
+        /* ---- application data over the live (driver-established) epoch ---- */
+        /* Re-drive cleanly so dcn is CONNECTED, then exchange app data with the
+         * server mirror's application keys. Proves the app traffic secrets match,
+         * per-epoch sequence numbers advance both ways, nonce derivation holds on
+         * app data, and NewSessionTickets are tolerated. */
+        memset(&mx,0,sizeof mx); mx.read_chunk = 0; mx.write_chunk = 0;
+        check_int("appdata: re-drive reaches CONNECTED",
+                  drive_once(&dcn,&drd,cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+
+        uint8_t s_cap[32], s_sap[32];
+        tls_derive_secret(s_cap, kss.master_secret, "c ap traffic", thash_sf);
+        tls_derive_secret(s_sap, kss.master_secret, "s ap traffic", thash_sf);
+        tls_record_keys s_tx_ap, s_rx_ap;
+        epoch_from_secret(&s_tx_ap, s_sap);     /* server writes app data       */
+        epoch_from_secret(&s_rx_ap, s_cap);     /* server reads client app data */
+
+        /* client -> server, two records: the server must decrypt both, and the
+         * second proves the client's app tx sequence number advanced (seq 0,1) */
+        uint8_t qrec[256], sp[64], it; size_t ol;
+        const char *m1 = "PING\n"; char m1hex[16]; tohex((const uint8_t*)m1, 5, m1hex);
+        int q1 = tls_conn_send_app(&dcn, (const uint8_t*)m1, 5, qrec, sizeof qrec);
+        int o1 = tls_record_open(&s_rx_ap, qrec, q1, sp, sizeof sp, &it);
+        check("server decrypts client app record #0 (PING)", sp, o1, m1hex);
+        const char *m2 = "PING2"; char m2hex[16]; tohex((const uint8_t*)m2, 5, m2hex);
+        int q2 = tls_conn_send_app(&dcn, (const uint8_t*)m2, 5, qrec, sizeof qrec);
+        int o2 = tls_record_open(&s_rx_ap, qrec, q2, sp, sizeof sp, &it);
+        check("server decrypts client app record #1 (seq advanced)", sp, o2, m2hex);
+
+        /* server -> client, two records: the client must decrypt both (rx seq 0,1) */
+        uint8_t arec[256], cp[64]; size_t cl2;
+        const char *r1m = "PONG\n"; char r1hex[16]; tohex((const uint8_t*)r1m, 5, r1hex);
+        int a1 = tls_record_seal(&s_tx_ap, TLS_CONTENT_APPLICATION_DATA, (const uint8_t*)r1m, 5, arec, sizeof arec);
+        check_int("client recv server app record #0 -> OK",
+                  tls_conn_recv_app(&dcn, arec, a1, cp, sizeof cp, &cl2), TLS_CONN_OK);
+        check("client decrypts server app record #0 (PONG)", cp, (int)cl2, r1hex);
+        const char *r2m = "PONG2"; char r2hex[16]; tohex((const uint8_t*)r2m, 5, r2hex);
+        int a2 = tls_record_seal(&s_tx_ap, TLS_CONTENT_APPLICATION_DATA, (const uint8_t*)r2m, 5, arec, sizeof arec);
+        check_int("client recv server app record #1 -> OK (rx seq advanced)",
+                  tls_conn_recv_app(&dcn, arec, a2, cp, sizeof cp, &cl2), TLS_CONN_OK);
+        check("client decrypts server app record #1 (PONG2)", cp, (int)cl2, r2hex);
+
+        /* a NewSessionTicket (a handshake message inside an app-data record) is
+         * accepted and ignored -- the program must not choke on OpenSSL's ticket */
+        uint8_t nst[16]; int nstl = build_hs(nst, 4 /* new_session_ticket */, (const uint8_t*)"\x00\x00\x00\x00", 4);
+        uint8_t nrec[64]; int nl = tls_record_seal(&s_tx_ap, TLS_CONTENT_HANDSHAKE, nst, nstl, nrec, sizeof nrec);
+        size_t nout = 99;
+        check_int("client accepts NewSessionTicket -> OK",
+                  tls_conn_recv_app(&dcn, nrec, nl, cp, sizeof cp, &nout), TLS_CONN_OK);
+        check_int("NewSessionTicket yields no app data", (int)nout, 0);
+
+        /* a tampered app record is rejected (AEAD), connection-fatal at the app layer */
+        int a3 = tls_record_seal(&s_tx_ap, TLS_CONTENT_APPLICATION_DATA, (const uint8_t*)"x", 1, arec, sizeof arec);
+        arec[7] ^= 1;
+        check_int("tampered app record -> ERR_RECORD",
+                  tls_conn_recv_app(&dcn, arec, a3, cp, sizeof cp, &cl2), TLS_CONN_ERR_RECORD);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);

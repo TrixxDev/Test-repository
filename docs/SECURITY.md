@@ -41,7 +41,9 @@ Run the vectors: `make crypto-test`.
 | 13.0b.1 | **Handshake driver** (`tls/driver.c`) — `transport → reader → conn → CONNECTED` | host driver test (4 chunkings + EOF) | ✅ |
 | 13.0b.2a | **IP-literal connect** (`net/tcpsock.c`) — reach a numeric host without DNS | kernel build | ✅ |
 | 13.0b.2b | **`tlsconnect`** (`user/tlsconnect.c`) — socket → driver → CONNECTED, embedded root | builds; QEMU run on Aurora side | ✅ code |
+| 13.0b.3 | **Application-data smoke test** — send/recv one app record over the live epoch | host app-data test; QEMU echo | ✅ code |
 | 13.0c | Real internet RSA endpoint: `GET /` → 200 OK | real `https://` site | later |
+| 13.x | **ECDSA P-256** (`ecdsa_secp256r1_sha256`) — most of the real web | wycheproof / RFC 6979 | next major |
 | 13.x | Intermediate CAs, then ECDSA P-256 | real chains / wycheproof | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -905,3 +907,42 @@ integration result in the TLS branch: TCP → TLS 1.3 → X.509 → RSA-PSS, liv
 
 (`test/tls/key.pem` is a throwaway self-signed test key and is intentionally **not**
 committed; only the public `cert.pem` and the embedded DER are in the tree.)
+
+## Step 13.0b.3 — application data over the live epoch
+
+CONNECTED only proves the handshake. The harder thing to get right is the *first
+protected application record*: it rides a **new encryption epoch** (the application
+traffic keys), with its own sequence number restarted at 0 and its own nonce
+derivation, and it must interoperate with OpenSSL on app data, not just handshake
+messages. So `tlsconnect` continues past CONNECTED: it seals one record
+(`tls_conn_send_app`, default `"PING\n"`), then drains replies
+(`tls_conn_recv_app`), printing each, until the peer closes or the idle window
+elapses. NewSessionTickets — handshake messages OpenSSL sends *inside* app-data
+records right after the handshake — are accepted and ignored, so they do not
+derail the exchange.
+
+The deterministic proof is in `make tls-test`: after driving to CONNECTED through
+the mock transport, the test exchanges application data with the server mirror's
+application keys and checks, byte-for-byte:
+
+```
+client -> server  record #0 ("PING")   server decrypts
+client -> server  record #1             decrypts -> client app tx seq advanced
+server -> client  record #0 ("PONG")    client decrypts
+server -> client  record #1             decrypts -> client app rx seq advanced
+server -> client  NewSessionTicket      accepted, yields no app data
+server -> client  tampered record       AEAD rejects -> ERR_RECORD
+```
+
+That pins the four things app data can break on independently of the handshake:
+the application secrets match end to end, the per-epoch sequence numbers advance in
+both directions, the nonce derivation holds, and seal/open round-trip with a real
+peer. QEMU acceptance (Aurora side): run the same `s_server`, then `tlsconnect
+10.0.2.2 4433` — `PING` appears on the server console, and whatever you type back
+there is printed by `tlsconnect` as a decrypted reply. A round-trip means the TLS
+channel — not just the handshake — lives over real TCP.
+
+With that, the highest remaining risk for the real web is no longer the handshake
+or app data but the **signature scheme**: most sites authenticate with ECDSA
+P-256 (`ecdsa_secp256r1_sha256`), which the dispatcher currently answers
+UNSUPPORTED. That, not an HTTPS client, is the next major block (13.x).
