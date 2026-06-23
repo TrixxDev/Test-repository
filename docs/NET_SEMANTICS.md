@@ -171,6 +171,57 @@ tls_client FSM + trace   ← done
 - Build: add the `crypto/ x509/ tls/` objects to the user link for the program that
   fetches (a TLS libc module, then Aurora Fetch on port 443).
 
+## 8. Userspace socket seam — the INET fd contract (audit for 13.0b.2)
+
+Section 5 audited the kernel transport (`tcp.c`/`tcpsock.c`). The TLS program is in
+**userspace** and reaches that transport only through syscalls, a different and
+narrower contract. There are two unrelated socket worlds; the TLS driver uses the
+second:
+
+- `socket(AF_LOOPBACK,…)` + libc `connect(fd,port)` → **netd** RPC over message IPC
+  (`kernel/socket.c`, `user/libc/net.c`): in-process loopback rings, *not* TCP/IP.
+- `inet_socket()` + `inet_connect(fd,host,port)` → **real TCP/IP** (`net/tcpsock.c`).
+  This is the path `http_get()` uses and the one `tls_transport` wraps.
+
+The seam is exactly four calls — `inet_socket`, `inet_connect`, `read`/`write`,
+`close` (`user/libc.h`). Answers to the audit questions:
+
+1. **fd ownership.** Per-process fd table (`process_t.fds[MAX_FDS]`,
+   `kernel/process.c:324`). `inet_socket()` installs a `tcpsock` VFS node
+   (`sys_socket` → `tcpsock_create`, `process.c:653`) and returns its fd; the
+   process owns it. `close(fd)` unrefs and clears the slot (`sys_close`,
+   `process.c:362`) → `tcpsock_close` (FIN + ≤1.5 s drain). fds are inherited on
+   `fork` (irrelevant to a single-process `tlsconnect`).
+2. **connect timeout.** `inet_connect` → `sys_inet_connect` (`process.c:669`) →
+   `tcpsock_connect`: DNS first (**−2** on failure), then `tcp_connect` and a busy
+   **5 s** deadline polling for ESTABLISHED, returning **0** / **−3** (timeout or
+   refused). It blocks up to ~5 s.
+3. **read() return values.** `sys_read` (`process.c:324`) returns **−1** for a bad
+   fd, an fd not opened for reading, or an invalid user buffer; otherwise it returns
+   `tsk_read`: **>0** bytes, or **0** for EOF. So beyond EOF, the only negative is
+   −1 (a hard error). No partial-read *guarantee*: `read` returns whatever is
+   available (≥1 byte once data arrives), not a filled buffer — fine, the record
+   reader reassembles across reads.
+4. **EINTR / EAGAIN.** None. INET `read`/`write` are blocking; there is no
+   non-blocking mode (`poll()` is not wired to TCP, §5), no `EAGAIN`, and Aurora has
+   no signals, so no `EINTR`. A read blocks (interrupts on, busy-polling `net_poll`)
+   until data, EOF, or the 10 s idle timeout.
+5. **close() during a blocking recv.** Not a supported concurrency: `tsk_read`
+   busy-polls rather than `thread_block`-ing on the socket, and unlike the loopback
+   `sock_node` it has no peer-wait/wake to interrupt. `tlsconnect` is single-threaded
+   and sequential, so a read is never racing a `close` of the same fd — treat
+   cross-thread close-during-read as undefined and simply do not do it.
+6. **write() sizes.** `tsk_write` (`net/tcpsock.c:97`) splits into `TCPSOCK_MSS`
+   (1400 B) segments, **stop-and-wait** (one ACK per segment, ~4 s budget each), and
+   returns the total sent — or a **short count** if a segment fails mid-flight
+   (`return sent ? sent : -1`). Any size is accepted; the driver's `send_all` already
+   loops on a short return, which is exactly why it exists.
+
+Consequence for the transport adapter: it is the trivial four-liner
+`read`/`write`-over-fd, and the only contract subtlety the driver must honour —
+`0` = EOF is fatal before CONNECTED (§6 B), `<0` = error, short `write` = keep
+going — is already handled.
+
 ## 8. Phasing decision (confirmed)
 
 ```
