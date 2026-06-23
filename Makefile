@@ -221,10 +221,11 @@ rsa-test:
 	$(CC) -O2 -Icrypto tools/rsa_test.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/sha256.c -o /tmp/aurora_rsa_test
 	/tmp/aurora_rsa_test
 
-# Host-side P-256 field arithmetic tests (crypto/ layer: GF(p), no curve/ECDSA).
+# Host-side P-256 low-level math tests (crypto/ layer: field mod p + scalar mod n,
+# no curve/ECDSA yet).
 .PHONY: p256-test
 p256-test:
-	$(CC) -O2 -Icrypto -Itools tools/p256_test.c crypto/p256_field.c crypto/bignum.c -o /tmp/aurora_p256_test
+	$(CC) -O2 -Icrypto -Itools tools/p256_test.c crypto/p256_field.c crypto/p256_scalar.c crypto/bignum.c -o /tmp/aurora_p256_test
 	/tmp/aurora_p256_test
 
 # Host-side TCP receive-ring test (net/rxring.c: the buffer behind tcp_recv).

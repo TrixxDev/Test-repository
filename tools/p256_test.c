@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "p256_field.h"
+#include "p256_scalar.h"
 
 static int failures;
 
@@ -36,9 +37,21 @@ static void check_int(const char *name, int got, int want)
     else { printf("  FAIL  %s (got %d want %d)\n", name, got, want); failures++; }
 }
 
+static void check_sc(const char *name, const sc *got, const char *want_hex)
+{
+    uint8_t gb[32], wb[32];
+    sc_to_bytes(gb, got);
+    unhex(want_hex, wb);
+    if (memcmp(gb, wb, 32) == 0) { printf("  PASS  %s\n", name); return; }
+    char gh[65]; for (int i = 0; i < 32; i++) sprintf(gh + i*2, "%02x", gb[i]);
+    printf("  FAIL  %s\n        got  %s\n        want %s\n", name, gh, want_hex);
+    failures++;
+}
+
 struct fcase { const char *a, *b, *add, *sub, *mul, *sqr, *inv; };
 
-#include "p256_field_vec.inc"   /* generated cases[], P_HEX, PM1_HEX */
+#include "p256_field_vec.inc"    /* generated cases[],  P_HEX, PM1_HEX */
+#include "p256_scalar_vec.inc"   /* generated scases[], RED_IN/OUT, N_HEX, NM1_HEX */
 
 int main(void)
 {
@@ -76,6 +89,35 @@ int main(void)
         check_int("fe_from_bytes accepts p-1", fe_from_bytes(&t, pm1), 0);
     }
 
-    printf(failures ? "\nP256 FIELD TEST: %d FAILURE(S)\n" : "\nP256 FIELD TEST: ALL PASS\n", failures);
+    printf("P-256 scalar arithmetic (mod n):\n");
+    int nsc = (int)(sizeof(scases) / sizeof(scases[0]));
+    for (int i = 0; i < nsc; i++) {
+        const struct fcase *c = &scases[i];
+        uint8_t ab[32], bb[32]; sc a, b, r;
+        unhex(c->a, ab); unhex(c->b, bb);
+        sc_from_bytes(&a, ab); sc_from_bytes(&b, bb);
+        char nm[64];
+        sprintf(nm, "sc %d: a + b", i); sc_add(&r, &a, &b); check_sc(nm, &r, c->add);
+        sprintf(nm, "sc %d: a - b", i); sc_sub(&r, &a, &b); check_sc(nm, &r, c->sub);
+        sprintf(nm, "sc %d: a * b", i); sc_mul(&r, &a, &b); check_sc(nm, &r, c->mul);
+        sprintf(nm, "sc %d: a^2",   i); sc_mul(&r, &a, &a); check_sc(nm, &r, c->sqr);
+        sprintf(nm, "sc %d: a^-1",  i); sc_inv(&r, &a);     check_sc(nm, &r, c->inv);
+        if (!sc_is_zero(&a)) {
+            sc inv, prod, one; sc_set_zero(&one); one.v[0] = 1;
+            sc_inv(&inv, &a); sc_mul(&prod, &a, &inv);
+            sprintf(nm, "sc %d: a * a^-1 == 1", i);
+            check_int(nm, sc_equal(&prod, &one), 1);
+        }
+    }
+    {
+        uint8_t in[32], nb[32], nm1[32]; sc r, t;
+        unhex(RED_IN, in); sc_reduce(&r, in);
+        check_sc("sc_reduce(n + 0x1234) == 0x1234", &r, RED_OUT);
+        unhex(N_HEX, nb); unhex(NM1_HEX, nm1);
+        check_int("sc_from_bytes rejects n", sc_from_bytes(&t, nb), -1);
+        check_int("sc_from_bytes accepts n-1", sc_from_bytes(&t, nm1), 0);
+    }
+
+    printf(failures ? "\nP256 TEST: %d FAILURE(S)\n" : "\nP256 TEST: ALL PASS\n", failures);
     return failures ? 1 : 0;
 }
