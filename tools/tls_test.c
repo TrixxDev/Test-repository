@@ -16,6 +16,7 @@
 #include "handshake.h"
 #include "client.h"
 #include "conn.h"
+#include "driver.h"
 #include "cert.h"
 #include "x509.h"
 #include "verify_cert.h"
@@ -142,6 +143,76 @@ static int mk_record(uint8_t *o, uint8_t ctype, int bodylen)
 /* trace sink: record the event sequence for assertions */
 static tls_event g_ev[64]; static int g_evn;
 static void rec_sink(void *ctx, tls_event ev, uint32_t detail) { (void)ctx; (void)detail; if (g_evn < 64) g_ev[g_evn++] = ev; }
+
+/* Mock byte transport for the handshake driver: serves a pre-built server flight
+ * (`in`) to read() in configurable chunks and captures everything write() sends
+ * (`out`). This is how the record-stream handling is proven off the wire —
+ * adversarial fragmentation lives entirely in the read schedule, not in TLS. */
+typedef struct {
+    const uint8_t *in; int in_len, in_pos;
+    int first_read;     /* if >0, the FIRST read returns exactly this many bytes */
+    int read_chunk;     /* then up to this per read (0 = all remaining)          */
+    int first_done;
+    int write_chunk;    /* up to this per write (0 = all) — forces send_all loops */
+    uint8_t out[2048]; int out_len;
+} mockx;
+
+static int mx_read(void *ctx, uint8_t *buf, size_t cap)
+{
+    mockx *m = (mockx *)ctx;
+    int remaining = m->in_len - m->in_pos;
+    if (remaining <= 0) return 0;                       /* clean EOF */
+    int n = remaining;
+    if (m->first_read > 0 && !m->first_done) { n = m->first_read; m->first_done = 1; }
+    else if (m->read_chunk > 0 && n > m->read_chunk)   n = m->read_chunk;
+    if ((size_t)n > cap) n = (int)cap;
+    for (int i = 0; i < n; i++) buf[i] = m->in[m->in_pos + i];
+    m->in_pos += n;
+    return n;
+}
+
+static int mx_write(void *ctx, const uint8_t *buf, size_t len)
+{
+    mockx *m = (mockx *)ctx;
+    int n = (int)len;
+    if (m->write_chunk > 0 && n > m->write_chunk) n = m->write_chunk;
+    if (m->out_len + n > (int)sizeof m->out) n = (int)sizeof m->out - m->out_len;
+    for (int i = 0; i < n; i++) m->out[m->out_len + i] = buf[i];
+    m->out_len += n;
+    return n;
+}
+
+/* Run the driver to CONNECTED over the mock transport. The conn/reader are static
+ * (large) to keep the stack small; caller pre-sets mx->{first_read,read_chunk,
+ * write_chunk}. Trust + trace are installed so the milestone trace is recorded. */
+static int drive_once(const uint8_t *cpriv, const uint8_t *crand,
+                      const x509_cert *ca, uint64_t now,
+                      const uint8_t *stream, int streamlen, mockx *mx)
+{
+    static tls_conn cn; static tls_record_reader rd; static uint8_t scratch[2048];
+    tls_conn_init(&cn, "example.com", cpriv, crand);
+    tls_client_set_trust(&cn.fsm, ca, 1, now);
+    g_evn = 0; tls_conn_set_trace(&cn, rec_sink, 0);
+    tls_reader_init(&rd);
+    mx->in = stream; mx->in_len = streamlen; mx->in_pos = 0; mx->first_done = 0; mx->out_len = 0;
+    tls_transport t = { mx_read, mx_write, mx };
+    return tls_driver_handshake(&cn, &rd, &t, scratch, sizeof scratch);
+}
+
+/* The full client-visible milestone trace, in order, for a clean handshake. */
+static int milestones_ok(void)
+{
+    static const tls_event want[] = {
+        TLS_EV_CLIENT_HELLO_SENT, TLS_EV_SERVER_HELLO, TLS_EV_HANDSHAKE_KEYS,
+        TLS_EV_ENCRYPTED_EXTENSIONS, TLS_EV_CERTIFICATE, TLS_EV_CERT_CHAIN_OK,
+        TLS_EV_CERT_VERIFY_OK, TLS_EV_PEER_AUTHENTICATED, TLS_EV_FINISHED_OK,
+        TLS_EV_APP_KEYS, TLS_EV_CONNECTED
+    };
+    int n = (int)(sizeof want / sizeof want[0]);
+    if (g_evn != n) return 0;
+    for (int i = 0; i < n; i++) if (g_ev[i] != want[i]) return 0;
+    return 1;
+}
 
 /* Test-only "server" side: sign a CertificateVerify with the leaf private key via
  * RSASSA-PSS (EMSA-PSS-ENCODE + modexp). The library is verify-only; this mirrors
@@ -1020,6 +1091,121 @@ int main(void)
         check_int("7. truncated record -> need more", tls_reader_next(&rr, &rec, &rl), 0);
         check_int("7. and bytes remain pending (EOF here = truncated)",
                   tls_reader_pending(&rr) == 5 + 1500, 1);
+    }
+
+    printf("TLS 1.3 handshake driver (byte stream -> CONNECTED):\n");
+    {
+        /* Build one authenticated server flight (real chain + real RSA-PSS
+         * CertificateVerify), seal it into wire records the way openssl s_server
+         * would -- SH plaintext, then EE | Certificate | CertificateVerify |
+         * Finished each as its own encrypted handshake record -- and run the
+         * driver over it under several adversarial read/write chunkings. */
+        uint8_t cad[700]; x509_cert ca;
+        x509_parse(cad, unhex(T_CA_CERT, cad), &ca);
+        uint8_t leafd[700]; int leaflen = unhex(T_LEAF_CERT, leafd);
+        uint8_t certmsg[800]; int cmlen = build_cert_msg(certmsg, leafd, leaflen);
+        uint8_t ln[128], ld[128]; int lnlen = unhex(T_LEAF_N, ln), ldlen = unhex(T_LEAF_D, ld);
+        uint64_t now2026 = 1767225600ULL;
+
+        uint8_t cpriv[32], spriv[32], crand[32], srand[32];
+        for (int i=0;i<32;i++){ cpriv[i]=(uint8_t)(i+21); spriv[i]=(uint8_t)(0xE0+i);
+                                crand[i]=(uint8_t)(0xBB+i); srand[i]=(uint8_t)(0xCC+i); }
+        uint8_t spub[32], cpub[32]; x25519_base(spub, spriv); x25519_base(cpub, cpriv);
+
+        /* reference ClientHello (deterministic): the driver's own tls_conn_start
+         * produces these exact bytes, so the flight built against them matches */
+        tls_client ref; tls_client_init(&ref, "example.com", cpriv, crand);
+        uint8_t ch[1024]; int chlen = tls_client_start(&ref, ch, sizeof ch);
+
+        tls_transcript ts; tls_transcript_init(&ts);
+        tls_transcript_update(&ts, ch, chlen);
+        uint8_t sh[256]; int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        tls_transcript_update(&ts, sh, shlen);
+        uint8_t hello_hash[32], ecdhe[32]; tls_transcript_hash(&ts, hello_hash);
+        x25519(ecdhe, spriv, cpub);
+        tls_key_schedule kss; tls_key_schedule_derive(&kss, ecdhe, hello_hash);
+
+        uint8_t ee[64]; int eelen = build_hs(ee, TLS_HS_ENCRYPTED_EXTENSIONS, (const uint8_t*)"\x00\x00", 2);
+        tls_transcript_update(&ts, ee, eelen);
+        tls_transcript_update(&ts, certmsg, cmlen);
+        uint8_t th_cert[32]; tls_transcript_hash(&ts, th_cert);
+        uint8_t cvmsg[256]; int cvlen = pss_sign_cv(cvmsg, th_cert, ln, lnlen, ld, ldlen);
+        tls_transcript_update(&ts, cvmsg, cvlen);
+        uint8_t sfk[32], th_cv[32], svd[32], sfin[64];
+        tls_finished_key(sfk, kss.server_hs_traffic);
+        tls_transcript_hash(&ts, th_cv);
+        tls_finished_verify_data(svd, sfk, th_cv);
+        int sfinlen = build_hs(sfin, TLS_HS_FINISHED, svd, 32);
+        tls_transcript_update(&ts, sfin, sfinlen);          /* Transcript(CH..server Finished) */
+        uint8_t thash_sf[32], cfk[32];
+        tls_transcript_hash(&ts, thash_sf);
+        tls_finished_key(cfk, kss.client_hs_traffic);       /* to verify the client's Finished */
+
+        /* seal the flight into the server byte stream */
+        tls_record_keys s_tx; epoch_from_secret(&s_tx, kss.server_hs_traffic);
+        uint8_t stream[4096]; int sn = 0; uint8_t r[1024]; int rl;
+        sn += plaintext_wrap(stream + sn, TLS_CONTENT_HANDSHAKE, sh, shlen);
+        rl = tls_record_seal(&s_tx, TLS_CONTENT_HANDSHAKE, ee, eelen, r, sizeof r);
+        for (int i=0;i<rl;i++) stream[sn++] = r[i];
+        int cert_off = sn;                                  /* Certificate record begins here */
+        rl = tls_record_seal(&s_tx, TLS_CONTENT_HANDSHAKE, certmsg, cmlen, r, sizeof r);
+        for (int i=0;i<rl;i++) stream[sn++] = r[i];
+        int cert_mid = cert_off + rl / 2;                   /* a byte boundary inside the cert */
+        rl = tls_record_seal(&s_tx, TLS_CONTENT_HANDSHAKE, cvmsg, cvlen, r, sizeof r);
+        for (int i=0;i<rl;i++) stream[sn++] = r[i];
+        rl = tls_record_seal(&s_tx, TLS_CONTENT_HANDSHAKE, sfin, sfinlen, r, sizeof r);
+        int fin_off = sn;                                   /* Finished record begins here */
+        for (int i=0;i<rl;i++) stream[sn++] = r[i];
+
+        mockx mx;
+
+        /* scenario 2: the whole flight (5 records) arrives in one read */
+        memset(&mx,0,sizeof mx); mx.read_chunk = 0; mx.write_chunk = 0;
+        check_int("all-at-once: driver reaches CONNECTED", drive_once(cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+        check_int("all-at-once: full milestone trace", milestones_ok(), 1);
+        check_int("all-at-once: one read consumed the stream", mx.in_pos, sn);
+
+        /* the captured client output must be ClientHello (plaintext) + an encrypted
+         * Finished that verifies server-side -- a real, valid client response */
+        check_int("client wrote ClientHello first (plaintext handshake)", (mx.out_len > 5 && mx.out[0] == TLS_CONTENT_HANDSHAKE), 1);
+        int r1 = 5 + (((int)mx.out[3] << 8) | mx.out[4]);   /* end of the ClientHello record */
+        check_int("client ClientHello matches the reference bytes", (r1 == 5 + chlen && memcmp(mx.out + 5, ch, chlen) == 0), 1);
+        check_int("client wrote a second (encrypted) record", (mx.out_len > r1 + 5 && mx.out[r1] == TLS_CONTENT_APPLICATION_DATA), 1);
+        {
+            tls_record_keys s_rx; epoch_from_secret(&s_rx, kss.client_hs_traffic);
+            uint8_t cfin[64]; uint8_t it;
+            int n = tls_record_open(&s_rx, mx.out + r1, mx.out_len - r1, cfin, sizeof cfin, &it);
+            check_int("server opens the client Finished", (n == 36 && it == TLS_CONTENT_HANDSHAKE), 1);
+            check_int("client Finished verifies server-side", tls_check_finished(cfk, thash_sf, cfin + 4), 0);
+        }
+        /* keep this clean capture as the reference for the partial-write scenario */
+        uint8_t ref_out[2048]; int ref_outlen = mx.out_len;
+        memcpy(ref_out, mx.out, (size_t)mx.out_len);
+
+        /* scenario 1: every byte delivered separately (read 1, write 1) */
+        memset(&mx,0,sizeof mx); mx.read_chunk = 1; mx.write_chunk = 1;
+        check_int("byte-by-byte: driver reaches CONNECTED", drive_once(cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+        check_int("byte-by-byte: full milestone trace", milestones_ok(), 1);
+
+        /* scenario 3: a read boundary lands inside the Certificate record (first
+         * read = SH+EE+half the cert; the reader reassembles across the split) */
+        memset(&mx,0,sizeof mx); mx.first_read = cert_mid; mx.read_chunk = 0; mx.write_chunk = 0;
+        check_int("split mid-Certificate: driver reaches CONNECTED", drive_once(cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+        check_int("split mid-Certificate: full milestone trace", milestones_ok(), 1);
+
+        /* scenario 4: send() only ever accepts 1 byte -> send_all must loop, yet
+         * the captured output is byte-identical to the clean run (nothing lost or
+         * reordered by the partial writes) */
+        memset(&mx,0,sizeof mx); mx.read_chunk = 0; mx.write_chunk = 1;
+        check_int("partial writes: driver reaches CONNECTED", drive_once(cpriv,crand,&ca,now2026,stream,sn,&mx), TLS_DRIVE_OK);
+        check_int("partial writes: output byte-identical despite 1-byte send()",
+                  (mx.out_len == ref_outlen && memcmp(mx.out, ref_out, (size_t)ref_outlen) == 0), 1);
+
+        /* negative: a flight truncated before the Finished -> EOF, never a silent
+         * "connected". The driver must report EOF before CONNECTED as fatal. */
+        memset(&mx,0,sizeof mx); mx.read_chunk = 0; mx.write_chunk = 0;
+        check_int("truncated flight (no Finished) -> EOF, not CONNECTED",
+                  drive_once(cpriv,crand,&ca,now2026,stream,fin_off,&mx), TLS_DRIVE_EOF);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);

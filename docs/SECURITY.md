@@ -38,7 +38,8 @@ Run the vectors: `make crypto-test`.
 | 12.6 | **FSM authentication** (`tls/client.c`) — Cert+CV+Finished, `peer_authenticated` | synthetic authed handshake | ✅ |
 | 13.0a | **Network audit** (`docs/NET_SEMANTICS.md`) + **record reader** (`tls/record_reader.c`) | host framing tests | ✅ |
 | 13.0b.0 | **TCP rx-buffer fix** — compacting receive ring (`net/rxring.c`), `tcp.c` migrated | host ring test (`make rxring-test`) | ✅ |
-| 13.0b | Local RSA server → CONNECTED over a socket | QEMU + `openssl s_server` | next |
+| 13.0b.1 | **Handshake driver** (`tls/driver.c`) — `transport → reader → conn → CONNECTED` | host driver test (4 chunkings + EOF) | ✅ |
+| 13.0b.2 | CONNECTED over a real socket (local RSA `s_server`) | QEMU + `openssl s_server` | next |
 | 13.0c | Real internet RSA endpoint: `GET /` → 200 OK | real `https://` site | later |
 | 13.x | Intermediate CAs, then ECDSA P-256 | real chains / wycheproof | later |
 
@@ -814,3 +815,46 @@ which would need careful `rcv_nxt`/ACK/window recomputation the simple stack
 isn't built for yet. QEMU acceptance (run on the Aurora side): a >8 KiB response
 keeps arriving past the first 8 KiB, and a slow 32-byte-at-a-time reader against
 a flooding sender keeps progressing (window release + buffer reuse).
+
+## Step 13.0b.1 — the handshake driver (off the wire, deterministically)
+
+The top seam that finally connects the byte transport to the engine:
+
+```
+transport (socket)  ->  tls_record_reader  ->  tls_conn  ->  CONNECTED
+```
+
+`tls/driver.c` is deliberately thin — all the protocol logic already exists below
+it (`tls_conn` does record binding / epoch switching / message reassembly;
+`tls_record_reader` does framing). The driver only owns the control loop: send the
+ClientHello, pull complete records out of the reader, feed each to `tls_conn`, send
+back anything it emits (the client Finished), and stop the instant the FSM reaches
+CONNECTED. It is **transport-agnostic** — it touches the network only through a
+`tls_transport` of `read`/`write` callbacks — so the identical driver runs over a
+kernel socket fd and over a host-test mock. Outbound flights go through `send_all`,
+which loops over `write` and never assumes a full write (Aurora's `tsk_write` can
+report a short count).
+
+Because the transport is a callback, the record-stream handling — the part most
+likely to bite on a real server — is proven **deterministically, off the wire**.
+`make tls-test` builds one authenticated server flight (real synthetic chain + a
+real RSA-PSS CertificateVerify), seals it into wire records the way `s_server`
+does (SH plaintext, then EE | Certificate | CertificateVerify | Finished each as
+its own encrypted record), and runs the driver to CONNECTED under adversarial
+read/write chunkings:
+
+```
+all-at-once   five records in a single read            -> CONNECTED + full trace
+byte-by-byte  read 1 / write 1                          -> CONNECTED + full trace
+split mid-Certificate  a read boundary inside the cert  -> CONNECTED + full trace
+partial writes  write() accepts 1 byte at a time        -> output byte-identical
+truncated flight (no Finished)                           -> EOF, never "connected"
+```
+
+The clean run is checked end to end both ways: the full client milestone trace
+(ClientHello sent → … → CONNECTED) fires, and the captured client output is a
+valid ClientHello followed by an encrypted Finished that **verifies server-side**
+with the client handshake-traffic key. With this, the TLS engine is no longer a
+lab test — it drives a real handshake to CONNECTED from nothing but a byte stream.
+What remains for 13.0b.2 is purely the socket adapter (fd → `tls_transport`) and a
+QEMU run against a local `openssl s_server -tls1_3`.
