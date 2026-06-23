@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include "p256_field.h"
 #include "p256_scalar.h"
+#include "p256_point.h"
 
 static int failures;
 
@@ -52,6 +53,25 @@ struct fcase { const char *a, *b, *add, *sub, *mul, *sqr, *inv; };
 
 #include "p256_field_vec.inc"    /* generated cases[],  P_HEX, PM1_HEX */
 #include "p256_scalar_vec.inc"   /* generated scases[], RED_IN/OUT, N_HEX, NM1_HEX */
+#include "p256_point_vec.inc"    /* generated G/G2/G3/NEGG, kcases[], CURVE_B_HEX */
+
+static void load_fe(fe *r, const char *hex)
+{ uint8_t b[32]; unhex(hex, b); fe_from_bytes(r, b); }
+
+static void load_point(p256_point *P, const char *xh, const char *yh)
+{ fe x, y; load_fe(&x, xh); load_fe(&y, yh); p256_from_affine(P, &x, &y); }
+
+/* check a computed point against an expected (infinity, or affine x/y hex) */
+static void check_pt(const char *name, const p256_point *P,
+                     int inf, const char *xh, const char *yh)
+{
+    if (inf) { check_int(name, p256_is_infinity(P), 1); return; }
+    fe x, y; uint8_t xb[32], yb[32], exb[32], eyb[32];
+    if (p256_to_affine(&x, &y, P) != 0) { check_int(name, 0, 1); return; }
+    fe_to_bytes(xb, &x); fe_to_bytes(yb, &y);
+    unhex(xh, exb); unhex(yh, eyb);
+    check_int(name, (memcmp(xb, exb, 32) == 0 && memcmp(yb, eyb, 32) == 0), 1);
+}
 
 int main(void)
 {
@@ -116,6 +136,48 @@ int main(void)
         unhex(N_HEX, nb); unhex(NM1_HEX, nm1);
         check_int("sc_from_bytes rejects n", sc_from_bytes(&t, nb), -1);
         check_int("sc_from_bytes accepts n-1", sc_from_bytes(&t, nm1), 0);
+    }
+
+    /* ---- curve geometry: double/add on known points, then group invariants ---- */
+    printf("P-256 point geometry (double / add):\n");
+    {
+        p256_point G, G2, G3, negG, O, r;
+        p256_base_point(&G);
+        load_point(&G2, G2_X, G2_Y);
+        load_point(&G3, G3_X, G3_Y);
+        load_point(&negG, NEGG_X, NEGG_Y);
+        p256_set_infinity(&O);
+
+        p256_double(&r, &G);            check_pt("2G = double(G)", &r, G2_INF, G2_X, G2_Y);
+        p256_add(&r, &G, &G);           check_pt("2G = G + G",    &r, G2_INF, G2_X, G2_Y);
+        p256_add(&r, &G2, &G);          check_pt("3G = 2G + G",   &r, G3_INF, G3_X, G3_Y);
+        p256_add(&r, &G, &G2);          check_pt("3G = G + 2G",   &r, G3_INF, G3_X, G3_Y);
+
+        p256_add(&r, &G, &O);           check_pt("G + O = G", &r, G_INF, G_X, G_Y);
+        p256_add(&r, &O, &G);           check_pt("O + G = G", &r, G_INF, G_X, G_Y);
+        p256_double(&r, &O);            check_int("double(O) = O", p256_is_infinity(&r), 1);
+        p256_add(&r, &G, &negG);        check_int("G + (-G) = O", p256_is_infinity(&r), 1);
+    }
+
+    /* ---- scalar multiply against k*G ground truth, then n*G = O ---- */
+    printf("P-256 scalar multiply (k*G):\n");
+    {
+        p256_point G, r;
+        p256_base_point(&G);
+        int nk = (int)(sizeof(kcases) / sizeof(kcases[0]));
+        for (int i = 0; i < nk; i++) {
+            const struct kcase *c = &kcases[i];
+            uint8_t kb[32]; sc k;
+            unhex(c->k, kb); sc_from_bytes(&k, kb);
+            p256_scalar_mul(&r, &k, &G);
+            char nm[48]; sprintf(nm, "k*G case %d", i);
+            check_pt(nm, &r, c->inf, c->x, c->y);
+        }
+        /* n*G = O : the order check, the strongest single point-formula test */
+        uint8_t nb[32]; sc nsc;
+        unhex(N_HEX, nb); sc_from_bytes(&nsc, nb);   /* loads n (range check ignored) */
+        p256_scalar_mul(&r, &nsc, &G);
+        check_int("n*G = O (order check)", p256_is_infinity(&r), 1);
     }
 
     printf(failures ? "\nP256 TEST: %d FAILURE(S)\n" : "\nP256 TEST: ALL PASS\n", failures);

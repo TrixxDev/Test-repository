@@ -46,7 +46,8 @@ Run the vectors: `make crypto-test`.
 | 13.0c | Real internet RSA endpoint: `GET /` → 200 OK | real `https://` site | later |
 | 13.x.1a | **P-256 field** (`crypto/p256_field.c`) — GF(p) add/sub/mul/sqr/inv | host KAT vs Python | ✅ |
 | 13.x.1b | **P-256 scalar** (`crypto/p256_scalar.c`) — GF(n), separate ring | host KAT vs Python | ✅ |
-| 13.x.2 / .2b | Point add/double/scalar-mul; **public-key validation** (on-curve, n·Q=O) | host KAT | next |
+| 13.x.2 | **P-256 points** (`crypto/p256_point.c`) — Jacobian add/double/scalar-mul | host KAT: k·G, group invariants, n·G=O | ✅ |
+| 13.x.2b | **EC public-key validation** (on-curve, bounds, ≠O, n·Q=O) | host KAT + invalid vectors | next |
 | 13.x.3 | **ECDSA verify** — Wycheproof mandatory (r/s=0, ≥n, malformed DER, edges) | wycheproof | later |
 | 13.x.4 / .5 / .6 | X.509 ECDSA · TLS CertificateVerify 0x0403 · full ECDSA flight → CONNECTED | host + QEMU | later |
 | 13.y | Intermediate CA chains (leaf → intermediate → root) | real chains | later |

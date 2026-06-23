@@ -225,7 +225,7 @@ rsa-test:
 # no curve/ECDSA yet).
 .PHONY: p256-test
 p256-test:
-	$(CC) -O2 -Icrypto -Itools tools/p256_test.c crypto/p256_field.c crypto/p256_scalar.c crypto/bignum.c -o /tmp/aurora_p256_test
+	$(CC) -O2 -Icrypto -Itools tools/p256_test.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/bignum.c -o /tmp/aurora_p256_test
 	/tmp/aurora_p256_test
 
 # Host-side TCP receive-ring test (net/rxring.c: the buffer behind tcp_recv).
