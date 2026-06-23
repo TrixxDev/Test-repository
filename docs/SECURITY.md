@@ -48,8 +48,9 @@ Run the vectors: `make crypto-test`.
 | 13.x.1b | **P-256 scalar** (`crypto/p256_scalar.c`) — GF(n), separate ring | host KAT vs Python | ✅ |
 | 13.x.2 | **P-256 points** (`crypto/p256_point.c`) — Jacobian add/double/scalar-mul | host KAT: k·G, group invariants, n·G=O | ✅ |
 | 13.x.2b | **EC public-key validation** (`p256_pubkey_decode`) — on-curve, bounds, n·Q=O | host: valid + invalid vectors | ✅ |
-| 13.x.3 | **ECDSA verify** — Wycheproof mandatory (r/s=0, ≥n, malformed DER, edges) | wycheproof | next |
-| 13.x.4 / .5 / .6 | X.509 ECDSA · TLS CertificateVerify 0x0403 · full ECDSA flight → CONNECTED | host + QEMU | later |
+| 13.x.3 | **ECDSA verify** (`crypto/ecdsa.c`) + strict DER + fast field reduction | **484/484 Wycheproof** | ✅ |
+| 13.x.4 | X.509 ECDSA (SPKI EC key + `ecdsa-with-SHA256` signature) | host KAT | next |
+| 13.x.5 / .6 | TLS CertificateVerify 0x0403 · full ECDSA flight → CONNECTED | host + QEMU | later |
 | 13.y | Intermediate CA chains (leaf → intermediate → root) | real chains | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -967,3 +968,46 @@ declared length exceeds the reassembly buffer (`TLS_CONN_HS_BUF`) is rejected wi
 `ERR_CAPACITY` the moment its header is seen — never buffered, never overflowed,
 never a silent CONNECTED. So a genuinely large or hostile chain fails closed
 rather than corrupting memory.
+
+## Step 13.x.1–13.x.3 — ECDSA P-256 verify (the real-web signature scheme)
+
+RSA got Aurora to CONNECTED, but most of the live web authenticates with ECDSA
+P-256 (`ecdsa_secp256r1_sha256`). Built bottom-up as separate, independently
+KAT'd pieces so a failure localizes to one layer:
+
+- **13.x.1a/1b — field (mod p) and scalar (mod n) as separate rings**
+  (`crypto/p256_field.c`, `crypto/p256_scalar.c`): different moduli, different
+  files, each checked against Python vectors over edge values (0/1/p−1/n−1,
+  near-2^256), including `a·a⁻¹ ≡ 1` and the range checks verification needs.
+- **13.x.2 — points in Jacobian coordinates** (`crypto/p256_point.c`): the
+  identity is an explicit infinity flag, not magic coordinates; add/double need no
+  inversion (one inversion per scalar-mul, at the end). Tested geometry-first
+  (double/add on known points, then group invariants G+O / G+(−G)=O / 2G=G+G /
+  3G=2G+G), then 9 independent `k·G` vectors, then **n·G = O** — the order check
+  that, alongside the `k·G` vectors, makes a hidden formula bug very unlikely.
+- **13.x.2b — public-key validation** (`p256_pubkey_decode`): rejects wrong
+  length/prefix, X or Y ≥ p, off-curve points, and (defense in depth) any point
+  with n·Q ≠ O. Tested with valid keys and a battery of invalid ones.
+- **13.x.3 — ECDSA verify** (`crypto/ecdsa.c`): a strict X9.62 DER parser
+  (rejects non-minimal/indefinite lengths, trailing bytes, negative/zero-padded
+  integers, over-long magnitudes) feeding the `s⁻¹` / `u1·G + u2·Q` /
+  `x_R ≟ r mod n` equation. Validated against the **official Google Wycheproof
+  set — all 484 vectors pass** (174 valid accepted, 310 invalid rejected),
+  covering exactly the edges that break ECDSA implementations: r/s = 0 or ≥ n,
+  modified hash/signature, malformed DER, leading zeros, edge values near n.
+
+This is the ECDSA analogue of RFC 8448 for the handshake: the negative Wycheproof
+cases are the real test. The work is verify-only and uses public data, so nothing
+is constant-time.
+
+**Performance note (optimization pulled forward).** The field was first written
+on the verified `bignum` (correct but slow): one verify measured ~675 ms, so the
+484-vector Wycheproof run took ~5.5 min — too slow to be a routine test, and
+borderline for a live handshake. So the fast field reduction the roadmap deferred
+was brought forward: P-256's prime lets `value = low + high·2^256` reduce as
+`low + high·R0` with R0 = 2^224−2^192−2^96+1, and since 224/192/96 are whole
+32-bit words the folds are word-aligned shifts with no bit-twiddling, staying
+non-negative so the loop converges to one final subtract. Same `fe` API, so the
+13.x.1a KATs and all 484 Wycheproof vectors re-validate it unchanged: verify
+dropped to ~17 ms and the full suite to ~8 s. The scalar ring stays on `bignum`
+(a handful of ops per verify); a fast mod-n is a later, optional step.

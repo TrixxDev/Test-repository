@@ -228,6 +228,12 @@ p256-test:
 	$(CC) -O2 -Icrypto -Itools tools/p256_test.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/bignum.c -o /tmp/aurora_p256_test
 	/tmp/aurora_p256_test
 
+# Host-side ECDSA-P256-SHA256 verification against the official Wycheproof vectors.
+.PHONY: ecdsa-test
+ecdsa-test:
+	$(CC) -O2 -Icrypto -Itools tools/ecdsa_test.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/bignum.c crypto/sha256.c -o /tmp/aurora_ecdsa_test
+	/tmp/aurora_ecdsa_test
+
 # Host-side TCP receive-ring test (net/rxring.c: the buffer behind tcp_recv).
 # Pure data structure, no QEMU — proves space is reused so a connection is no
 # longer capped at one bufferful over its whole lifetime.
