@@ -1,5 +1,6 @@
 /* TCP client connections over a fixed connection table — see tcp.h. */
 #include "tcp.h"
+#include "rxring.h"
 #include "ipv4.h"
 #include "netstack.h"
 #include "inet.h"
@@ -24,8 +25,6 @@ struct tcp_hdr {
 #define TCP_PSH  0x08
 #define TCP_ACK  0x10
 
-#define TCP_RCV_WND   8192
-#define TCP_RX_CAP    8192          /* per-connection receive buffer */
 #define TCP_TX_MAX    1400          /* one segment, well under the MTU */
 #define TCP_TIME_WAIT_MS 1000       /* shortened 2*MSL (real TCP: minutes) */
 #define TCP_RTO_MS    1000          /* initial retransmit timeout (RFC 6298) */
@@ -51,8 +50,8 @@ struct rtx {
  * connect (kept around first so a caller can drain trailing data after close). */
 struct conn {
     struct tcp_tcb tcb;
-    uint8_t   rx_buf[TCP_RX_CAP];
-    unsigned  rx_len, rx_read;
+    rxring    rx;               /* in-order received data, drained by tcp_recv */
+    unsigned  rx_total;         /* lifetime bytes accepted (for tcp_rx_total) */
     uint64_t  tw_deadline;      /* TIME_WAIT -> CLOSED moment */
     struct rtx rtx;
     int       used;
@@ -209,18 +208,25 @@ int tcp_recv(int h, void *buf, size_t cap)
     struct conn *c = conn_of(h);
     if (!c)
         return 0;
-    unsigned avail = c->rx_len - c->rx_read;
-    unsigned n = avail < cap ? avail : (unsigned)cap;
-    if (n)
-        memcpy(buf, c->rx_buf + c->rx_read, n);
-    c->rx_read += n;
+    unsigned n = rxring_pop(&c->rx, (uint8_t *)buf, (unsigned)cap);
+    if (n) {
+        /* Draining frees ring space, so our receive window reopens. If we had
+         * advertised a closed window (peer paused), send a window update now so
+         * it resumes promptly instead of waiting on its persist timer. */
+        unsigned was = c->tcb.rcv_wnd;
+        c->tcb.rcv_wnd = (uint16_t)rxring_free(&c->rx);
+        if (was == 0 && c->tcb.rcv_wnd > 0 &&
+            (c->tcb.state == TCP_ESTABLISHED ||
+             c->tcb.state == TCP_FIN_WAIT_1 || c->tcb.state == TCP_FIN_WAIT_2))
+            tcp_xmit(c, TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
+    }
     return (int)n;
 }
 
 int tcp_rx_total(int h)
 {
     struct conn *c = conn_of(h);
-    return c ? (int)c->rx_len : 0;
+    return c ? (int)c->rx_total : 0;
 }
 
 int tcp_tx_idle(int h)
@@ -299,6 +305,7 @@ int tcp_connect(uint32_t dst, uint16_t port)
 
     memset(c, 0, sizeof(*c));
     c->used = 1;
+    rxring_init(&c->rx);
     c->tcb.local_ip    = IP_LOCAL;
     c->tcb.remote_ip   = dst;
     c->tcb.remote_port = port;
@@ -306,7 +313,7 @@ int tcp_connect(uint32_t dst, uint16_t port)
     c->tcb.iss         = (uint32_t)perf_now_us();
     c->tcb.snd_una     = c->tcb.iss;
     c->tcb.snd_nxt     = c->tcb.iss + 1;        /* SYN consumes one sequence */
-    c->tcb.rcv_wnd     = TCP_RCV_WND;
+    c->tcb.rcv_wnd     = RX_RING_CAP;           /* free space in the receive ring */
     c->tcb.state       = TCP_SYN_SENT;
     stats.connects++;
 
@@ -409,12 +416,17 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
 
     uint32_t before = c->tcb.rcv_nxt;
     if (plen > 0 && seq == c->tcb.rcv_nxt && receiving) {   /* in-order data only */
-        unsigned space = (c->rx_len < TCP_RX_CAP) ? TCP_RX_CAP - c->rx_len : 0;
-        unsigned n = plen < space ? plen : space;
-        if (n)
-            memcpy(c->rx_buf + c->rx_len, payload, n);
-        c->rx_len += n;
-        c->tcb.rcv_nxt += plen;
+        /* All-or-nothing: accept the segment only if it fits whole. One that
+         * doesn't fit is dropped *without* advancing rcv_nxt, so the peer
+         * retransmits once our window reopens -- never silently ACKed and lost
+         * (the old code advanced rcv_nxt by the full length even when it had
+         * truncated the copy). */
+        if (rxring_free(&c->rx) >= plen) {
+            rxring_push(&c->rx, payload, plen);
+            c->rx_total += plen;
+            c->tcb.rcv_nxt += plen;
+        }
+        c->tcb.rcv_wnd = (uint16_t)rxring_free(&c->rx);   /* advertise true window */
     }
 
     int fin = 0;

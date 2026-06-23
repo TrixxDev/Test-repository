@@ -93,9 +93,16 @@ The userspace API is just VFS read/write on a socket fd (`user/libc.h`):
 
 ## 6. ⚠ Blockers & risks for TLS (ranked)
 
-### (A) 8 KiB receive buffer that never compacts — **must fix before real servers**
-`struct conn.rx_buf[TCP_RX_CAP=8192]` is **linear and non-compacting**
-(`net/tcp.c:52,411`):
+### (A) 8 KiB receive buffer that never compacts — ✅ **FIXED (Phase 13.0b.0)**
+> Resolved in 13.0b.0a (`net/rxring.c`, a 16 KiB compacting ring with a host
+> test) + 13.0b.0b (`net/tcp.c` migrated onto it). `tcp_recv` now frees ring
+> space as it drains; `tcp_input` accepts a segment **all-or-nothing** and never
+> advances `rcv_nxt` over bytes it didn't store; `rcv_wnd` advertises the true
+> free space and a window update is sent when a previously-closed window reopens.
+> The original defect is recorded below for context.
+
+The original (pre-fix) code: `struct conn.rx_buf[TCP_RX_CAP=8192]` was **linear
+and non-compacting** (`net/tcp.c:52,411`):
 ```c
 unsigned space = (c->rx_len < TCP_RX_CAP) ? TCP_RX_CAP - c->rx_len : 0;  /* uses the WRITE cursor */
 unsigned n = plen < space ? plen : space;
@@ -114,13 +121,15 @@ For TLS this is the #1 hazard: a real ServerHello..Finished flight with a full
 certificate chain (leaf + intermediates, RSA) routinely exceeds 8 KB, and any HTTP
 response body certainly does. A single TLS record alone can be up to ~16.6 KB.
 
-**Fix (within 13.0):** make `rx_buf` compacting (ring, or `memmove` on read) so
-`space = TCP_RX_CAP - (rx_len - rx_read)`; **drop (don't ACK) bytes that don't
-fit** and advertise the true free window in `rcv_wnd` so the peer pauses instead of
-losing data. Size 8 KiB then streams arbitrarily large data (the record reader
-reassembles across reads); 16 KiB reduces round-trips. The **local RSA test server
-(13.0b)** can run on the current buffer if its handshake + response stay under
-8 KiB, so the buffer fix can land alongside 13.0b and is *required* before 13.0c.
+**Fix as implemented (13.0b.0):** `rx_buf` replaced by a 16 KiB ring (`rxring`);
+`free = RX_RING_CAP - used` reuses drained space, so a connection streams
+arbitrarily large data (the record reader reassembles across reads). A segment
+that does not fit whole is **dropped without advancing `rcv_nxt`** (the peer
+retransmits once the window reopens — never silently ACKed and lost). `rcv_wnd`
+carries the real free window on every segment, and `tcp_recv` emits a window
+update when it reopens a window it had advertised as 0. **Conservative choice:**
+all-or-nothing per segment, not partial acceptance — partial accept would require
+careful `rcv_nxt`/ACK/window recomputation the simple stack isn't built for yet.
 
 ### (B) recv EOF/timeout ambiguity
 `0` means peer-closed **or** 10 s idle. The TLS driver must treat any `0` before

@@ -37,7 +37,8 @@ Run the vectors: `make crypto-test`.
 | 12.5b | **CertificateVerify** (`crypto/mgf1.c`, `crypto/rsa_pss.c`, `tls/cert.c`) | RFC 8448 CertificateVerify | ✅ |
 | 12.6 | **FSM authentication** (`tls/client.c`) — Cert+CV+Finished, `peer_authenticated` | synthetic authed handshake | ✅ |
 | 13.0a | **Network audit** (`docs/NET_SEMANTICS.md`) + **record reader** (`tls/record_reader.c`) | host framing tests | ✅ |
-| 13.0b | TCP rx-buffer fix + local RSA server → CONNECTED over a socket | QEMU + `openssl s_server` | next |
+| 13.0b.0 | **TCP rx-buffer fix** — compacting receive ring (`net/rxring.c`), `tcp.c` migrated | host ring test (`make rxring-test`) | ✅ |
+| 13.0b | Local RSA server → CONNECTED over a socket | QEMU + `openssl s_server` | next |
 | 13.0c | Real internet RSA endpoint: `GET /` → 200 OK | real `https://` site | later |
 | 13.x | Intermediate CAs, then ECDSA P-256 | real chains / wycheproof | later |
 
@@ -781,3 +782,35 @@ feed more. `make tls-test` covers the seven framing cases that bite real streams
 
 With framing proven deterministically, 13.0b binds it to a real socket: fix the
 rx buffer, then drive a handshake to CONNECTED against a local RSA `s_server`.
+
+## Step 13.0b.0 — TCP receive ring (the transport fix under TLS)
+
+The audit's headline defect, fixed before any live handshake. The old
+per-connection buffer used a write cursor (`rx_len`) that reads never rewound, so
+a connection could absorb at most one bufferful **over its entire lifetime** and,
+once full, advanced `rcv_nxt` over bytes it had dropped — silently ACKing data it
+never stored. That is a transport reliability defect, not a TLS issue, so it was
+fixed at the transport layer and proven independently of TLS and of QEMU.
+
+Split into two commits so a post-integration regression localises instantly:
+
+- **13.0b.0a — `net/rxring.c`**: a fixed 16 KiB byte ring (`push`/`pop`/`used`/
+  `free`). A pure data structure — no TCP, sequence, or window knowledge; the
+  accept/drop *policy* stays in the caller. Freestanding (explicit byte copies,
+  no `memcpy`) so one source compiles into both the kernel and the host test.
+  `make rxring-test` proves FIFO order, partial-pop continuation, refusal to
+  overflow, wrap-around ordering, the exact full/empty boundaries, and — the
+  point — ~640 KiB flowing through the 16 KiB ring over 10 000 push/pop cycles.
+- **13.0b.0b — `net/tcp.c` migration**: `tcp_recv` pops from the ring (freeing
+  space) and sends a window update when it reopens a window it had advertised as
+  0; `tcp_input` accepts a segment **all-or-nothing** and never advances
+  `rcv_nxt` over bytes it didn't store (a non-fitting segment is dropped so the
+  peer retransmits once space frees); `rcv_wnd` carries the real free window on
+  every segment. 16 KiB sits comfortably above one max wire record (2^14+256)
+  and a multi-KiB certificate chain.
+
+Conservative choice: all-or-nothing per segment rather than partial acceptance,
+which would need careful `rcv_nxt`/ACK/window recomputation the simple stack
+isn't built for yet. QEMU acceptance (run on the Aurora side): a >8 KiB response
+keeps arriving past the first 8 KiB, and a slow 32-byte-at-a-time reader against
+a flooding sender keeps progressing (window release + buffer reuse).
