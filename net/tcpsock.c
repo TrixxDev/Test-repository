@@ -18,6 +18,26 @@ static vfs_ops_t tcpsock_ops = { .read = tsk_read, .write = tsk_write };
 
 int tcpsock_is(vfs_node_t *node) { return node && node->ops == &tcpsock_ops; }
 
+/* Parse a dotted-quad "a.b.c.d" into a host-order IPv4 address (a in the high
+ * byte, matching dns_query / the IP4 macro). Returns 1 on a complete, valid
+ * literal, else 0 so the caller falls back to a DNS lookup. Lets a program
+ * connect straight to a numeric address (e.g. the QEMU host at 10.0.2.2) when no
+ * resolver knows the name. */
+static int parse_ipv4(const char *s, uint32_t *out)
+{
+    uint32_t ip = 0;
+    for (int part = 0; part < 4; part++) {
+        if (*s < '0' || *s > '9') return 0;
+        int v = 0;
+        while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); if (v > 255) return 0; s++; }
+        ip = (ip << 8) | (uint32_t)v;
+        if (part < 3 && *s++ != '.') return 0;
+    }
+    if (*s != '\0') return 0;
+    *out = ip;
+    return 1;
+}
+
 vfs_node_t *tcpsock_create(void)
 {
     struct tcpsock *t = (struct tcpsock *)kmalloc(sizeof(*t));
@@ -38,8 +58,10 @@ int tcpsock_connect(vfs_node_t *node, const char *host, int port)
 {
     struct tcpsock *t = (struct tcpsock *)node->priv;
     uint32_t ip;
-    if (dns_query(host, DNS_A, &ip) != 0)
-        return -2;                              /* DNS failed */
+    if (!parse_ipv4(host, &ip)) {               /* a numeric host skips DNS */
+        if (dns_query(host, DNS_A, &ip) != 0)
+            return -2;                          /* DNS failed */
+    }
     int h = tcp_connect(ip, (uint16_t)port);
     if (h < 0)
         return -3;
