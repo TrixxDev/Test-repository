@@ -178,14 +178,14 @@ crypto-test:
 # Host-side TLS protocol tests (tls/ over the verified crypto/ primitives).
 .PHONY: tls-test
 tls-test:
-	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_test.c tls/record.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/cert.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c -o /tmp/aurora_tls_test
+	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_test.c tls/record.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/cert.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c -o /tmp/aurora_tls_test
 	/tmp/aurora_tls_test
 
 # RFC 8448 trace runner: replays the published Simple 1-RTT Handshake through the
 # tls/ engine and checks every derived value byte-for-byte against the RFC.
 .PHONY: tls-trace-test
 tls-trace-test:
-	$(CC) -O2 -Icrypto -Itls tools/tls_trace_test.c tls/transcript.c tls/key_schedule.c tls/handshake.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/x25519.c -o /tmp/aurora_tls_trace_test
+	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_trace_test.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/cert.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/x25519.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/bignum.c -o /tmp/aurora_tls_trace_test
 	/tmp/aurora_tls_trace_test
 
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
@@ -197,7 +197,7 @@ x509-test:
 # Host-side RSA / big-integer math tests (crypto/ layer: pure math, no ASN.1).
 .PHONY: rsa-test
 rsa-test:
-	$(CC) -O2 -Icrypto tools/rsa_test.c crypto/bignum.c crypto/rsa.c crypto/sha256.c -o /tmp/aurora_rsa_test
+	$(CC) -O2 -Icrypto tools/rsa_test.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/sha256.c -o /tmp/aurora_rsa_test
 	/tmp/aurora_rsa_test
 
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display

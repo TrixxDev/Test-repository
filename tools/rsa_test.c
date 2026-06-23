@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include "bignum.h"
 #include "rsa.h"
+#include "mgf1.h"
+#include "rsa_pss.h"
 
 static int failures;
 
@@ -126,6 +128,38 @@ int main(void)
 
         check_ok("rsa_public rejects input >= modulus",
                  rsa_public(n, nlen, e, sizeof e, n, nlen, em, sizeof em) == -1);
+    }
+
+    printf("MGF1-SHA256 vs Python:\n");
+    {
+        uint8_t seed[4], out[50];
+        unhex("deadbeef", seed);
+        mgf1_sha256(seed, 4, out, sizeof out);
+        char hex[128]; for (int i = 0; i < 50; i++) sprintf(hex + i*2, "%02x", out[i]);
+        check_ok("MGF1(deadbeef, 50)", strcmp(hex,
+            "a49eea4c082081ca8e405f9e8c880f57de8f7e2a121eabd1e2815c233b22e4538cc20abb816f996a86b3c5a3bf047e8c4eab") == 0);
+    }
+
+    printf("RSA-PSS (rsa_pss_rsae_sha256) verify vs Python:\n");
+    {
+        /* toy 640-bit key + a real PSS signature, from /tmp/pssvec.py */
+        #define PSS_N   "d20000000000000000000000000000000000000000000000000000000000000000000000000002fc9000000000000000000000000000000000000000000000000000000000000000000000000001850f"
+        #define PSS_SIG "16a4c2cc5e2c283ec921d26e65a3c043f69a7b6b7c093f7656dfafa3df23068bde3a021b2cd0087f648d1c422f524c06e9bf9f961a447038e217515ccec9c912131b94425cdd0332ac0ad2f095eb8cc2"
+        #define PSS_MHASH "3e0664d72665af010a5b6c70f4b70170316673a8340422c8e60f2d1fa977803e"
+        uint8_t n[80], sig[80], mh[32], e[3] = { 0x01, 0x00, 0x01 };
+        int nlen = unhex(PSS_N, n), siglen = unhex(PSS_SIG, sig);
+        unhex(PSS_MHASH, mh);
+
+        check_ok("PSS verify accepts a valid signature",
+                 rsa_pss_sha256_verify(n, nlen, e, sizeof e, sig, siglen, mh) == 0);
+
+        uint8_t bad_mh[32]; memcpy(bad_mh, mh, 32); bad_mh[0] ^= 1;
+        check_ok("PSS rejects a wrong message hash",
+                 rsa_pss_sha256_verify(n, nlen, e, sizeof e, sig, siglen, bad_mh) == -1);
+
+        uint8_t bad_sig[80]; memcpy(bad_sig, sig, siglen); bad_sig[siglen-1] ^= 1;
+        check_ok("PSS rejects a tampered signature",
+                 rsa_pss_sha256_verify(n, nlen, e, sizeof e, bad_sig, siglen, mh) == -1);
     }
 
     printf(failures ? "\nRSA TEST: %d FAILURE(S)\n" : "\nRSA TEST: ALL PASS\n", failures);
