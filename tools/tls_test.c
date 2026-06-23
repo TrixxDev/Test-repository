@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "record.h"
+#include "record_reader.h"
 #include "transcript.h"
 #include "key_schedule.h"
 #include "handshake.h"
@@ -126,6 +127,16 @@ static void epoch_from_secret(tls_record_keys *k, const uint8_t secret[32])
     uint8_t key[32], iv[12];
     tls_traffic_keys(secret, key, 32, iv, 12);
     tls_record_init(k, key, iv);
+}
+
+/* Build a raw TLS record (5-byte header + body) for the framing tests. Body is a
+ * deterministic ramp so the returned bytes can be checked. Returns total length. */
+static int mk_record(uint8_t *o, uint8_t ctype, int bodylen)
+{
+    o[0] = ctype; o[1] = 0x03; o[2] = 0x03;
+    o[3] = (uint8_t)(bodylen >> 8); o[4] = (uint8_t)bodylen;
+    for (int i = 0; i < bodylen; i++) o[5 + i] = (uint8_t)(i * 7 + ctype);
+    return 5 + bodylen;
 }
 
 /* trace sink: record the event sequence for assertions */
@@ -928,6 +939,87 @@ int main(void)
         uint8_t badcv[256]; memcpy(badcv, cvmsg, cvlen); badcv[8] ^= 1;
         tls_client_recv_handshake(&c2, badcv, cvlen, out, sizeof out, &outlen);
         check_int("failure trace ends at FAIL_AUTH", (g_evn > 0 && g_ev[g_evn-1] == TLS_EV_FAIL_AUTH), 1);
+    }
+
+    printf("TLS 1.3 record reader (byte stream -> records):\n");
+    {
+        tls_record_reader rr;
+        const uint8_t *rec; size_t rl;
+
+        /* 1. header delivered one byte at a time, then body one byte at a time */
+        uint8_t r1[64]; int r1n = mk_record(r1, 0x16, 10);
+        tls_reader_init(&rr);
+        int got = 0;
+        for (int i = 0; i < r1n; i++) {
+            tls_reader_feed(&rr, &r1[i], 1);
+            int rc = tls_reader_next(&rr, &rec, &rl);
+            if (rc == 1) { got = (rl == (size_t)r1n && memcmp(rec, r1, r1n) == 0); }
+            else if (i < r1n - 1) { if (rc != 0) got = -1; }   /* must say "need more" until last byte */
+        }
+        check_int("1. header+body byte-by-byte reassembles one record", got, 1);
+        check_int("   nothing left pending", (int)tls_reader_pending(&rr), 0);
+
+        /* 2. body byte-by-byte after a whole header */
+        uint8_t r2[64]; int r2n = mk_record(r2, 0x17, 8);
+        tls_reader_init(&rr);
+        tls_reader_feed(&rr, r2, 5);                       /* whole header */
+        check_int("2. header alone -> need more", tls_reader_next(&rr, &rec, &rl), 0);
+        int ok2 = 1;
+        for (int i = 5; i < r2n; i++) {
+            tls_reader_feed(&rr, &r2[i], 1);
+            int rc = tls_reader_next(&rr, &rec, &rl);
+            if (i < r2n - 1) ok2 &= (rc == 0);
+            else ok2 &= (rc == 1 && rl == (size_t)r2n && memcmp(rec, r2, r2n) == 0);
+        }
+        check_int("2. body byte-by-byte completes the record", ok2, 1);
+
+        /* 3. two records in one chunk -> two records out */
+        uint8_t a[64], b[64], chunk[128];
+        int an = mk_record(a, 0x16, 6), bn = mk_record(b, 0x17, 9);
+        memcpy(chunk, a, an); memcpy(chunk + an, b, bn);
+        tls_reader_init(&rr);
+        tls_reader_feed(&rr, chunk, an + bn);
+        int t3 = (tls_reader_next(&rr, &rec, &rl) == 1 && rl == (size_t)an && memcmp(rec, a, an) == 0);
+        t3 &= (tls_reader_next(&rr, &rec, &rl) == 1 && rl == (size_t)bn && memcmp(rec, b, bn) == 0);
+        t3 &= (tls_reader_next(&rr, &rec, &rl) == 0);
+        check_int("3. two coalesced records split into two", t3, 1);
+
+        /* 4. boundary inside the second record's header */
+        tls_reader_init(&rr);
+        tls_reader_feed(&rr, a, an);                       /* record 1 */
+        tls_reader_feed(&rr, b, 2);                        /* first 2 bytes of record 2's header */
+        int t4 = (tls_reader_next(&rr, &rec, &rl) == 1 && memcmp(rec, a, an) == 0);
+        t4 &= (tls_reader_next(&rr, &rec, &rl) == 0);      /* partial header -> need more */
+        tls_reader_feed(&rr, b + 2, bn - 2);              /* rest of record 2 */
+        t4 &= (tls_reader_next(&rr, &rec, &rl) == 1 && rl == (size_t)bn && memcmp(rec, b, bn) == 0);
+        check_int("4. split inside the 2nd record header reassembles", t4, 1);
+
+        /* 5. zero-length body is a valid 5-byte record */
+        uint8_t z[8]; int zn = mk_record(z, 0x15, 0);
+        tls_reader_init(&rr);
+        tls_reader_feed(&rr, z, zn);
+        check_int("5. zero-length body -> 5-byte record",
+                  (tls_reader_next(&rr, &rec, &rl) == 1 && rl == 5), 1);
+
+        /* 6. length limit: max body accepted (waits for body), one over -> error */
+        uint8_t hmax[5] = { 0x17, 0x03, 0x03, (TLS_RECORD_MAX_BODY >> 8), (TLS_RECORD_MAX_BODY & 0xff) };
+        tls_reader_init(&rr);
+        tls_reader_feed(&rr, hmax, 5);
+        check_int("6. max body length accepted (needs body)", tls_reader_next(&rr, &rec, &rl), 0);
+        uint8_t hover[5] = { 0x17, 0x03, 0x03, ((TLS_RECORD_MAX_BODY + 1) >> 8), ((TLS_RECORD_MAX_BODY + 1) & 0xff) };
+        tls_reader_init(&rr);
+        tls_reader_feed(&rr, hover, 5);
+        check_int("6. over-limit length -> -1", tls_reader_next(&rr, &rec, &rl), -1);
+
+        /* 7. truncated stream: header says 2000, only 1500 arrive -> need-more + pending */
+        uint8_t thdr[5] = { 0x17, 0x03, 0x03, (2000 >> 8), (2000 & 0xff) };
+        uint8_t body[1500]; memset(body, 0xAB, sizeof body);
+        tls_reader_init(&rr);
+        tls_reader_feed(&rr, thdr, 5);
+        tls_reader_feed(&rr, body, sizeof body);
+        check_int("7. truncated record -> need more", tls_reader_next(&rr, &rec, &rl), 0);
+        check_int("7. and bytes remain pending (EOF here = truncated)",
+                  tls_reader_pending(&rr) == 5 + 1500, 1);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);

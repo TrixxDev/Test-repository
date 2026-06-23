@@ -36,7 +36,9 @@ Run the vectors: `make crypto-test`.
 | 12.5 | **Certificate integration** (`tls/cert.c`) — message parse + PKI + FSM | synthetic chain via FSM | ✅ |
 | 12.5b | **CertificateVerify** (`crypto/mgf1.c`, `crypto/rsa_pss.c`, `tls/cert.c`) | RFC 8448 CertificateVerify | ✅ |
 | 12.6 | **FSM authentication** (`tls/client.c`) — Cert+CV+Finished, `peer_authenticated` | synthetic authed handshake | ✅ |
-| 13 | TLS over sockets + first HTTPS GET | real `https://` site | next |
+| 13.0a | **Network audit** (`docs/NET_SEMANTICS.md`) + **record reader** (`tls/record_reader.c`) | host framing tests | ✅ |
+| 13.0b | TCP rx-buffer fix + local RSA server → CONNECTED over a socket | QEMU + `openssl s_server` | next |
+| 13.0c | Real internet RSA endpoint: `GET /` → 200 OK | real `https://` site | later |
 | 13.x | Intermediate CAs, then ECDSA P-256 | real chains / wycheproof | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -747,3 +749,35 @@ CertificateVerify ends the trace at the AUTH failure.
 This is the first piece of step 13: the diagnostics are in place, so when the FSM
 is bound to a real TCP socket the trace will pinpoint whichever integration issue
 surfaces first (fragmented records, a longer chain, an ECDSA leaf, ...).
+
+## Step 13.0a — network audit + TLS record reader
+
+Going live splits into a written audit and the one genuinely new layer.
+
+**Audit** (`docs/NET_SEMANTICS.md`): the socket layer pinned in writing before any
+integration — recv is a blocking byte stream with no partial-read guarantee and an
+ambiguous `0` (peer close *or* 10 s idle), send is stop-and-wait, ownership is
+copy-in/copy-out, the RX path is pumped only inside a socket syscall, and — the
+headline defect — the 8 KiB per-connection receive buffer never compacts, so a
+connection can take at most ~8 KiB total and silently drops-yet-ACKs the rest.
+That buffer must be fixed before a real handshake (13.0b.0).
+
+**Record reader** (`tls/record_reader.c`): the bottom seam, turning the TCP byte
+stream into complete TLS records. Source-agnostic by construction — feed it bytes
+from anywhere, pull records out — so the same code serves host tests, recorded
+traces, a socket, and a fuzzer. A returned record points into the reader's buffer
+and is valid until the next feed; drain with `next()` until it returns 0, then
+feed more. `make tls-test` covers the seven framing cases that bite real streams:
+
+```
+1 header + body delivered one byte at a time -> one record
+2 whole header, then body byte-by-byte
+3 two coalesced records in one chunk -> two records
+4 a split inside the SECOND record's header
+5 zero-length body (a valid 5-byte record)
+6 length limit: 2^14+256 accepted, one over -> error
+7 truncated stream: need-more + bytes pending (EOF here = truncated, not a record)
+```
+
+With framing proven deterministically, 13.0b binds it to a real socket: fix the
+rx buffer, then drive a handshake to CONNECTED against a local RSA `s_server`.
