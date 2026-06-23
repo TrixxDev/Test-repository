@@ -56,3 +56,48 @@ int x509_verify_signature(const x509_cert *cert, const uint8_t *ik, size_t iklen
 
     return X509_VERIFY_UNSUPPORTED;
 }
+
+int x509_verify_chain(const x509_cert *leaf, const x509_cert *roots, size_t root_count)
+{
+    /* v1: depth 1. A root is trusted if its public key validates the leaf's
+     * signature — that cryptographic fact is the trust relationship; name
+     * chaining and intermediate CAs come later (the array interface already
+     * allows them). */
+    for (size_t i = 0; i < root_count; i++)
+        if (x509_verify_signature(leaf, roots[i].spki_key.p, roots[i].spki_key.len) == X509_VERIFY_OK)
+            return X509_VERIFY_OK;
+    return X509_VERIFY_UNTRUSTED;
+}
+
+int x509_check_validity(const x509_cert *cert, uint64_t now)
+{
+    if (now < cert->not_before) return X509_VALID_NOT_YET;
+    if (now > cert->not_after)  return X509_VALID_EXPIRED;
+    return X509_VALID_OK;
+}
+
+static char lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+
+static int ci_equal(const char *a, const char *b)
+{
+    while (*a && *b) { if (lower(*a) != lower(*b)) return 0; a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+int x509_check_hostname(const x509_cert *cert, const char *host)
+{
+    for (int i = 0; i < cert->san_count; i++) {
+        const char *san = cert->san_dns[i];
+        if (san[0] == '*' && san[1] == '.') {
+            /* wildcard matches exactly one left-most label: strip the first
+             * label of host and compare the remainder to the part after "*." */
+            const char *dot = host;
+            while (*dot && *dot != '.') dot++;
+            if (*dot != '.' || dot == host) continue;   /* host needs a non-empty first label */
+            if (ci_equal(dot + 1, san + 2)) return 0;
+        } else {
+            if (ci_equal(host, san)) return 0;
+        }
+    }
+    return -1;
+}

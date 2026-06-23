@@ -32,7 +32,9 @@ Run the vectors: `make crypto-test`.
 | 12.1 | **ASN.1 DER reader** (`x509/asn1.c`) — bounds-checked TLV cursor | X.690 / RFC 8448 cert | ✅ |
 | 12.2 | **X.509 certificate parser** (`x509/x509.c`) — no crypto | RFC 5280 / RFC 8448 + SAN | ✅ |
 | 12.3 | **RSA verification** (`crypto/bignum.c`, `crypto/rsa.c`, `x509/verify_cert.c`) | RFC 8448 cert (self-signed) | ✅ |
-| 12.4 | Trust store (ISRG Root X1) + hostname (SAN) | RFC 6125 | next |
+| 12.4 | **Trust chain + validity + hostname** (`x509/verify_cert.c`) | synthetic CA→leaf chain | ✅ |
+| 12.5 | TLS certificate integration (`tls_verify_server_certificate`) | synthetic + RFC bytes | next |
+| 12.6 | ECDSA P-256 verification | RFC 6979 / wycheproof | later |
 | 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -548,3 +550,38 @@ So ASN.1 ✓, X.509 ✓, RSA ✓ — all on the published reference bytes. What 
 pure policy, much more tractable than what TLS already required: a trust store
 (one root, ISRG Root X1), the validity-window check (now a Unix-time range
 compare), and hostname matching against SAN.
+
+## Step 12.4 — trust chain + validity + hostname (RFC 5280 / RFC 6125)
+
+With a signature now provable, this is pure trust *policy* on top of it — no new
+crypto. All three live in `x509/verify_cert.c`:
+
+- **Trust chain** — `x509_verify_chain(leaf, roots, root_count)`. v1 is depth 1:
+  a root is trusted if its public key validates the leaf's signature, which *is*
+  the trust relationship. The array interface is already chain-shaped, so
+  intermediate CAs and full DN name-chaining slot in later without an API change.
+- **Validity window** — `x509_check_validity(cert, now)` is just
+  `not_before <= now <= not_after`, the payoff from normalizing dates to Unix time
+  back in 12.2. Distinct NOT_YET / EXPIRED results.
+- **Hostname** — `x509_check_hostname(cert, host)` matches against SubjectAltName
+  dNSName only (CN ignored, as modern clients require), case-insensitively, with a
+  leading `*.` wildcard that matches exactly one left-most label.
+
+`make x509-test` builds a synthetic CA→leaf chain with **real** RSA signatures
+(the CA signs the leaf) plus a wildcard SAN, the path RFC 8448 can't exercise:
+
+```
+trust:     leaf trusted by its CA root            => OK
+           leaf against an unrelated root          => UNTRUSTED
+           CA verifies itself (self-signed)        => OK
+validity:  now in 2026 / 2023 / 2035  => OK / NOT_YET / EXPIRED
+hostname:  example.com, www.example.com (exact, case-insensitive)  => match
+           *.test.example vs foo.test.example      => match
+           vs a.b.test.example, test.example       => no match (one label only)
+           evil.com; CN "rsa" is never used        => no match
+```
+
+The PKI engine is now complete for RSA: parse, signature, trust, validity,
+hostname. What remains is wiring — `tls_verify_server_certificate(chain, host,
+now)` chaining signature→trust→validity→hostname into one call (12.5) — and then
+ECDSA P-256 (12.6), the last primitive before a real `https://` fetch (13).

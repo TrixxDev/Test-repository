@@ -231,6 +231,45 @@ int main(void)
                  x509_verify_signature(&fake, cert.spki_key.p, cert.spki_key.len) == X509_VERIFY_UNSUPPORTED);
     }
 
+    printf("X.509 trust chain / validity / hostname (synthetic CA + leaf):\n");
+    {
+        /* CA is self-signed; LEAF is signed by CA, SAN = example.com,
+         * www.example.com, *.test.example (from tools/mkchain). */
+        #define CA_CERT   "308201203081cba003020102020101300d06092a864886f70d01010b05003019311730150603550403130e4175726f72612054657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3019311730150603550403130e4175726f72612054657374204341305c300d06092a864886f70d0101010500034b00304802410090000000000000000000000000000000000000000000000076a99b4b205252c58000000000000000000000000000000000000000000000cb554b6f660d0ed8f10203010001300d06092a864886f70d01010b05000341000be6fba8be2e9d3870633669470a678f07d21a0ce83577907562753c9642618b4e40c2b8dcb38dacdadd9fce3016b1c63ca3836a215123d35cc450f07e8e5adf"
+        #define LEAF_CERT "3082015b30820105a003020102020102300d06092a864886f70d01010b05003019311730150603550403130e4175726f72612054657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3016311430120603550403130b6578616d706c652e636f6d305c300d06092a864886f70d0101010500034b003048024100a90000000000000000000000000000000000000000000000808d12e6b859300e6000000000000000000000000000000000000000000000eb78902914235bf6fd0203010001a33b303930370603551d110430302e820b6578616d706c652e636f6d820f7777772e6578616d706c652e636f6d820e2a2e746573742e6578616d706c65300d06092a864886f70d01010b05000341005189bd07db7e3af5ce89ad7c486323c2102f28b1f0f11885f56e5f3ddf3aef93bd32e369eeafb4a833a3cc0ca84fd471766c8a5b3532a31173da96fcf3cbba34"
+
+        uint8_t cad[512], leafd[512], rfcd[512];
+        x509_cert ca, leaf, rfc;
+        check_ok("CA parses",   x509_parse(cad,   unhex(CA_CERT, cad),    &ca)   == 0);
+        check_ok("leaf parses", x509_parse(leafd, unhex(LEAF_CERT, leafd), &leaf) == 0);
+        x509_parse(rfcd, unhex(RFC_DER_CERT, rfcd), &rfc);
+
+        /* 12.4a — trust chain */
+        x509_cert roots_good[] = { ca };
+        check_ok("leaf trusted by CA root", x509_verify_chain(&leaf, roots_good, 1) == X509_VERIFY_OK);
+        x509_cert roots_bad[] = { rfc };       /* an unrelated self-signed root */
+        check_ok("leaf NOT trusted by unrelated root",
+                 x509_verify_chain(&leaf, roots_bad, 1) == X509_VERIFY_UNTRUSTED);
+        check_ok("CA verifies itself (self-signed)", x509_verify_chain(&ca, roots_good, 1) == X509_VERIFY_OK);
+
+        /* 12.4b — validity window (cert valid 2024-01-01 .. 2034-01-01) */
+        check_ok("valid in 2026",     x509_check_validity(&leaf, 1767225600ULL) == X509_VALID_OK);
+        check_ok("not yet valid 2023", x509_check_validity(&leaf, 1700000000ULL) == X509_VALID_NOT_YET);
+        check_ok("expired 2035",      x509_check_validity(&leaf, 2050000000ULL) == X509_VALID_EXPIRED);
+
+        /* 12.4c — hostname (SAN dNSName, CN ignored, one-level wildcard) */
+        check_ok("exact: example.com",          x509_check_hostname(&leaf, "example.com") == 0);
+        check_ok("exact: www.example.com",      x509_check_hostname(&leaf, "www.example.com") == 0);
+        check_ok("case-insensitive: WWW.Example.Com", x509_check_hostname(&leaf, "WWW.Example.Com") == 0);
+        check_ok("wildcard: foo.test.example",  x509_check_hostname(&leaf, "foo.test.example") == 0);
+        check_ok("wildcard rejects two labels: a.b.test.example",
+                 x509_check_hostname(&leaf, "a.b.test.example") == -1);
+        check_ok("wildcard rejects bare: test.example",
+                 x509_check_hostname(&leaf, "test.example") == -1);
+        check_ok("no match: evil.com",          x509_check_hostname(&leaf, "evil.com") == -1);
+        check_ok("CN is not used for matching",  x509_check_hostname(&rfc, "rsa") == -1);
+    }
+
     printf(failures ? "\nX509 TEST: %d FAILURE(S)\n" : "\nX509 TEST: ALL PASS\n", failures);
     return failures ? 1 : 0;
 }
