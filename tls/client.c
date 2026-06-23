@@ -20,6 +20,18 @@ void tls_client_init(tls_client *c, const char *server_name,
     if (server_name) { for (; server_name[i] && i < sizeof(c->server_name) - 1; i++) c->server_name[i] = server_name[i]; }
     c->server_name[i] = 0;
     c->cipher_suite = 0;
+
+    c->roots = 0;            /* trust off until tls_client_set_trust */
+    c->root_count = 0;
+    c->now = 0;
+}
+
+void tls_client_set_trust(tls_client *c, const x509_cert *roots, size_t root_count,
+                          uint64_t now)
+{
+    c->roots = roots;
+    c->root_count = root_count;
+    c->now = now;
 }
 
 int tls_client_start(tls_client *c, uint8_t *out, size_t cap)
@@ -77,7 +89,12 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
 
     case TLS_ST_WAIT_CERT:
         if (type != TLS_HS_CERTIFICATE) return fail(c);
-        tls_transcript_update(&c->transcript, msg, len);     /* not validated (v1) */
+        tls_transcript_update(&c->transcript, msg, len);     /* always enters the transcript */
+        if (c->roots) {                                      /* trust store installed: validate */
+            if (tls_parse_certificate(msg, len, &c->certs) != 0) return fail(c);
+            if (tls_verify_certificate_chain(&c->certs, c->server_name, c->now,
+                                             c->roots, c->root_count) != TLS_CERT_OK) return fail(c);
+        }
         c->state = TLS_ST_WAIT_CV;
         return 0;
 

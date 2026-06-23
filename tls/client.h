@@ -5,7 +5,13 @@
  * emits the messages the client must send (ClientHello, Finished). It does NOT
  * touch the network or the record layer — record decryption / plaintext-vs-
  * encrypted gating is the caller's job (the record-binding layer), so an AEAD
- * failure never reaches this FSM. Certificates are not validated yet (v1).
+ * failure never reaches this FSM.
+ *
+ * Certificate trust is optional: if a trust store is installed (tls_client_set_
+ * trust), the Certificate message is parsed and validated (chain + validity +
+ * hostname) at WAIT_CERT, and a failure drives the FSM to ERROR. With no trust
+ * store the certificate is still only transcript bytes (engine / test mode).
+ * Proving the peer holds the private key (CertificateVerify) is a later step.
  *
  * Determinism: the ephemeral key and client random are supplied by the caller,
  * so a given event sequence always produces the same bytes — it can be replayed
@@ -15,6 +21,7 @@
 #include <stddef.h>
 #include "transcript.h"
 #include "key_schedule.h"
+#include "cert.h"
 
 /* Protocol state — what message we expect next (RFC 8446 §A.1, client view). */
 typedef enum {
@@ -53,13 +60,24 @@ typedef struct {
 
     uint8_t client_ap_secret[32];        /* application traffic secrets, set at */
     uint8_t server_ap_secret[32];        /* CONNECTED (RFC 8446 §7.1)            */
+
+    const x509_cert *roots;              /* trust store (NULL = no cert validation) */
+    size_t           root_count;
+    uint64_t         now;                /* Unix time for the validity check */
+    tls_cert_chain   certs;              /* scratch: the parsed server chain        */
 } tls_client;
 
 /* Initialize. `ephemeral_priv` and `client_random` make the engine fully
- * deterministic (supply real randomness in production). */
+ * deterministic (supply real randomness in production). Trust is off by default. */
 void tls_client_init(tls_client *c, const char *server_name,
                      const uint8_t ephemeral_priv[32],
                      const uint8_t client_random[32]);
+
+/* Install a trust store so the Certificate message is validated at WAIT_CERT
+ * (chain to a root + validity at `now` + hostname against the init server_name).
+ * Without this, certificates are accepted as transcript bytes only. */
+void tls_client_set_trust(tls_client *c, const x509_cert *roots, size_t root_count,
+                          uint64_t now);
 
 /* Emit the initial ClientHello (plaintext handshake message) into `out`.
  * Returns its length or -1. START -> WAIT_SH. */

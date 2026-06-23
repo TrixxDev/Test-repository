@@ -33,7 +33,8 @@ Run the vectors: `make crypto-test`.
 | 12.2 | **X.509 certificate parser** (`x509/x509.c`) — no crypto | RFC 5280 / RFC 8448 + SAN | ✅ |
 | 12.3 | **RSA verification** (`crypto/bignum.c`, `crypto/rsa.c`, `x509/verify_cert.c`) | RFC 8448 cert (self-signed) | ✅ |
 | 12.4 | **Trust chain + validity + hostname** (`x509/verify_cert.c`) | synthetic CA→leaf chain | ✅ |
-| 12.5 | TLS certificate integration (`tls_verify_server_certificate`) | synthetic + RFC bytes | next |
+| 12.5 | **Certificate integration** (`tls/cert.c`) — message parse + PKI + FSM | synthetic chain via FSM | ✅ |
+| 12.5b | CertificateVerify (`crypto/mgf1.c`, `crypto/rsa_pss.c`) | RFC 8448 CertificateVerify | next |
 | 12.6 | ECDSA P-256 verification | RFC 6979 / wycheproof | later |
 | 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
@@ -585,3 +586,54 @@ The PKI engine is now complete for RSA: parse, signature, trust, validity,
 hostname. What remains is wiring — `tls_verify_server_certificate(chain, host,
 now)` chaining signature→trust→validity→hostname into one call (12.5) — and then
 ECDSA P-256 (12.6), the last primitive before a real `https://` fetch (13).
+
+## Step 12.5 — Certificate integration (RFC 8446 §4.4.2)
+
+The point where the handshake stops treating the server's certificate as opaque
+transcript bytes and starts deciding whether to trust it. `tls/cert.c` has two
+concerns and no cryptography of its own:
+
+- **Message parser** — `tls_parse_certificate` walks the Certificate wire message
+  (certificate_request_context + a certificate_list of CertificateEntry) with full
+  bounds checks and runs each cert_data through the X.509 parser into a
+  `tls_cert_chain`.
+- **PKI glue** — `tls_verify_certificate_chain` runs the policy on the end-entity
+  certificate: `x509_verify_chain` (trusted by a root) + `x509_check_validity`
+  (Unix-time window) + `x509_check_hostname` (SAN), returning one `TLS_CERT_*` code.
+
+This proves the **certificate** (this key belongs to host X, vouched for by a
+trusted root). It does *not* prove the peer holds the matching private key — that
+is CertificateVerify, the next step.
+
+**FSM integration.** A trust store is now optional on the client
+(`tls_client_set_trust`). With one installed, WAIT_CERT parses and validates the
+Certificate message, and a failure drives the FSM to ERROR — so a certificate
+finally affects TLS state instead of being inert transcript bytes:
+
+```
+WAIT_CERT --(PKI ok)--> WAIT_CV
+          --(PKI fail)-> ERROR
+```
+
+With no trust store the certificate stays transcript-only (engine / replay mode),
+which keeps the deterministic loopback and RFC 8448 tests unchanged.
+
+`make tls-test` adds, over the synthetic CA→leaf chain wrapped in a real
+Certificate message:
+
+```
+parse:  Certificate message -> chain.count 1, leaf CN example.com
+glue:   trusted+in-window+host match            => TLS_CERT_OK
+        wildcard host foo.test.example          => TLS_CERT_OK
+        wrong host / expired / untrusted root    => BAD_HOSTNAME / EXPIRED / UNTRUSTED
+        truncated message                        => -1
+FSM:    trusted certificate    -> WAIT_CV
+        hostname mismatch      -> ERROR
+        no trust store         -> accepted (transcript-only)
+```
+
+What remains for full server authentication is CertificateVerify — the server's
+signature over the transcript with the leaf's private key. In RFC 8448 that is
+`rsa_pss_rsae_sha256`, a genuinely new primitive (MGF1 + EMSA-PSS), so it gets its
+own step (12.5b: `crypto/mgf1.c` + `crypto/rsa_pss.c` with their own vectors)
+before the two halves are joined into one `tls_verify_server_certificate` call.

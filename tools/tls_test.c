@@ -15,6 +15,9 @@
 #include "handshake.h"
 #include "client.h"
 #include "conn.h"
+#include "cert.h"
+#include "x509.h"
+#include "verify_cert.h"
 #include "chacha20poly1305.h"
 #include "x25519.h"
 
@@ -121,6 +124,30 @@ static void epoch_from_secret(tls_record_keys *k, const uint8_t secret[32])
     tls_traffic_keys(secret, key, 32, iv, 12);
     tls_record_init(k, key, iv);
 }
+
+/* Wrap a DER certificate in a TLS 1.3 Certificate handshake message (one entry,
+ * empty request context, empty entry extensions). Returns the message length. */
+static int build_cert_msg(uint8_t *o, const uint8_t *der, int derlen)
+{
+    int n = 0;
+    o[n++] = TLS_HS_CERTIFICATE; o[n++] = 0; o[n++] = 0; o[n++] = 0;   /* len patched below */
+    o[n++] = 0;                                                        /* request context: empty */
+    int listlen = 3 + derlen + 2;
+    o[n++] = (uint8_t)(listlen >> 16); o[n++] = (uint8_t)(listlen >> 8); o[n++] = (uint8_t)listlen;
+    o[n++] = (uint8_t)(derlen >> 16); o[n++] = (uint8_t)(derlen >> 8); o[n++] = (uint8_t)derlen;
+    for (int i = 0; i < derlen; i++) o[n++] = der[i];
+    o[n++] = 0; o[n++] = 0;                                            /* entry extensions: empty */
+    int body = n - 4;
+    o[1] = (uint8_t)(body >> 16); o[2] = (uint8_t)(body >> 8); o[3] = (uint8_t)body;
+    return n;
+}
+
+/* an unrelated self-signed RSA certificate (RFC 8448 §3) — a "wrong" root */
+#define RFC_DER_CERT "308201ac30820115a003020102020102300d06092a864886f70d01010b0500300e310c300a06035504031303727361301e170d3136303733303031323335395a170d3236303733303031323335395a300e310c300a0603550403130372736130819f300d06092a864886f70d010101050003818d0030818902818100b4bb498f8279303d980836399b36c6988c0c68de55e1bdb826d3901a2461eafd2de49a91d015abbc9a95137ace6c1af19eaa6af98c7ced43120998e187a80ee0ccb0524b1b018c3e0b63264d449a6d38e22a5fda430846748030530ef0461c8ca9d9efbfae8ea6d1d03e2bd193eff0ab9a8002c47428a6d35a8d88d79f7f1e3f0203010001a31a301830090603551d1304023000300b0603551d0f0404030205a0300d06092a864886f70d01010b05000381810085aad2a0e5b9276b908c65f73a7267170618a54c5f8a7b337d2df7a594365417f2eae8f8a58c8f8172f9319cf36b7fd6c55b80f21a03015156726096fd335e5e67f2dbf102702e608ccae6bec1fc63a42a99be5c3eb7107c3c54e9b9eb2bd5203b1c3b84e0a8b2f759409ba3eac9d91d402dcc0cc8f8961229ac9187b42b4de1"
+
+/* synthetic CA (self-signed) + leaf signed by it (from tools/mkchain) */
+#define T_CA_CERT   "308201203081cba003020102020101300d06092a864886f70d01010b05003019311730150603550403130e4175726f72612054657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3019311730150603550403130e4175726f72612054657374204341305c300d06092a864886f70d0101010500034b00304802410090000000000000000000000000000000000000000000000076a99b4b205252c58000000000000000000000000000000000000000000000cb554b6f660d0ed8f10203010001300d06092a864886f70d01010b05000341000be6fba8be2e9d3870633669470a678f07d21a0ce83577907562753c9642618b4e40c2b8dcb38dacdadd9fce3016b1c63ca3836a215123d35cc450f07e8e5adf"
+#define T_LEAF_CERT "3082015b30820105a003020102020102300d06092a864886f70d01010b05003019311730150603550403130e4175726f72612054657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3016311430120603550403130b6578616d706c652e636f6d305c300d06092a864886f70d0101010500034b003048024100a90000000000000000000000000000000000000000000000808d12e6b859300e6000000000000000000000000000000000000000000000eb78902914235bf6fd0203010001a33b303930370603551d110430302e820b6578616d706c652e636f6d820f7777772e6578616d706c652e636f6d820e2a2e746573742e6578616d706c65300d06092a864886f70d01010b05000341005189bd07db7e3af5ce89ad7c486323c2102f28b1f0f11885f56e5f3ddf3aef93bd32e369eeafb4a833a3cc0ca84fd471766c8a5b3532a31173da96fcf3cbba34"
 
 int main(void)
 {
@@ -602,6 +629,82 @@ int main(void)
                    && tls_conn_connected(&n3)), 1);
         check_int("reassembled flight emits the client Finished",
                   (ol2 > 5 && out[0] == TLS_CONTENT_APPLICATION_DATA), 1);
+    }
+
+    printf("TLS 1.3 Certificate message + PKI glue (RFC 8446 §4.4.2):\n");
+    {
+        uint8_t cad[512], leafd[512], rfcd[512];
+        x509_cert ca, rfc;
+        x509_parse(cad, unhex(T_CA_CERT, cad), &ca);
+        x509_parse(rfcd, unhex(RFC_DER_CERT, rfcd), &rfc);
+        int leaflen = unhex(T_LEAF_CERT, leafd);
+
+        uint8_t certmsg[700];
+        int cmlen = build_cert_msg(certmsg, leafd, leaflen);
+
+        tls_cert_chain chain;
+        check_int("Certificate message parses", tls_parse_certificate(certmsg, cmlen, &chain), 0);
+        check_int("chain has one entry", (int)chain.count, 1);
+        check_int("leaf subject CN == example.com", strcmp(chain.certs[0].subject_cn, "example.com") == 0, 1);
+
+        uint64_t now2026 = 1767225600ULL;
+        check_int("valid chain -> TLS_CERT_OK",
+                  tls_verify_certificate_chain(&chain, "example.com", now2026, &ca, 1), TLS_CERT_OK);
+        check_int("wildcard host -> TLS_CERT_OK",
+                  tls_verify_certificate_chain(&chain, "foo.test.example", now2026, &ca, 1), TLS_CERT_OK);
+        check_int("wrong host -> BAD_HOSTNAME",
+                  tls_verify_certificate_chain(&chain, "evil.com", now2026, &ca, 1), TLS_CERT_BAD_HOSTNAME);
+        check_int("expired -> EXPIRED",
+                  tls_verify_certificate_chain(&chain, "example.com", 2050000000ULL, &ca, 1), TLS_CERT_EXPIRED);
+        check_int("untrusted root -> UNTRUSTED",
+                  tls_verify_certificate_chain(&chain, "example.com", now2026, &rfc, 1), TLS_CERT_UNTRUSTED);
+
+        /* malformed: truncated Certificate message rejected */
+        check_int("truncated Certificate message -> -1", tls_parse_certificate(certmsg, 6, &chain), -1);
+    }
+
+    printf("TLS 1.3 FSM certificate integration (trust gates WAIT_CERT):\n");
+    {
+        uint8_t cad[512]; x509_cert ca;
+        x509_parse(cad, unhex(T_CA_CERT, cad), &ca);
+        uint8_t leafd[512]; int leaflen = unhex(T_LEAF_CERT, leafd);
+        uint8_t certmsg[700]; int cmlen = build_cert_msg(certmsg, leafd, leaflen);
+        uint64_t now2026 = 1767225600ULL;
+
+        uint8_t cpriv[32], spriv[32], crand[32], srand[32];
+        for (int i=0;i<32;i++){ cpriv[i]=(uint8_t)(i+7); spriv[i]=(uint8_t)(0xB0+i);
+                                crand[i]=(uint8_t)(0x55+i); srand[i]=(uint8_t)(0x66+i); }
+        uint8_t spub[32]; x25519_base(spub, spriv);
+        uint8_t sh[256]; int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        uint8_t ee[64]; int eelen = build_hs(ee, TLS_HS_ENCRYPTED_EXTENSIONS, (const uint8_t*)"\x00\x00", 2);
+        uint8_t out[64]; size_t outlen;
+
+        /* matching hostname: Certificate passes -> advance to WAIT_CV */
+        tls_client cl; tls_client_init(&cl, "example.com", cpriv, crand);
+        tls_client_set_trust(&cl, &ca, 1, now2026);
+        uint8_t ch[1024]; tls_client_start(&cl, ch, sizeof ch);
+        tls_client_recv_handshake(&cl, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cl, ee, eelen, out, sizeof out, &outlen);
+        check_int("before cert: WAIT_CERT", cl.state, TLS_ST_WAIT_CERT);
+        int rc = tls_client_recv_handshake(&cl, certmsg, cmlen, out, sizeof out, &outlen);
+        check_int("trusted certificate -> WAIT_CV", (rc == 0 && cl.state == TLS_ST_WAIT_CV), 1);
+
+        /* hostname mismatch: PKI fails -> FSM ERROR (cert now affects state) */
+        tls_client c2; tls_client_init(&c2, "wrong.example", cpriv, crand);
+        tls_client_set_trust(&c2, &ca, 1, now2026);
+        uint8_t ch2[1024]; tls_client_start(&c2, ch2, sizeof ch2);
+        tls_client_recv_handshake(&c2, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c2, ee, eelen, out, sizeof out, &outlen);
+        int rc2 = tls_client_recv_handshake(&c2, certmsg, cmlen, out, sizeof out, &outlen);
+        check_int("hostname mismatch -> -1 and ERROR", (rc2 == -1 && c2.state == TLS_ST_ERROR), 1);
+
+        /* no trust store: certificate is accepted as transcript bytes (engine mode) */
+        tls_client c3; tls_client_init(&c3, "example.com", cpriv, crand);
+        uint8_t ch3[1024]; tls_client_start(&c3, ch3, sizeof ch3);
+        tls_client_recv_handshake(&c3, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c3, ee, eelen, out, sizeof out, &outlen);
+        int rc3 = tls_client_recv_handshake(&c3, certmsg, cmlen, out, sizeof out, &outlen);
+        check_int("no trust store -> cert accepted -> WAIT_CV", (rc3 == 0 && c3.state == TLS_ST_WAIT_CV), 1);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);
