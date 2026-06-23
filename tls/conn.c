@@ -137,7 +137,10 @@ int tls_conn_recv_record(tls_conn *c, const uint8_t *record, size_t reclen,
 
         uint8_t inner_type;
         int n = tls_record_open(&c->rx, record, reclen, c->hs_buf + c->hs_len, inner_max, &inner_type);
-        if (n < 0) return TLS_CONN_ERR_RECORD;                 /* FSM untouched */
+        if (n < 0) {                                           /* FSM untouched */
+            tls_trace_emit(c->fsm.trace, c->fsm.trace_ctx, TLS_EV_FAIL_RECORD, 0);
+            return TLS_CONN_ERR_RECORD;
+        }
         if (inner_type == TLS_CONTENT_ALERT) return TLS_CONN_ERR_ALERT;
         if (inner_type != TLS_CONTENT_HANDSHAKE) return TLS_CONN_ERR_RECORD;
         c->hs_len += (size_t)n;

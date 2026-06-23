@@ -92,3 +92,9 @@ static inline int tls_conn_connected(const tls_conn *c)
 {
     return c->fsm.state == TLS_ST_CONNECTED;
 }
+
+/* Install a handshake trace sink on the underlying FSM (NULL disables it). */
+static inline void tls_conn_set_trace(tls_conn *c, tls_trace_sink fn, void *ctx)
+{
+    tls_client_set_trace(&c->fsm, fn, ctx);
+}

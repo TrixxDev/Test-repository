@@ -3,9 +3,14 @@
 #include "handshake.h"
 #include "x25519.h"
 
-static int fail(tls_client *c)      { c->state = TLS_ST_ERROR; c->error = TLS_ERR_PROTOCOL; return -1; }
-static int fail_cert(tls_client *c) { c->state = TLS_ST_ERROR; c->error = TLS_ERR_CERT;     return -1; }
-static int fail_auth(tls_client *c) { c->state = TLS_ST_ERROR; c->error = TLS_ERR_AUTH;     return -1; }
+static void emit(tls_client *c, tls_event ev, uint32_t detail)
+{
+    tls_trace_emit(c->trace, c->trace_ctx, ev, detail);
+}
+
+static int fail(tls_client *c)      { c->state = TLS_ST_ERROR; c->error = TLS_ERR_PROTOCOL; emit(c, TLS_EV_FAIL_PROTOCOL, 0); return -1; }
+static int fail_cert(tls_client *c) { c->state = TLS_ST_ERROR; c->error = TLS_ERR_CERT;     emit(c, TLS_EV_FAIL_CERT, 0);     return -1; }
+static int fail_auth(tls_client *c) { c->state = TLS_ST_ERROR; c->error = TLS_ERR_AUTH;     emit(c, TLS_EV_FAIL_AUTH, 0);     return -1; }
 
 void tls_client_init(tls_client *c, const char *server_name,
                      const uint8_t ephemeral_priv[32],
@@ -29,6 +34,8 @@ void tls_client_init(tls_client *c, const char *server_name,
     c->leaf_spki_len = 0;
     c->peer_authenticated = 0;
     c->error = TLS_ERR_NONE;
+    c->trace = 0;
+    c->trace_ctx = 0;
 }
 
 void tls_client_set_trust(tls_client *c, const x509_cert *roots, size_t root_count,
@@ -39,6 +46,12 @@ void tls_client_set_trust(tls_client *c, const x509_cert *roots, size_t root_cou
     c->now = now;
 }
 
+void tls_client_set_trace(tls_client *c, tls_trace_sink fn, void *ctx)
+{
+    c->trace = fn;
+    c->trace_ctx = ctx;
+}
+
 int tls_client_start(tls_client *c, uint8_t *out, size_t cap)
 {
     if (c->state != TLS_ST_START) return fail(c);
@@ -47,6 +60,7 @@ int tls_client_start(tls_client *c, uint8_t *out, size_t cap)
     if (n < 0) return fail(c);
     tls_transcript_update(&c->transcript, out, (size_t)n);   /* CH enters transcript */
     c->state = TLS_ST_WAIT_SH;
+    emit(c, TLS_EV_CLIENT_HELLO_SENT, 0);
     return n;
 }
 
@@ -74,6 +88,7 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
         if (c->cipher_suite != TLS_CIPHER_CHACHA20_POLY1305_SHA256) return fail(c);
 
         tls_transcript_update(&c->transcript, msg, len);     /* SH enters transcript */
+        emit(c, TLS_EV_SERVER_HELLO, 0);
 
         uint8_t ecdhe[32], hello_hash[32];
         x25519(ecdhe, c->priv, spub);                        /* ECDHE shared secret */
@@ -84,17 +99,20 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
 
         c->phase = TLS_PHASE_HANDSHAKE;                       /* key switch anchor */
         c->state = TLS_ST_WAIT_EE;
+        emit(c, TLS_EV_HANDSHAKE_KEYS, 0);
         return 0;
     }
     case TLS_ST_WAIT_EE:
         if (type != TLS_HS_ENCRYPTED_EXTENSIONS) return fail(c);
         tls_transcript_update(&c->transcript, msg, len);     /* not interpreted (v1) */
         c->state = TLS_ST_WAIT_CERT;
+        emit(c, TLS_EV_ENCRYPTED_EXTENSIONS, 0);
         return 0;
 
     case TLS_ST_WAIT_CERT:
         if (type != TLS_HS_CERTIFICATE) return fail(c);
         tls_transcript_update(&c->transcript, msg, len);     /* always enters the transcript */
+        emit(c, TLS_EV_CERTIFICATE, 0);
         if (c->roots) {                                      /* trust store installed: validate */
             if (tls_parse_certificate(msg, len, &c->certs) != 0) return fail_cert(c);
             if (tls_verify_certificate_chain(&c->certs, c->server_name, c->now,
@@ -105,6 +123,7 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
             if (k->len > sizeof c->leaf_spki) return fail_cert(c);
             for (size_t i = 0; i < k->len; i++) c->leaf_spki[i] = k->p[i];
             c->leaf_spki_len = k->len;
+            emit(c, TLS_EV_CERT_CHAIN_OK, 0);
         }
         c->state = TLS_ST_WAIT_CV;
         return 0;
@@ -120,10 +139,15 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
             uint16_t scheme = (uint16_t)((msg[4] << 8) | msg[5]);
             size_t   siglen = (size_t)((msg[6] << 8) | msg[7]);
             if (8 + siglen != len) return fail(c);
-            if (tls_verify_certificate_verify(th, scheme, msg + 8, siglen,
-                                              c->leaf_spki, c->leaf_spki_len) != TLS_CV_OK)
+            int rc = tls_verify_certificate_verify(th, scheme, msg + 8, siglen,
+                                                   c->leaf_spki, c->leaf_spki_len);
+            if (rc != TLS_CV_OK) {
+                if (rc == TLS_CV_UNSUPPORTED) emit(c, TLS_EV_FAIL_BAD_SIGSCHEME, scheme);
                 return fail_auth(c);
+            }
+            emit(c, TLS_EV_CERT_VERIFY_OK, 0);
             c->peer_authenticated = 1;                       /* server proved key ownership */
+            emit(c, TLS_EV_PEER_AUTHENTICATED, 0);
         }
         tls_transcript_update(&c->transcript, msg, len);     /* CV enters the transcript after */
         c->state = TLS_ST_WAIT_FINISHED;
@@ -137,6 +161,7 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
         uint8_t thash[32];
         tls_transcript_hash(&c->transcript, thash);          /* Transcript(CH..CV) */
         if (tls_check_finished(c->server_hs_finished_key, thash, msg + 4) != 0) return fail(c);
+        emit(c, TLS_EV_FINISHED_OK, 0);
 
         tls_transcript_update(&c->transcript, msg, len);     /* server Finished added */
 
@@ -145,6 +170,7 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
         tls_transcript_hash(&c->transcript, thash_sf);
         tls_derive_secret(c->client_ap_secret, c->ks.master_secret, "c ap traffic", thash_sf);
         tls_derive_secret(c->server_ap_secret, c->ks.master_secret, "s ap traffic", thash_sf);
+        emit(c, TLS_EV_APP_KEYS, 0);
 
         /* client Finished is computed over the same Transcript(CH..server Finished) */
         uint8_t vd[32];
@@ -156,6 +182,7 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
 
         c->phase = TLS_PHASE_APPLICATION;                    /* key switch anchor */
         c->state = TLS_ST_CONNECTED;
+        emit(c, TLS_EV_CONNECTED, 0);
         return 0;
     }
     default:

@@ -718,3 +718,32 @@ the hostname matched, the validity window held, the server proved key ownership,
 and the Finished verified. The TLS 1.3 client is logically complete for RSA — what
 remains is integration with the real internet (step 13: TLS over sockets, a first
 HTTPS GET), then intermediate-CA chains and ECDSA.
+
+## Step 13.0 (logging) — handshake tracing
+
+Before any live socket, the handshake gained tracing — because the first real
+failures otherwise read as a bare "CONNECT FAILED" with no clue where. `tls/trace.c`
+defines **semantic events** (not strings); the FSM and the record layer emit
+milestones and failures through a per-connection sink (no globals, no printf in
+the freestanding code). A host test installs a sink that records the sequence;
+AuroraOS will install one that prints `[TLS] <event>` to the serial log.
+
+```
+[TLS] ClientHello sent
+[TLS] ServerHello received        [TLS] Handshake keys installed
+[TLS] EncryptedExtensions received
+[TLS] Certificate received        [TLS] Certificate chain OK
+[TLS] CertificateVerify OK        [TLS] Peer authenticated
+[TLS] Finished OK                 [TLS] Application keys installed
+[TLS] CONNECTED
+```
+
+Failures are equally explicit and carry the locus: `Certificate validation FAILED`,
+`CertificateVerify FAILED`, `Unsupported SignatureScheme` (with the scheme), or
+`Record decrypt FAILED`. `make tls-test` drives a full authenticated handshake with
+a recording sink and asserts the exact milestone sequence, and that a tampered
+CertificateVerify ends the trace at the AUTH failure.
+
+This is the first piece of step 13: the diagnostics are in place, so when the FSM
+is bound to a real TCP socket the trace will pinpoint whichever integration issue
+surfaces first (fragmented records, a longer chain, an ECDSA leaf, ...).

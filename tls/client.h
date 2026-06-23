@@ -22,6 +22,7 @@
 #include "transcript.h"
 #include "key_schedule.h"
 #include "cert.h"
+#include "trace.h"
 
 /* Protocol state — what message we expect next (RFC 8446 §A.1, client view). */
 typedef enum {
@@ -82,6 +83,9 @@ typedef struct {
 
     int       peer_authenticated;        /* true only after CertificateVerify passes */
     tls_error error;                     /* reason, when state == TLS_ST_ERROR        */
+
+    tls_trace_sink trace;                /* handshake trace sink (NULL = no tracing) */
+    void          *trace_ctx;
 } tls_client;
 
 /* Initialize. `ephemeral_priv` and `client_random` make the engine fully
@@ -95,6 +99,9 @@ void tls_client_init(tls_client *c, const char *server_name,
  * Without this, certificates are accepted as transcript bytes only. */
 void tls_client_set_trust(tls_client *c, const x509_cert *roots, size_t root_count,
                           uint64_t now);
+
+/* Install a handshake trace sink (NULL disables tracing). */
+void tls_client_set_trace(tls_client *c, tls_trace_sink fn, void *ctx);
 
 /* Emit the initial ClientHello (plaintext handshake message) into `out`.
  * Returns its length or -1. START -> WAIT_SH. */

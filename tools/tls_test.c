@@ -128,6 +128,10 @@ static void epoch_from_secret(tls_record_keys *k, const uint8_t secret[32])
     tls_record_init(k, key, iv);
 }
 
+/* trace sink: record the event sequence for assertions */
+static tls_event g_ev[64]; static int g_evn;
+static void rec_sink(void *ctx, tls_event ev, uint32_t detail) { (void)ctx; (void)detail; if (g_evn < 64) g_ev[g_evn++] = ev; }
+
 /* Test-only "server" side: sign a CertificateVerify with the leaf private key via
  * RSASSA-PSS (EMSA-PSS-ENCODE + modexp). The library is verify-only; this mirrors
  * how the loopback test computes the server Finished. `th` is Transcript-Hash(CH..
@@ -854,6 +858,76 @@ int main(void)
         tls_client_recv_handshake(&c4, ee, eelen, out, sizeof out, &outlen);
         int rh = tls_client_recv_handshake(&c4, certmsg, cmlen, out, sizeof out, &outlen);
         check_int("bad hostname -> CERT error (before any CV)", (rh == -1 && c4.error == TLS_ERR_CERT), 1);
+    }
+
+    printf("TLS 1.3 handshake trace (event milestones):\n");
+    {
+        uint8_t cad[700]; x509_cert ca;
+        x509_parse(cad, unhex(T_CA_CERT, cad), &ca);
+        uint8_t leafd[700]; int leaflen = unhex(T_LEAF_CERT, leafd);
+        uint8_t certmsg[800]; int cmlen = build_cert_msg(certmsg, leafd, leaflen);
+        uint8_t ln[128], ld[128]; int lnlen = unhex(T_LEAF_N, ln), ldlen = unhex(T_LEAF_D, ld);
+        uint64_t now2026 = 1767225600ULL;
+
+        uint8_t cpriv[32], spriv[32], crand[32], srand[32];
+        for (int i=0;i<32;i++){ cpriv[i]=(uint8_t)(i+13); spriv[i]=(uint8_t)(0xD0+i);
+                                crand[i]=(uint8_t)(0x99+i); srand[i]=(uint8_t)(0xAA+i); }
+        uint8_t spub[32], cpub[32]; x25519_base(spub, spriv); x25519_base(cpub, cpriv);
+
+        tls_client cl; tls_client_init(&cl, "example.com", cpriv, crand);
+        tls_client_set_trust(&cl, &ca, 1, now2026);
+        g_evn = 0; tls_client_set_trace(&cl, rec_sink, 0);
+        uint8_t ch[1024]; int chlen = tls_client_start(&cl, ch, sizeof ch);
+
+        tls_transcript ts; tls_transcript_init(&ts);
+        tls_transcript_update(&ts, ch, chlen);
+        uint8_t sh[256]; int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        tls_transcript_update(&ts, sh, shlen);
+        uint8_t hello_hash[32], ecdhe[32]; tls_transcript_hash(&ts, hello_hash);
+        x25519(ecdhe, spriv, cpub);
+        tls_key_schedule kss; tls_key_schedule_derive(&kss, ecdhe, hello_hash);
+        uint8_t ee[64]; int eelen = build_hs(ee, TLS_HS_ENCRYPTED_EXTENSIONS, (const uint8_t*)"\x00\x00", 2);
+        tls_transcript_update(&ts, ee, eelen);
+        tls_transcript_update(&ts, certmsg, cmlen);
+        uint8_t th_cert[32]; tls_transcript_hash(&ts, th_cert);
+        uint8_t cvmsg[256]; int cvlen = pss_sign_cv(cvmsg, th_cert, ln, lnlen, ld, ldlen);
+        tls_transcript_update(&ts, cvmsg, cvlen);
+        uint8_t sfk[32], th_cv[32], svd[32], sfin[64];
+        tls_finished_key(sfk, kss.server_hs_traffic);
+        tls_transcript_hash(&ts, th_cv);
+        tls_finished_verify_data(svd, sfk, th_cv);
+        int sfinlen = build_hs(sfin, TLS_HS_FINISHED, svd, 32);
+
+        uint8_t out[64]; size_t outlen;
+        tls_client_recv_handshake(&cl, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cl, ee, eelen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cl, certmsg, cmlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cl, cvmsg, cvlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cl, sfin, sfinlen, out, sizeof out, &outlen);
+
+        tls_event want[] = {
+            TLS_EV_CLIENT_HELLO_SENT, TLS_EV_SERVER_HELLO, TLS_EV_HANDSHAKE_KEYS,
+            TLS_EV_ENCRYPTED_EXTENSIONS, TLS_EV_CERTIFICATE, TLS_EV_CERT_CHAIN_OK,
+            TLS_EV_CERT_VERIFY_OK, TLS_EV_PEER_AUTHENTICATED, TLS_EV_FINISHED_OK,
+            TLS_EV_APP_KEYS, TLS_EV_CONNECTED
+        };
+        int nwant = (int)(sizeof want / sizeof want[0]);
+        int seq_ok = (g_evn == nwant);
+        for (int i = 0; i < nwant && seq_ok; i++) if (g_ev[i] != want[i]) seq_ok = 0;
+        check_int("trace emits the full milestone sequence", seq_ok, 1);
+        check_int("event names are available", tls_event_name(TLS_EV_CONNECTED)[0] != 0, 1);
+
+        /* failure path: tampered CertificateVerify ends the trace at FAIL_AUTH */
+        tls_client c2; tls_client_init(&c2, "example.com", cpriv, crand);
+        tls_client_set_trust(&c2, &ca, 1, now2026);
+        g_evn = 0; tls_client_set_trace(&c2, rec_sink, 0);
+        uint8_t ch2[1024]; tls_client_start(&c2, ch2, sizeof ch2);
+        tls_client_recv_handshake(&c2, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c2, ee, eelen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c2, certmsg, cmlen, out, sizeof out, &outlen);
+        uint8_t badcv[256]; memcpy(badcv, cvmsg, cvlen); badcv[8] ^= 1;
+        tls_client_recv_handshake(&c2, badcv, cvlen, out, sizeof out, &outlen);
+        check_int("failure trace ends at FAIL_AUTH", (g_evn > 0 && g_ev[g_evn-1] == TLS_EV_FAIL_AUTH), 1);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);
