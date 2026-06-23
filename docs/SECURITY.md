@@ -34,8 +34,9 @@ Run the vectors: `make crypto-test`.
 | 12.3 | **RSA verification** (`crypto/bignum.c`, `crypto/rsa.c`, `x509/verify_cert.c`) | RFC 8448 cert (self-signed) | ✅ |
 | 12.4 | **Trust chain + validity + hostname** (`x509/verify_cert.c`) | synthetic CA→leaf chain | ✅ |
 | 12.5 | **Certificate integration** (`tls/cert.c`) — message parse + PKI + FSM | synthetic chain via FSM | ✅ |
-| 12.5b | CertificateVerify (`crypto/mgf1.c`, `crypto/rsa_pss.c`) | RFC 8448 CertificateVerify | next |
-| 12.6 | ECDSA P-256 verification | RFC 6979 / wycheproof | later |
+| 12.5b | **CertificateVerify** (`crypto/mgf1.c`, `crypto/rsa_pss.c`, `tls/cert.c`) | RFC 8448 CertificateVerify | ✅ |
+| 12.6 | Full server auth in the FSM (`tls_verify_server_certificate`) | RFC 8448 + synthetic | next |
+| 12.7 | ECDSA P-256 verification | RFC 6979 / wycheproof | later |
 | 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -637,3 +638,40 @@ signature over the transcript with the leaf's private key. In RFC 8448 that is
 `rsa_pss_rsae_sha256`, a genuinely new primitive (MGF1 + EMSA-PSS), so it gets its
 own step (12.5b: `crypto/mgf1.c` + `crypto/rsa_pss.c` with their own vectors)
 before the two halves are joined into one `tls_verify_server_certificate` call.
+
+## Step 12.5b — CertificateVerify (RSA-PSS, RFC 8446 §4.4.3)
+
+The last new cryptography, and the step that turns "this certificate is trusted"
+into "the peer actually holds the private key." TLS 1.3 signs CertificateVerify
+with `rsa_pss_rsae_sha256`, not PKCS#1 v1.5, so two new primitives land in
+`crypto/`, each with its own vectors:
+
+- `crypto/mgf1.c` — MGF1-SHA256 (RFC 8017 §B.2.1), checked against an independent
+  Python reference.
+- `crypto/rsa_pss.c` — `rsa_pss_sha256_verify`, EMSA-PSS verification (RFC 8017
+  §9.1.2) with SHA-256 and salt length == hash length. Verify only, no signing.
+  Checked against a real PSS signature produced by an independent toy key.
+
+`tls/cert.c` adds the TLS glue: `tls_verify_certificate_verify` builds the signed
+content (`0x20`×64 || `"TLS 1.3, server CertificateVerify"` || `0x00` ||
+Transcript-Hash(ClientHello..Certificate)), hashes it, and dispatches on the
+SignatureScheme — `0x0804` runs RSA-PSS with the leaf's public key; anything else
+is UNSUPPORTED (the ECDSA slot for later). The RSAPublicKey parse is shared with
+the PKCS#1 path via `x509_rsa_pubkey`.
+
+The headline check is the **real CertificateVerify from RFC 8448**, verified
+byte-for-byte by our from-scratch RSA-PSS + MGF1 (`make tls-trace-test`):
+
+```
+Transcript-Hash(ClientHello..Certificate) == RFC value
+scheme == rsa_pss_rsae_sha256
+CertificateVerify verifies under the leaf key   => TLS_CV_OK
+tampered signature / wrong transcript           => TLS_CV_BAD
+ECDSA scheme                                     => TLS_CV_UNSUPPORTED
+```
+
+Both halves of server authentication are now proven on the published trace: the
+certificate (RSA-PKCS#1 over TBSCertificate) and the handshake signature (RSA-PSS
+over the transcript). What remains is wiring — joining Certificate +
+CertificateVerify at WAIT_CV in the FSM into one `tls_verify_server_certificate`
+decision (12.6) — and then a real `https://` fetch (13).

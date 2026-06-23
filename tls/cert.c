@@ -2,6 +2,8 @@
 #include "cert.h"
 #include "handshake.h"     /* TLS_HS_CERTIFICATE */
 #include "verify_cert.h"
+#include "sha256.h"
+#include "rsa_pss.h"
 
 static uint32_t rd(const uint8_t *p, int n)
 {
@@ -68,4 +70,34 @@ int tls_verify_certificate_chain(const tls_cert_chain *chain, const char *hostna
         return TLS_CERT_BAD_HOSTNAME;
 
     return TLS_CERT_OK;
+}
+
+/* RFC 8446 §4.4.3 context string for a server CertificateVerify, plus the 64
+ * leading 0x20 octets and the 0x00 separator that prefix the transcript hash. */
+static const char CV_CONTEXT[] = "TLS 1.3, server CertificateVerify";
+
+int tls_verify_certificate_verify(const uint8_t transcript_hash[32],
+                                  uint16_t sig_scheme,
+                                  const uint8_t *sig, size_t siglen,
+                                  const uint8_t *leaf_spki_key, size_t leaf_spki_key_len)
+{
+    if (sig_scheme != TLS_SIG_RSA_PSS_RSAE_SHA256) return TLS_CV_UNSUPPORTED;
+
+    /* signed content = 0x20 x64 || context || 0x00 || transcript_hash */
+    uint8_t content[64 + sizeof CV_CONTEXT - 1 + 1 + 32];
+    size_t off = 0;
+    for (int i = 0; i < 64; i++) content[off++] = 0x20;
+    for (size_t i = 0; i < sizeof CV_CONTEXT - 1; i++) content[off++] = (uint8_t)CV_CONTEXT[i];
+    content[off++] = 0x00;
+    for (int i = 0; i < 32; i++) content[off++] = transcript_hash[i];
+
+    uint8_t h[32];
+    sha256(content, off, h);
+
+    const uint8_t *n, *e; size_t nlen, elen;
+    if (x509_rsa_pubkey(leaf_spki_key, leaf_spki_key_len, &n, &nlen, &e, &elen) != 0)
+        return TLS_CV_MALFORMED;
+
+    if (rsa_pss_sha256_verify(n, nlen, e, elen, sig, siglen, h) != 0) return TLS_CV_BAD;
+    return TLS_CV_OK;
 }

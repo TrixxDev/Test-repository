@@ -21,6 +21,8 @@
 #include "transcript.h"
 #include "key_schedule.h"
 #include "handshake.h"
+#include "cert.h"
+#include "x509.h"
 #include "x25519.h"
 
 /* ---- RFC 8448 §3 values (verbatim) ---- */
@@ -190,6 +192,48 @@ int main(void)
     tls_traffic_keys(cap, k, 16, iv, 12);
     check("client application write key", k, 16, RFC_CLIENT_AP_KEY);
     check("client application write iv",  iv, 12, RFC_CLIENT_AP_IV);
+
+    printf("TLS 1.3 CertificateVerify — RFC 8448 (rsa_pss_rsae_sha256):\n");
+    {
+        /* the server's signature proves it holds the leaf private key, computed
+         * over Transcript-Hash(ClientHello..Certificate) + the context string. */
+        tls_transcript t2; tls_transcript_init(&t2);
+        tls_transcript_update(&t2, ch, chlen);
+        tls_transcript_update(&t2, sh, shlen);
+        tls_transcript_update(&t2, ee, eelen);
+        tls_transcript_update(&t2, cert, certlen);
+        uint8_t th[32]; tls_transcript_hash(&t2, th);
+        check("Transcript-Hash(ClientHello..Certificate)", th, 32,
+              "764d6632b3c35c3f3205e3499ac3edbaabb88295fba751461d3678e2e5ea0687");
+
+        tls_cert_chain chain;
+        check_ok("Certificate message parses", tls_parse_certificate(cert, certlen, &chain) == 0);
+
+        /* CertificateVerify body: SignatureScheme(2) | sig length(2) | signature */
+        uint16_t scheme = (uint16_t)((cv[4] << 8) | cv[5]);
+        size_t cvsiglen = (size_t)((cv[6] << 8) | cv[7]);
+        const uint8_t *cvsig = cv + 8;
+        check_ok("scheme == rsa_pss_rsae_sha256 (0x0804)", scheme == TLS_SIG_RSA_PSS_RSAE_SHA256);
+
+        check_ok("CertificateVerify verifies under the leaf key",
+                 tls_verify_certificate_verify(th, scheme, cvsig, cvsiglen,
+                     chain.certs[0].spki_key.p, chain.certs[0].spki_key.len) == TLS_CV_OK);
+
+        uint8_t badsig[256];
+        for (size_t i = 0; i < cvsiglen; i++) badsig[i] = cvsig[i];
+        badsig[0] ^= 1;
+        check_ok("tampered CertificateVerify -> BAD",
+                 tls_verify_certificate_verify(th, scheme, badsig, cvsiglen,
+                     chain.certs[0].spki_key.p, chain.certs[0].spki_key.len) == TLS_CV_BAD);
+
+        check_ok("wrong transcript -> BAD",
+                 (th[0] ^= 1, tls_verify_certificate_verify(th, scheme, cvsig, cvsiglen,
+                     chain.certs[0].spki_key.p, chain.certs[0].spki_key.len) == TLS_CV_BAD));
+
+        check_ok("ECDSA scheme -> UNSUPPORTED",
+                 tls_verify_certificate_verify(th, 0x0403, cvsig, cvsiglen,
+                     chain.certs[0].spki_key.p, chain.certs[0].spki_key.len) == TLS_CV_UNSUPPORTED);
+    }
 
     printf(failures ? "\nTLS TRACE: %d FAILURE(S)\n" : "\nTLS TRACE: ALL PASS\n", failures);
     return failures ? 1 : 0;

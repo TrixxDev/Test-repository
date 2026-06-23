@@ -16,6 +16,26 @@ static const uint8_t SHA256_DIGESTINFO_PREFIX[] = {
 
 static void copy(uint8_t *d, const uint8_t *s, size_t n) { for (size_t i = 0; i < n; i++) d[i] = s[i]; }
 
+int x509_rsa_pubkey(const uint8_t *spki_key, size_t len,
+                    const uint8_t **n, size_t *nlen, const uint8_t **e, size_t *elen)
+{
+    asn1_cursor c, rsa;
+    asn1_cursor_init(&c, spki_key, len);
+    if (asn1_open(&c, ASN1_SEQUENCE, &rsa) != 0) return -1;
+    asn1_tlv mod, exp;
+    if (asn1_expect(&rsa, ASN1_INTEGER, &mod) != 0) return -1;
+    if (asn1_expect(&rsa, ASN1_INTEGER, &exp) != 0) return -1;
+
+    /* drop the DER INTEGER sign byte(s) so n/e are raw magnitudes */
+    const uint8_t *np = mod.value; size_t nl = mod.len;
+    while (nl > 1 && np[0] == 0x00) { np++; nl--; }
+    const uint8_t *ep = exp.value; size_t el = exp.len;
+    while (el > 1 && ep[0] == 0x00) { ep++; el--; }
+
+    *n = np; *nlen = nl; *e = ep; *elen = el;
+    return 0;
+}
+
 /* RSASSA-PKCS1-v1.5 with SHA-256 over the TBSCertificate. */
 static int verify_rsa_sha256(const x509_cert *cert, const uint8_t *ik, size_t iklen)
 {
@@ -24,19 +44,8 @@ static int verify_rsa_sha256(const x509_cert *cert, const uint8_t *ik, size_t ik
     copy(di, SHA256_DIGESTINFO_PREFIX, sizeof SHA256_DIGESTINFO_PREFIX);
     sha256(cert->tbs.p, cert->tbs.len, di + sizeof SHA256_DIGESTINFO_PREFIX);
 
-    /* issuer public key: RSAPublicKey ::= SEQUENCE { modulus, publicExponent } */
-    asn1_cursor c, rsa;
-    asn1_cursor_init(&c, ik, iklen);
-    if (asn1_open(&c, ASN1_SEQUENCE, &rsa) != 0) return X509_VERIFY_MALFORMED;
-    asn1_tlv mod, exp;
-    if (asn1_expect(&rsa, ASN1_INTEGER, &mod) != 0) return X509_VERIFY_MALFORMED;
-    if (asn1_expect(&rsa, ASN1_INTEGER, &exp) != 0) return X509_VERIFY_MALFORMED;
-
-    /* drop the DER INTEGER sign byte(s) so n/e are raw magnitudes */
-    const uint8_t *n = mod.value; size_t nlen = mod.len;
-    while (nlen > 1 && n[0] == 0x00) { n++; nlen--; }
-    const uint8_t *e = exp.value; size_t elen = exp.len;
-    while (elen > 1 && e[0] == 0x00) { e++; elen--; }
+    const uint8_t *n, *e; size_t nlen, elen;
+    if (x509_rsa_pubkey(ik, iklen, &n, &nlen, &e, &elen) != 0) return X509_VERIFY_MALFORMED;
 
     if (cert->signature.len != nlen) return X509_VERIFY_BAD_SIGNATURE;  /* k must match */
     if (rsa_pkcs1_v15_verify(n, nlen, e, elen,

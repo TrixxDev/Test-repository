@@ -43,3 +43,23 @@ int tls_parse_certificate(const uint8_t *msg, size_t len, tls_cert_chain *out);
  * A NULL/empty hostname skips the name check. Returns a TLS_CERT_* code. */
 int tls_verify_certificate_chain(const tls_cert_chain *chain, const char *hostname,
                                  uint64_t now, const x509_cert *roots, size_t root_count);
+
+/* CertificateVerify results */
+#define TLS_CV_OK           0
+#define TLS_CV_BAD         -1   /* signature did not verify */
+#define TLS_CV_UNSUPPORTED -2   /* signature scheme we don't implement */
+#define TLS_CV_MALFORMED   -3   /* could not parse the leaf public key */
+
+/* TLS 1.3 SignatureScheme we support for CertificateVerify */
+#define TLS_SIG_RSA_PSS_RSAE_SHA256 0x0804
+
+/* Verify a server CertificateVerify (RFC 8446 §4.4.3). `transcript_hash` is
+ * Transcript-Hash(ClientHello..Certificate); `sig_scheme` is the announced
+ * SignatureScheme; `sig` is the raw signature; `leaf_spki_key` is the end-entity
+ * certificate's RSAPublicKey bits. Builds the signed content (context string +
+ * transcript hash), and for rsa_pss_rsae_sha256 runs RSA-PSS verification with
+ * the leaf key. Returns a TLS_CV_* code. */
+int tls_verify_certificate_verify(const uint8_t transcript_hash[32],
+                                  uint16_t sig_scheme,
+                                  const uint8_t *sig, size_t siglen,
+                                  const uint8_t *leaf_spki_key, size_t leaf_spki_key_len);

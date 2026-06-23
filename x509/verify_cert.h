@@ -32,6 +32,12 @@
 int x509_verify_signature(const x509_cert *cert,
                           const uint8_t *issuer_spki_key, size_t issuer_spki_key_len);
 
+/* Parse an RSAPublicKey (SEQUENCE { modulus, publicExponent }) from SubjectPublic
+ * Key bits, yielding raw big-endian magnitudes (DER sign bytes stripped). The
+ * pointers alias into `spki_key`. Returns 0 on success, -1 if malformed. */
+int x509_rsa_pubkey(const uint8_t *spki_key, size_t len,
+                    const uint8_t **n, size_t *nlen, const uint8_t **e, size_t *elen);
+
 /* Trust chain (v1: leaf -> trusted root, no intermediates). Returns
  * X509_VERIFY_OK if some root's key validates the leaf's signature, else
  * X509_VERIFY_UNTRUSTED. The array interface is already chain-shaped so
