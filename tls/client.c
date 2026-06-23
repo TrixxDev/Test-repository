@@ -3,7 +3,9 @@
 #include "handshake.h"
 #include "x25519.h"
 
-static int fail(tls_client *c) { c->state = TLS_ST_ERROR; return -1; }
+static int fail(tls_client *c)      { c->state = TLS_ST_ERROR; c->error = TLS_ERR_PROTOCOL; return -1; }
+static int fail_cert(tls_client *c) { c->state = TLS_ST_ERROR; c->error = TLS_ERR_CERT;     return -1; }
+static int fail_auth(tls_client *c) { c->state = TLS_ST_ERROR; c->error = TLS_ERR_AUTH;     return -1; }
 
 void tls_client_init(tls_client *c, const char *server_name,
                      const uint8_t ephemeral_priv[32],
@@ -24,6 +26,9 @@ void tls_client_init(tls_client *c, const char *server_name,
     c->roots = 0;            /* trust off until tls_client_set_trust */
     c->root_count = 0;
     c->now = 0;
+    c->leaf_spki_len = 0;
+    c->peer_authenticated = 0;
+    c->error = TLS_ERR_NONE;
 }
 
 void tls_client_set_trust(tls_client *c, const x509_cert *roots, size_t root_count,
@@ -91,16 +96,36 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
         if (type != TLS_HS_CERTIFICATE) return fail(c);
         tls_transcript_update(&c->transcript, msg, len);     /* always enters the transcript */
         if (c->roots) {                                      /* trust store installed: validate */
-            if (tls_parse_certificate(msg, len, &c->certs) != 0) return fail(c);
+            if (tls_parse_certificate(msg, len, &c->certs) != 0) return fail_cert(c);
             if (tls_verify_certificate_chain(&c->certs, c->server_name, c->now,
-                                             c->roots, c->root_count) != TLS_CERT_OK) return fail(c);
+                                             c->roots, c->root_count) != TLS_CERT_OK) return fail_cert(c);
+            /* keep the leaf public key for CertificateVerify: the parsed slices
+             * point into `msg`, which is gone by the next message */
+            const x509_slice *k = &c->certs.certs[0].spki_key;
+            if (k->len > sizeof c->leaf_spki) return fail_cert(c);
+            for (size_t i = 0; i < k->len; i++) c->leaf_spki[i] = k->p[i];
+            c->leaf_spki_len = k->len;
         }
         c->state = TLS_ST_WAIT_CV;
         return 0;
 
     case TLS_ST_WAIT_CV:
         if (type != TLS_HS_CERTIFICATE_VERIFY) return fail(c);
-        tls_transcript_update(&c->transcript, msg, len);     /* signature not checked (v1) */
+        if (c->roots) {
+            /* CertificateVerify signs Transcript(CH..Certificate): snapshot the
+             * transcript BEFORE appending this message (RFC 8446 §4.4.3). */
+            uint8_t th[32];
+            tls_transcript_hash(&c->transcript, th);
+            if (len < 8) return fail(c);
+            uint16_t scheme = (uint16_t)((msg[4] << 8) | msg[5]);
+            size_t   siglen = (size_t)((msg[6] << 8) | msg[7]);
+            if (8 + siglen != len) return fail(c);
+            if (tls_verify_certificate_verify(th, scheme, msg + 8, siglen,
+                                              c->leaf_spki, c->leaf_spki_len) != TLS_CV_OK)
+                return fail_auth(c);
+            c->peer_authenticated = 1;                       /* server proved key ownership */
+        }
+        tls_transcript_update(&c->transcript, msg, len);     /* CV enters the transcript after */
         c->state = TLS_ST_WAIT_FINISHED;
         return 0;
 

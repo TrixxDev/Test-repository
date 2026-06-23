@@ -20,6 +20,9 @@
 #include "verify_cert.h"
 #include "chacha20poly1305.h"
 #include "x25519.h"
+#include "sha256.h"
+#include "mgf1.h"
+#include "bignum.h"
 
 static int failures;
 
@@ -125,6 +128,57 @@ static void epoch_from_secret(tls_record_keys *k, const uint8_t secret[32])
     tls_record_init(k, key, iv);
 }
 
+/* Test-only "server" side: sign a CertificateVerify with the leaf private key via
+ * RSASSA-PSS (EMSA-PSS-ENCODE + modexp). The library is verify-only; this mirrors
+ * how the loopback test computes the server Finished. `th` is Transcript-Hash(CH..
+ * Certificate). Returns the CertificateVerify handshake message length. */
+static int pss_sign_cv(uint8_t *cvmsg, const uint8_t th[32],
+                       const uint8_t *n, int nlen, const uint8_t *d, int dlen)
+{
+    /* signed content = 0x20 x64 || context || 0x00 || transcript_hash; mHash = SHA-256 */
+    uint8_t content[64 + 33 + 1 + 32]; int o = 0;
+    for (int i = 0; i < 64; i++) content[o++] = 0x20;
+    const char *ctx = "TLS 1.3, server CertificateVerify";
+    for (int i = 0; ctx[i]; i++) content[o++] = (uint8_t)ctx[i];
+    content[o++] = 0;
+    for (int i = 0; i < 32; i++) content[o++] = th[i];
+    uint8_t mh[32]; sha256(content, o, mh);
+
+    bignum N; bignum_from_bytes(&N, n, nlen);
+    size_t modbits = bignum_bitlen(&N), embits = modbits - 1, emlen = (embits + 7) / 8;
+    uint8_t salt[32]; for (int i = 0; i < 32; i++) salt[i] = (uint8_t)i;
+
+    /* H = SHA-256(0x00 x8 || mHash || salt) */
+    uint8_t mprime[8 + 32 + 32];
+    for (int i = 0; i < 8; i++) mprime[i] = 0;
+    for (int i = 0; i < 32; i++) mprime[8 + i] = mh[i];
+    for (int i = 0; i < 32; i++) mprime[40 + i] = salt[i];
+    uint8_t H[32]; sha256(mprime, sizeof mprime, H);
+
+    /* DB = PS(0) || 0x01 || salt, masked with MGF1(H); EM = maskedDB || H || 0xbc */
+    size_t dblen = emlen - 32 - 1;
+    uint8_t db[256]; for (size_t i = 0; i < dblen; i++) db[i] = 0;
+    db[dblen - 33] = 0x01; for (int i = 0; i < 32; i++) db[dblen - 32 + i] = salt[i];
+    uint8_t mask[256]; mgf1_sha256(H, 32, mask, dblen);
+    for (size_t i = 0; i < dblen; i++) db[i] ^= mask[i];
+    size_t lead = 8 * emlen - embits; if (lead) db[0] &= (uint8_t)(0xff >> lead);
+    uint8_t em[256]; for (size_t i = 0; i < dblen; i++) em[i] = db[i];
+    for (int i = 0; i < 32; i++) em[dblen + i] = H[i]; em[emlen - 1] = 0xbc;
+
+    /* sig = em^d mod n */
+    bignum EM, D, SIG; bignum_from_bytes(&EM, em, emlen); bignum_from_bytes(&D, d, dlen);
+    bignum_modexp(&SIG, &EM, &D, &N);
+    uint8_t sig[256]; bignum_to_bytes(&SIG, sig, (size_t)nlen);
+
+    int body = 2 + 2 + nlen;
+    cvmsg[0] = TLS_HS_CERTIFICATE_VERIFY; cvmsg[1] = 0;
+    cvmsg[2] = (uint8_t)(body >> 8); cvmsg[3] = (uint8_t)body;
+    cvmsg[4] = 0x08; cvmsg[5] = 0x04;                       /* rsa_pss_rsae_sha256 */
+    cvmsg[6] = (uint8_t)(nlen >> 8); cvmsg[7] = (uint8_t)nlen;
+    for (int i = 0; i < nlen; i++) cvmsg[8 + i] = sig[i];
+    return 8 + nlen;
+}
+
 /* Wrap a DER certificate in a TLS 1.3 Certificate handshake message (one entry,
  * empty request context, empty entry extensions). Returns the message length. */
 static int build_cert_msg(uint8_t *o, const uint8_t *der, int derlen)
@@ -145,9 +199,13 @@ static int build_cert_msg(uint8_t *o, const uint8_t *der, int derlen)
 /* an unrelated self-signed RSA certificate (RFC 8448 §3) — a "wrong" root */
 #define RFC_DER_CERT "308201ac30820115a003020102020102300d06092a864886f70d01010b0500300e310c300a06035504031303727361301e170d3136303733303031323335395a170d3236303733303031323335395a300e310c300a0603550403130372736130819f300d06092a864886f70d010101050003818d0030818902818100b4bb498f8279303d980836399b36c6988c0c68de55e1bdb826d3901a2461eafd2de49a91d015abbc9a95137ace6c1af19eaa6af98c7ced43120998e187a80ee0ccb0524b1b018c3e0b63264d449a6d38e22a5fda430846748030530ef0461c8ca9d9efbfae8ea6d1d03e2bd193eff0ab9a8002c47428a6d35a8d88d79f7f1e3f0203010001a31a301830090603551d1304023000300b0603551d0f0404030205a0300d06092a864886f70d01010b05000381810085aad2a0e5b9276b908c65f73a7267170618a54c5f8a7b337d2df7a594365417f2eae8f8a58c8f8172f9319cf36b7fd6c55b80f21a03015156726096fd335e5e67f2dbf102702e608ccae6bec1fc63a42a99be5c3eb7107c3c54e9b9eb2bd5203b1c3b84e0a8b2f759409ba3eac9d91d402dcc0cc8f8961229ac9187b42b4de1"
 
-/* synthetic CA (self-signed) + leaf signed by it (from tools/mkchain) */
-#define T_CA_CERT   "308201203081cba003020102020101300d06092a864886f70d01010b05003019311730150603550403130e4175726f72612054657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3019311730150603550403130e4175726f72612054657374204341305c300d06092a864886f70d0101010500034b00304802410090000000000000000000000000000000000000000000000076a99b4b205252c58000000000000000000000000000000000000000000000cb554b6f660d0ed8f10203010001300d06092a864886f70d01010b05000341000be6fba8be2e9d3870633669470a678f07d21a0ce83577907562753c9642618b4e40c2b8dcb38dacdadd9fce3016b1c63ca3836a215123d35cc450f07e8e5adf"
-#define T_LEAF_CERT "3082015b30820105a003020102020102300d06092a864886f70d01010b05003019311730150603550403130e4175726f72612054657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3016311430120603550403130b6578616d706c652e636f6d305c300d06092a864886f70d0101010500034b003048024100a90000000000000000000000000000000000000000000000808d12e6b859300e6000000000000000000000000000000000000000000000eb78902914235bf6fd0203010001a33b303930370603551d110430302e820b6578616d706c652e636f6d820f7777772e6578616d706c652e636f6d820e2a2e746573742e6578616d706c65300d06092a864886f70d01010b05000341005189bd07db7e3af5ce89ad7c486323c2102f28b1f0f11885f56e5f3ddf3aef93bd32e369eeafb4a833a3cc0ca84fd471766c8a5b3532a31173da96fcf3cbba34"
+/* synthetic 1024-bit CA (self-signed) + leaf signed by it, with the leaf's
+ * private key so the test can play "server" and sign CertificateVerify (the
+ * library itself is verify-only). From tools/mkchain. */
+#define T_CA_CERT   "308201a63082010fa003020102020101300d06092a864886f70d01010b05003019311730150603550403130e4175726f72612054657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3019311730150603550403130e4175726f7261205465737420434130819f300d06092a864886f70d010101050003818d0030818902818100914dc084000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007732cf66ae551d9f99d4000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000054abb024451f79ca150203010001300d06092a864886f70d01010b0500038181005aa1a47ee6e84e6bbe29bcb16207087ecfccdbc66214a6c372379ba64d43212d6a496094f564ffe12686ec80517c213d7cc7a295d5efe29917527f36f29599d87031603b8f880864c21fb0fc6723f122230faa66ad05ef17189079508995c42f7aad0850a3844a157ba21a6d0952a4a294bd418a56219eecd1a3430b0fe7323f"
+#define T_LEAF_CERT "308201e030820149a003020102020102300d06092a864886f70d01010b05003019311730150603550403130e4175726f72612054657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3016311430120603550403130b6578616d706c652e636f6d30819f300d06092a864886f70d010101050003818d00308189028181008e67a321000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007600e22250a7f8ade8900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000282c15e8195233abef0203010001a33b303930370603551d110430302e820b6578616d706c652e636f6d820f7777772e6578616d706c652e636f6d820e2a2e746573742e6578616d706c65300d06092a864886f70d01010b050003818100480244df1797489d5f5dd3e84f7f0cbdc9a6f573f22ea7825feccf7a3c13f500e04119491314baa8853e90f5a449d398b8e34e3bf75df7f436d79382d32734978e44870f65c47064c95843197cd8e44b36b6cd6f69753bb33401e9d90a3256965d0a46d199586cf7c6b836a443460995663c4501034f40dd46816071e9d8f951"
+#define T_LEAF_N    "8e67a321000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007600e22250a7f8ade8900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000282c15e8195233abef"
+#define T_LEAF_D    "22fe92d6e4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bce01319c60846392b7840cb3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3ff045cf9d0b07a7781"
 
 int main(void)
 {
@@ -705,6 +763,97 @@ int main(void)
         tls_client_recv_handshake(&c3, ee, eelen, out, sizeof out, &outlen);
         int rc3 = tls_client_recv_handshake(&c3, certmsg, cmlen, out, sizeof out, &outlen);
         check_int("no trust store -> cert accepted -> WAIT_CV", (rc3 == 0 && c3.state == TLS_ST_WAIT_CV), 1);
+    }
+
+    printf("TLS 1.3 authenticated handshake (Cert + CertificateVerify + Finished):\n");
+    {
+        uint8_t cad[700]; x509_cert ca;
+        x509_parse(cad, unhex(T_CA_CERT, cad), &ca);
+        uint8_t leafd[700]; int leaflen = unhex(T_LEAF_CERT, leafd);
+        uint8_t certmsg[800]; int cmlen = build_cert_msg(certmsg, leafd, leaflen);
+        uint8_t ln[128], ld[128];
+        int lnlen = unhex(T_LEAF_N, ln), ldlen = unhex(T_LEAF_D, ld);
+        uint64_t now2026 = 1767225600ULL;
+
+        uint8_t cpriv[32], spriv[32], crand[32], srand[32];
+        for (int i=0;i<32;i++){ cpriv[i]=(uint8_t)(i+9); spriv[i]=(uint8_t)(0xC0+i);
+                                crand[i]=(uint8_t)(0x77+i); srand[i]=(uint8_t)(0x88+i); }
+        uint8_t spub[32], cpub[32]; x25519_base(spub, spriv); x25519_base(cpub, cpriv);
+
+        tls_client cl; tls_client_init(&cl, "example.com", cpriv, crand);
+        tls_client_set_trust(&cl, &ca, 1, now2026);
+        uint8_t ch[1024]; int chlen = tls_client_start(&cl, ch, sizeof ch);
+
+        /* server mirror: transcript + handshake keys */
+        tls_transcript ts; tls_transcript_init(&ts);
+        tls_transcript_update(&ts, ch, chlen);
+        uint8_t sh[256]; int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        tls_transcript_update(&ts, sh, shlen);
+        uint8_t hello_hash[32], ecdhe[32]; tls_transcript_hash(&ts, hello_hash);
+        x25519(ecdhe, spriv, cpub);
+        tls_key_schedule kss; tls_key_schedule_derive(&kss, ecdhe, hello_hash);
+
+        uint8_t ee[64]; int eelen = build_hs(ee, TLS_HS_ENCRYPTED_EXTENSIONS, (const uint8_t*)"\x00\x00", 2);
+        tls_transcript_update(&ts, ee, eelen);
+        tls_transcript_update(&ts, certmsg, cmlen);
+
+        /* forge a real CertificateVerify over Transcript(CH..Certificate) */
+        uint8_t th_cert[32]; tls_transcript_hash(&ts, th_cert);
+        uint8_t cvmsg[256]; int cvlen = pss_sign_cv(cvmsg, th_cert, ln, lnlen, ld, ldlen);
+        tls_transcript_update(&ts, cvmsg, cvlen);
+
+        /* server Finished over Transcript(CH..CertificateVerify) */
+        uint8_t sfk[32], th_cv[32], svd[32], sfin[64];
+        tls_finished_key(sfk, kss.server_hs_traffic);
+        tls_transcript_hash(&ts, th_cv);
+        tls_finished_verify_data(svd, sfk, th_cv);
+        int sfinlen = build_hs(sfin, TLS_HS_FINISHED, svd, 32);
+
+        uint8_t out[64]; size_t outlen;
+        tls_client_recv_handshake(&cl, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cl, ee, eelen, out, sizeof out, &outlen);
+        int rcc = tls_client_recv_handshake(&cl, certmsg, cmlen, out, sizeof out, &outlen);
+        check_int("Certificate accepted -> WAIT_CV", (rcc == 0 && cl.state == TLS_ST_WAIT_CV), 1);
+        check_int("not authenticated after Certificate alone", cl.peer_authenticated, 0);
+        int rcv = tls_client_recv_handshake(&cl, cvmsg, cvlen, out, sizeof out, &outlen);
+        check_int("CertificateVerify accepted -> WAIT_FINISHED", (rcv == 0 && cl.state == TLS_ST_WAIT_FINISHED), 1);
+        check_int("peer_authenticated set only after CV", cl.peer_authenticated, 1);
+        int rcf = tls_client_recv_handshake(&cl, sfin, sfinlen, out, sizeof out, &outlen);
+        check_int("Finished accepted -> CONNECTED", (rcf == 0 && cl.state == TLS_ST_CONNECTED), 1);
+        check_int("CONNECTED implies authenticated", (tls_client_connected(&cl) && cl.peer_authenticated), 1);
+
+        /* error separation: tampered CertificateVerify -> AUTH_ERROR */
+        tls_client c2; tls_client_init(&c2, "example.com", cpriv, crand);
+        tls_client_set_trust(&c2, &ca, 1, now2026);
+        uint8_t ch2[1024]; tls_client_start(&c2, ch2, sizeof ch2);
+        tls_client_recv_handshake(&c2, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c2, ee, eelen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c2, certmsg, cmlen, out, sizeof out, &outlen);
+        uint8_t badcv[256]; memcpy(badcv, cvmsg, cvlen); badcv[8] ^= 1;   /* flip a signature byte */
+        int rb = tls_client_recv_handshake(&c2, badcv, cvlen, out, sizeof out, &outlen);
+        check_int("tampered CV -> AUTH error, not authenticated",
+                  (rb == -1 && c2.state == TLS_ST_ERROR && c2.error == TLS_ERR_AUTH && c2.peer_authenticated == 0), 1);
+
+        /* snapshot proof: a CV signed over the wrong transcript (CH..SH) is rejected,
+         * pinning the FSM's snapshot boundary to exactly CH..Certificate */
+        tls_client c3; tls_client_init(&c3, "example.com", cpriv, crand);
+        tls_client_set_trust(&c3, &ca, 1, now2026);
+        uint8_t ch3[1024]; tls_client_start(&c3, ch3, sizeof ch3);
+        tls_client_recv_handshake(&c3, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c3, ee, eelen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c3, certmsg, cmlen, out, sizeof out, &outlen);
+        uint8_t wrongcv[256]; int wlen = pss_sign_cv(wrongcv, hello_hash, ln, lnlen, ld, ldlen);
+        int rw = tls_client_recv_handshake(&c3, wrongcv, wlen, out, sizeof out, &outlen);
+        check_int("CV over wrong transcript snapshot -> AUTH error", (rw == -1 && c3.error == TLS_ERR_AUTH), 1);
+
+        /* error separation: bad certificate (hostname) -> CERT_ERROR */
+        tls_client c4; tls_client_init(&c4, "wrong.example", cpriv, crand);
+        tls_client_set_trust(&c4, &ca, 1, now2026);
+        uint8_t ch4[1024]; tls_client_start(&c4, ch4, sizeof ch4);
+        tls_client_recv_handshake(&c4, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&c4, ee, eelen, out, sizeof out, &outlen);
+        int rh = tls_client_recv_handshake(&c4, certmsg, cmlen, out, sizeof out, &outlen);
+        check_int("bad hostname -> CERT error (before any CV)", (rh == -1 && c4.error == TLS_ERR_CERT), 1);
     }
 
     printf(failures ? "\nTLS TEST: %d FAILURE(S)\n" : "\nTLS TEST: ALL PASS\n", failures);

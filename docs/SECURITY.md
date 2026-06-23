@@ -35,9 +35,9 @@ Run the vectors: `make crypto-test`.
 | 12.4 | **Trust chain + validity + hostname** (`x509/verify_cert.c`) | synthetic CA→leaf chain | ✅ |
 | 12.5 | **Certificate integration** (`tls/cert.c`) — message parse + PKI + FSM | synthetic chain via FSM | ✅ |
 | 12.5b | **CertificateVerify** (`crypto/mgf1.c`, `crypto/rsa_pss.c`, `tls/cert.c`) | RFC 8448 CertificateVerify | ✅ |
-| 12.6 | Full server auth in the FSM (`tls_verify_server_certificate`) | RFC 8448 + synthetic | next |
-| 12.7 | ECDSA P-256 verification | RFC 6979 / wycheproof | later |
-| 13 | HTTPS GET in Aurora Fetch | real `https://` site | later |
+| 12.6 | **FSM authentication** (`tls/client.c`) — Cert+CV+Finished, `peer_authenticated` | synthetic authed handshake | ✅ |
+| 13 | TLS over sockets + first HTTPS GET | real `https://` site | next |
+| 13.x | Intermediate CAs, then ECDSA P-256 | real chains / wycheproof | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -675,3 +675,46 @@ certificate (RSA-PKCS#1 over TBSCertificate) and the handshake signature (RSA-PS
 over the transcript). What remains is wiring — joining Certificate +
 CertificateVerify at WAIT_CV in the FSM into one `tls_verify_server_certificate`
 decision (12.6) — and then a real `https://` fetch (13).
+
+## Step 12.6 — FSM authentication (server authentication as a handshake invariant)
+
+The three proven blocks (certificate chain, CertificateVerify, Finished) existed
+side by side; this step makes them a single handshake invariant. With a trust
+store installed the FSM now drives:
+
+```
+WAIT_CERT --Certificate trusted--> WAIT_CV --CertificateVerify ok--> WAIT_FINISHED
+          --reject--> ERROR(CERT)          --reject--> ERROR(AUTH)
+```
+
+- **CertificateVerify at WAIT_CV.** The transcript is snapshotted *before* the CV
+  message is appended, giving exactly Transcript(ClientHello..Certificate) — the
+  boundary RFC 8446 §4.4.3 requires. The leaf public key is captured at WAIT_CERT
+  (the parsed slices point into that message, which is gone by WAIT_CV).
+- **`peer_authenticated`** flips true only on a successful CertificateVerify — not
+  after Certificate, not after Finished. It is the one bit that means "the peer
+  proved it holds the leaf private key."
+- **Error separation.** `tls_error` distinguishes a rejected certificate
+  (`TLS_ERR_CERT`), a failed CertificateVerify (`TLS_ERR_AUTH`) and a framing /
+  Finished error (`TLS_ERR_PROTOCOL`), so a future live-HTTPS failure is easy to
+  localize.
+
+`make tls-test` runs a full authenticated handshake over the synthetic CA→leaf
+chain. Because the library is verify-only, the test plays "server" and signs a
+**real** CertificateVerify with the leaf private key (RSA-PSS), exactly as it
+already computes the server Finished:
+
+```
+Certificate -> WAIT_CV (not yet authenticated)
+CertificateVerify (real PSS) -> WAIT_FINISHED, peer_authenticated = 1
+Finished -> CONNECTED  (CONNECTED implies authenticated)
+tampered CV               -> ERROR(AUTH), peer_authenticated = 0
+CV over the wrong transcript (CH..SH) -> ERROR(AUTH)   [pins the snapshot boundary]
+bad hostname              -> ERROR(CERT) before any CV
+```
+
+CONNECTED is now a cryptographically meaningful state: the certificate is trusted,
+the hostname matched, the validity window held, the server proved key ownership,
+and the Finished verified. The TLS 1.3 client is logically complete for RSA — what
+remains is integration with the real internet (step 13: TLS over sockets, a first
+HTTPS GET), then intermediate-CA chains and ECDSA.

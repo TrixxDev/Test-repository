@@ -44,6 +44,18 @@ typedef enum {
     TLS_PHASE_APPLICATION       /* after server Finished: application traffic keys */
 } tls_key_phase;
 
+/* Why the FSM entered TLS_ST_ERROR — kept distinct so a live HTTPS failure is
+ * easy to localize (a rejected certificate vs a forged signature vs a framing
+ * error are very different problems). */
+typedef enum {
+    TLS_ERR_NONE = 0,
+    TLS_ERR_PROTOCOL,           /* malformed/unexpected message, record or Finished */
+    TLS_ERR_CERT,               /* certificate chain / validity / hostname rejected */
+    TLS_ERR_AUTH                /* CertificateVerify failed: key ownership not proven */
+} tls_error;
+
+#define TLS_LEAF_SPKI_MAX 600   /* room for an RSA-4096 RSAPublicKey */
+
 typedef struct {
     tls_state      state;
     tls_key_phase  phase;
@@ -65,6 +77,11 @@ typedef struct {
     size_t           root_count;
     uint64_t         now;                /* Unix time for the validity check */
     tls_cert_chain   certs;              /* scratch: the parsed server chain        */
+    uint8_t          leaf_spki[TLS_LEAF_SPKI_MAX];  /* leaf RSAPublicKey, kept for CV */
+    size_t           leaf_spki_len;
+
+    int       peer_authenticated;        /* true only after CertificateVerify passes */
+    tls_error error;                     /* reason, when state == TLS_ST_ERROR        */
 } tls_client;
 
 /* Initialize. `ephemeral_priv` and `client_random` make the engine fully
