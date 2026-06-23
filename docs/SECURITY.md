@@ -44,8 +44,12 @@ Run the vectors: `make crypto-test`.
 | 13.0b.3 | **Application-data smoke test** — send/recv one app record over the live epoch | host app-data test; QEMU echo | ✅ code |
 | 13.0b.4 | **Oversized cert chain** — multi-cert, many records, buffer-limit safety | host test | ✅ |
 | 13.0c | Real internet RSA endpoint: `GET /` → 200 OK | real `https://` site | later |
-| 13.x | **ECDSA P-256** (`ecdsa_secp256r1_sha256`) — most of the real web | wycheproof / RFC 6979 | next major |
-| 13.x | Intermediate CAs, then ECDSA P-256 | real chains / wycheproof | later |
+| 13.x.1a | **P-256 field** (`crypto/p256_field.c`) — GF(p) add/sub/mul/sqr/inv | host KAT vs Python | ✅ |
+| 13.x.1b | P-256 scalar (mod n) — separate ring | host KAT | next |
+| 13.x.2 / .2b | Point add/double/scalar-mul; **public-key validation** (on-curve, n·Q=O) | host KAT | later |
+| 13.x.3 | **ECDSA verify** — Wycheproof mandatory (r/s=0, ≥n, malformed DER, edges) | wycheproof | later |
+| 13.x.4 / .5 / .6 | X.509 ECDSA · TLS CertificateVerify 0x0403 · full ECDSA flight → CONNECTED | host + QEMU | later |
+| 13.y | Intermediate CA chains (leaf → intermediate → root) | real chains | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
