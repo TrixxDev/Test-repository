@@ -29,3 +29,12 @@ int  p256_to_affine(fe *x, fe *y, const p256_point *p);         /* returns -1 if
 void p256_double(p256_point *r, const p256_point *p);                 /* r = 2P  */
 void p256_add(p256_point *r, const p256_point *a, const p256_point *b); /* r = A + B */
 void p256_scalar_mul(p256_point *r, const sc *k, const p256_point *p);  /* r = k*P */
+
+/* 1 if the affine (x,y) satisfies y^2 = x^3 - 3x + b (mod p), else 0. */
+int  p256_on_curve(const fe *x, const fe *y);
+
+/* Decode and FULLY VALIDATE an uncompressed public key 0x04 || X || Y (65 bytes)
+ * into Q. Rejects: wrong length/prefix, X>=p or Y>=p, a point not on the curve,
+ * and (defense in depth) any point with n*Q != O. Returns 0 if Q is a valid
+ * public key, -1 otherwise. */
+int  p256_pubkey_decode(p256_point *Q, const uint8_t *in, size_t len);

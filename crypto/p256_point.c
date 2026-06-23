@@ -7,6 +7,12 @@ static const fe G_X = {{ 0xd898c296u,0xf4a13945u,0x2deb33a0u,0x77037d81u,
                          0x63a440f2u,0xf8bce6e5u,0xe12c4247u,0x6b17d1f2u }};
 static const fe G_Y = {{ 0x37bf51f5u,0xcbb64068u,0x6b315eceu,0x2bce3357u,
                          0x7c0f9e16u,0x8ee7eb4au,0xfe1a7f9bu,0x4fe342e2u }};
+/* curve constant b, little-endian field limbs */
+static const fe CURVE_B = {{ 0x27d2604bu,0x3bce3c3eu,0xcc53b0f6u,0x651d06b0u,
+                             0x769886bcu,0xb3ebbd55u,0xaa3a93e7u,0x5ac635d8u }};
+/* n (group order) as a scalar, for the n*Q = O membership check */
+static const sc CURVE_N = {{ 0xFC632551u,0xF3B9CAC2u,0xA7179E84u,0xBCE6FAADu,
+                             0xFFFFFFFFu,0xFFFFFFFFu,0x00000000u,0xFFFFFFFFu }};
 
 /* small helpers built on the field ring */
 static void fe_mul2(fe *r, const fe *a) { fe_add(r, a, a); }
@@ -128,4 +134,34 @@ void p256_scalar_mul(p256_point *r, const sc *k, const p256_point *p)
         if ((k->v[i >> 5] >> (i & 31)) & 1) p256_add(&R, &R, p);
     }
     *r = R;
+}
+
+int p256_on_curve(const fe *x, const fe *y)
+{
+    fe rhs, t, y2;
+    fe_sqr(&rhs, x); fe_mul(&rhs, &rhs, x);     /* x^3            */
+    fe_add(&t, x, x); fe_add(&t, &t, x);        /* 3x             */
+    fe_sub(&rhs, &rhs, &t);                      /* x^3 - 3x       */
+    fe_add(&rhs, &rhs, &CURVE_B);                /* x^3 - 3x + b   */
+    fe_sqr(&y2, y);                              /* y^2            */
+    return fe_equal(&y2, &rhs);
+}
+
+int p256_pubkey_decode(p256_point *Q, const uint8_t *in, size_t len)
+{
+    fe x, y;
+    if (len != 65 || in[0] != 0x04) return -1;         /* uncompressed only */
+    if (fe_from_bytes(&x, in + 1)  != 0) return -1;    /* X >= p  -> reject */
+    if (fe_from_bytes(&y, in + 33) != 0) return -1;    /* Y >= p  -> reject */
+    if (!p256_on_curve(&x, &y)) return -1;             /* must satisfy curve eqn */
+
+    p256_from_affine(Q, &x, &y);                       /* finite point (never O) */
+
+    /* Defense in depth: n*Q must be O. On P-256 (cofactor 1) being on-curve and
+     * != O already implies this, but the check also cross-validates scalar_mul
+     * and catches a point that slipped the curve equation. */
+    p256_point nQ;
+    p256_scalar_mul(&nQ, &CURVE_N, Q);
+    if (!p256_is_infinity(&nQ)) return -1;
+    return 0;
 }

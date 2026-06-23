@@ -47,8 +47,8 @@ Run the vectors: `make crypto-test`.
 | 13.x.1a | **P-256 field** (`crypto/p256_field.c`) — GF(p) add/sub/mul/sqr/inv | host KAT vs Python | ✅ |
 | 13.x.1b | **P-256 scalar** (`crypto/p256_scalar.c`) — GF(n), separate ring | host KAT vs Python | ✅ |
 | 13.x.2 | **P-256 points** (`crypto/p256_point.c`) — Jacobian add/double/scalar-mul | host KAT: k·G, group invariants, n·G=O | ✅ |
-| 13.x.2b | **EC public-key validation** (on-curve, bounds, ≠O, n·Q=O) | host KAT + invalid vectors | next |
-| 13.x.3 | **ECDSA verify** — Wycheproof mandatory (r/s=0, ≥n, malformed DER, edges) | wycheproof | later |
+| 13.x.2b | **EC public-key validation** (`p256_pubkey_decode`) — on-curve, bounds, n·Q=O | host: valid + invalid vectors | ✅ |
+| 13.x.3 | **ECDSA verify** — Wycheproof mandatory (r/s=0, ≥n, malformed DER, edges) | wycheproof | next |
 | 13.x.4 / .5 / .6 | X.509 ECDSA · TLS CertificateVerify 0x0403 · full ECDSA flight → CONNECTED | host + QEMU | later |
 | 13.y | Intermediate CA chains (leaf → intermediate → root) | real chains | later |
 

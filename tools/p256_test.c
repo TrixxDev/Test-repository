@@ -180,6 +180,46 @@ int main(void)
         check_int("n*G = O (order check)", p256_is_infinity(&r), 1);
     }
 
+    /* ---- public-key validation (13.x.2b): accept good keys, reject bad ones ---- */
+    printf("P-256 public-key validation:\n");
+    {
+        /* encode 0x04 || X || Y */
+        uint8_t enc[65]; p256_point Q;
+        #define ENCODE(xh, yh) do { enc[0] = 0x04; \
+            unhex(xh, enc + 1); unhex(yh, enc + 33); } while (0)
+
+        ENCODE(G_X, G_Y);
+        check_int("valid pubkey: G accepted", p256_pubkey_decode(&Q, enc, 65), 0);
+        ENCODE(G2_X, G2_Y);
+        check_int("valid pubkey: 2G accepted", p256_pubkey_decode(&Q, enc, 65), 0);
+        ENCODE(G3_X, G3_Y);
+        check_int("valid pubkey: 3G accepted", p256_pubkey_decode(&Q, enc, 65), 0);
+
+        /* not on curve: valid G_X but Y from G2 */
+        ENCODE(G_X, G2_Y);
+        check_int("reject: point not on curve", p256_pubkey_decode(&Q, enc, 65), -1);
+
+        /* X >= p (use p itself) */
+        ENCODE(P_HEX, G_Y);
+        check_int("reject: X >= p", p256_pubkey_decode(&Q, enc, 65), -1);
+        /* Y >= p */
+        ENCODE(G_X, P_HEX);
+        check_int("reject: Y >= p", p256_pubkey_decode(&Q, enc, 65), -1);
+
+        /* wrong prefix (0x02 compressed not supported) */
+        ENCODE(G_X, G_Y); enc[0] = 0x02;
+        check_int("reject: wrong prefix (0x02)", p256_pubkey_decode(&Q, enc, 65), -1);
+
+        /* wrong length */
+        ENCODE(G_X, G_Y);
+        check_int("reject: wrong length (64)", p256_pubkey_decode(&Q, enc, 64), -1);
+
+        /* 0x04 || all-zero garbage: (0,0) is not on the curve */
+        for (int i = 0; i < 65; i++) enc[i] = 0; enc[0] = 0x04;
+        check_int("reject: 04 || zeros (not on curve)", p256_pubkey_decode(&Q, enc, 65), -1);
+        #undef ENCODE
+    }
+
     printf(failures ? "\nP256 TEST: %d FAILURE(S)\n" : "\nP256 TEST: ALL PASS\n", failures);
     return failures ? 1 : 0;
 }
