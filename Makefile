@@ -200,6 +200,14 @@ rsa-test:
 	$(CC) -O2 -Icrypto tools/rsa_test.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/sha256.c -o /tmp/aurora_rsa_test
 	/tmp/aurora_rsa_test
 
+# Host-side TCP receive-ring test (net/rxring.c: the buffer behind tcp_recv).
+# Pure data structure, no QEMU — proves space is reused so a connection is no
+# longer capped at one bufferful over its whole lifetime.
+.PHONY: rxring-test
+rxring-test:
+	$(CC) -O2 -Inet tools/rxring_test.c net/rxring.c -o /tmp/aurora_rxring_test
+	/tmp/aurora_rxring_test
+
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
 SCREENSHOT := aurora_desktop.png
