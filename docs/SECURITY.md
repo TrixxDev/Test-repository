@@ -56,9 +56,10 @@ Run the vectors: `make crypto-test`.
 | 14.0.1 | **Intermediate CA support** — depth-N path building + basicConstraints CA:TRUE + keyUsage keyCertSign | host: depth-2 PASS; CA:FALSE/no-keyCertSign/broken-chain → FAIL | ✅ |
 | 14.0.2 | **ISRG Root X1** — offline validation of a real captured LE chain (depth-3, RSA-4096) | host: 4 cases (PASS + 3 rejects) | ✅ |
 | 14.0.3a | **Real Internet TLS (host)** — Aurora's engine vs a live TLS 1.3 server → CONNECTED + decrypt app record | host via egress proxy | ✅ |
-| 14.0.3b | Real Internet TLS (QEMU) — same, over Aurora's own net stack | QEMU + real net | next |
-| 14.0.4 | HTTP/1.1 GET over the live session → 200 OK | real `https://` | later |
+| 14.0.4 | **HTTP/1.1 GET over live TLS → 200 + body** (de-chunk / Content-Length) | host: github.com 200, 240 KB | ✅ |
+| 14.0.3b | Real Internet TLS+HTTP (QEMU) — same, over Aurora's own net stack | QEMU + real net | next (QEMU-side) |
 | 14.0.5 | Expand the trust store | host | later |
+| 15.0 | **Memory reduction** — `x509_cert.san_dns[8][256]` → pointer slices (~2 KiB/cert) | host | later |
 | 14.x | **ECDSA P-384 / SHA-384** — for LE ECDSA chains (E-series intermediates) | host KAT | later (gap found in 14.0.2) |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -1296,3 +1297,32 @@ RSA and ECDSA-P256 chains verify today.
 `make tls-live-test` runs it (needs outbound network); host/port and the trust
 anchor (`AURORA_TRUST_PEM`) are overridable for other environments. Default falls
 back to the embedded ISRG Root X1.
+
+## Step 14.0.4 — HTTP/1.1 GET over the live TLS channel
+
+With live TLS proven, the last layer of the browser network stack: a real
+HTTP/1.1 request/response over the established connection. The harness (same
+`tools/tls_live_test.c`) now, after CONNECTED, seals a
+`GET / HTTP/1.1` (with `Host` and `Connection: close`) over the application
+epoch, reads every `application_data` record until the server closes, reassembles
+the response, parses the status line, and decodes the body — **chunked**
+(Transfer-Encoding) or **Content-Length**, falling back to read-until-close.
+
+**Result — PASS.** Against a real server, Aurora returned
+`HTTP/1.1 200`, ~5 KB of headers, and a **240 KB de-chunked body** — the actual
+homepage HTML — reassembled across many `application_data` records. That single
+fetch stresses exactly the things a synthetic test can't: a multi-record body,
+chunked transfer-encoding, app-epoch sequence numbers advancing over a long
+stream, and a clean `Connection: close`.
+
+```
+TCP → TLS 1.3 → HTTP/1.1 → 200 OK + body     (all Aurora's own code)
+```
+
+This is the milestone where Aurora **fetched a web page from the internet over
+its own TCP, TLS 1.3, and HTTP stack** — a far more meaningful boundary than one
+more curve. (HTTP parsing here is intentionally minimal: status + body framing,
+no redirects/keep-alive/caching; that is application-level polish, not stack
+correctness.) Remaining: 14.0.3b runs the same over Aurora's *own* net stack in
+QEMU; 15.0 trims the per-cert memory; 14.x adds P-384/SHA-384 to open the ECDSA
+slice of the public web.

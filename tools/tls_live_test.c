@@ -1,22 +1,22 @@
-/* 14.0.3a — Live Internet TLS over Aurora's real engine, on the host.
+/* 14.0.3a + 14.0.4 — Live Internet TLS + HTTP/1.1 over Aurora's real engine, host.
  *
  * Aurora's TLS/x509/crypto code is portable freestanding C — the SAME objects
  * that link into the QEMU userspace client. This harness runs that engine against
  * a real TLS 1.3 server on the public internet, using host sockets only as the
  * byte transport (through the environment's HTTPS CONNECT proxy). It proves the
- * hardest real-world TLS behaviours BEFORE the QEMU bring-up:
+ * full browser network stack on genuine bytes BEFORE the QEMU bring-up:
  *
- *   TCP -> proxy CONNECT -> Aurora tls_driver -> CONNECTED
- *        -> decrypt >= 1 real application_data record   (no HTTP, no GET)
+ *   TCP -> proxy CONNECT -> Aurora tls_driver -> CONNECTED        (14.0.3a)
+ *        -> HTTP/1.1 GET -> reassemble response -> 200 + body     (14.0.4)
  *
- * The first post-handshake application_data record from a real server is normally
- * a NewSessionTicket; decrypting it exercises the application traffic keys, nonce
- * derivation, and record coalescing/fragmentation on genuine bytes. Trust anchor:
- * the embedded ISRG Root X1 (Let's Encrypt). Default target: www.eff.org:443
- * (an RSA chain Aurora can verify; LE ECDSA chains use P-384/SHA-384, not yet
- * implemented). Build/run: `make tls-live-test`. Needs outbound network.
+ * The GET is sealed over the application epoch; the response is reassembled across
+ * many application_data records (de-chunking or Content-Length), exercising the
+ * app traffic keys, nonce derivation, and record coalescing/fragmentation on real
+ * bytes. Trust anchor: a PEM named by AURORA_TRUST_PEM (so this sandbox's
+ * TLS-inspecting proxy CA can anchor a REAL verification), else the embedded ISRG
+ * Root X1. Build/run: `make tls-live-test`. Needs outbound network.
  *
- *   usage: tls-live-test [host] [port]   (default www.eff.org 443)
+ *   usage: tls-live-test [host] [port]   (default github.com 443 via the Makefile)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,6 +147,63 @@ static int proxy_connect(const char *host, int port)
     return fd;
 }
 
+/* --- minimal HTTP/1.1 response parsing (host-side, for the 14.0.4 proof) --- */
+static int ci_eq(const uint8_t *a, const char *b, int n)
+{ for (int i=0;i<n;i++){ int x=a[i]|32, y=b[i]|32; if(x!=y) return 0;} return 1; }
+
+static int http_status(const uint8_t *r, int len)        /* status code, or 0 */
+{
+    if (len < 12 || !ci_eq(r, "http/1.", 7)) return 0;
+    int i = 0; while (i<len && r[i]!=' ') i++; while (i<len && r[i]==' ') i++;
+    int code = 0; while (i<len && r[i]>='0' && r[i]<='9') code = code*10 + (r[i++]-'0');
+    return code;
+}
+static int header_end(const uint8_t *r, int len)         /* offset past CRLFCRLF, or -1 */
+{
+    for (int i=0; i+3<len; i++) if (r[i]=='\r'&&r[i+1]=='\n'&&r[i+2]=='\r'&&r[i+3]=='\n') return i+4;
+    return -1;
+}
+/* does a header named `name` contain `needle` (both case-insensitive)? */
+static int hdr_has(const uint8_t *r, int hbe, const char *name, const char *needle)
+{
+    int nl = (int)strlen(name), ndl = (int)strlen(needle);
+    for (int i=0; i+nl<hbe; i++) {
+        if ((i==0 || r[i-1]=='\n') && ci_eq(r+i, name, nl)) {
+            for (int j=i+nl; j+ndl<=hbe && r[j]!='\n'; j++) if (ci_eq(r+j, needle, ndl)) return 1;
+        }
+    }
+    return 0;
+}
+static int hdr_content_length(const uint8_t *r, int hbe)  /* value, or -1 */
+{
+    const char *k = "content-length:"; int kl = (int)strlen(k);
+    for (int i=0; i+kl<hbe; i++) {
+        if ((i==0 || r[i-1]=='\n') && ci_eq(r+i, k, kl)) {
+            int j=i+kl; while (j<hbe && r[j]==' ') j++;
+            int v=0, any=0; while (j<hbe && r[j]>='0'&&r[j]<='9'){ v=v*10+(r[j++]-'0'); any=1; }
+            return any ? v : -1;
+        }
+    }
+    return -1;
+}
+/* Decode chunked transfer-encoding. Returns decoded length, or -1. */
+static int dechunk(const uint8_t *in, int len, uint8_t *out, int outcap)
+{
+    int i=0, o=0;
+    for (;;) {
+        int sz=0, any=0;
+        while (i<len) { int c=in[i],d; if(c>='0'&&c<='9')d=c-'0';
+                        else if((c|32)>='a'&&(c|32)<='f')d=(c|32)-'a'+10; else break; sz=sz*16+d; any=1; i++; }
+        if (!any) return o>0?o:-1;
+        while (i<len && in[i]!='\n') i++; if (i<len) i++;          /* skip rest of size line */
+        if (sz==0) break;                                          /* final chunk */
+        if (i+sz>len || o+sz>outcap) return o;                     /* truncated: return what we have */
+        memcpy(out+o, in+i, sz); o+=sz; i+=sz;
+        if (i<len && in[i]=='\r') i++; if (i<len && in[i]=='\n') i++;
+    }
+    return o;
+}
+
 static const char *keytype(int a){ return a==X509_PK_RSA?"RSA":a==X509_PK_EC?"EC":"unknown"; }
 static const char *scheme_name(uint16_t s){
     switch (s){ case TLS_SIG_RSA_PSS_RSAE_SHA256: return "rsa_pss_rsae_sha256";
@@ -206,46 +263,62 @@ int main(int argc, char **argv)
     printf("[TLS] handshake bytes read=%ld\n", g_hs_bytes);
     printf("[TLS] CONNECTED\n");
 
-    /* Success criterion (14.0.3a.1): decrypt >= 1 real application_data record.
-     * Some servers send a NewSessionTicket proactively; this sandbox's proxy
-     * terminator does not, so send a minimal probe to elicit a server record. We
-     * do NOT parse the response as HTTP (that is 14.0.4) — this only proves we can
-     * SEAL a client app record and OPEN the server's response over the real
-     * channel (application traffic keys, per-epoch sequence, nonce derivation). */
+    /* 14.0.4 — a real HTTP/1.1 GET over the live TLS channel: send the request,
+     * read every application_data record until the server closes, reassemble the
+     * response, then parse status + body (de-chunking or Content-Length). */
     {
-        char req[160];
-        int rql = snprintf(req, sizeof req, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", host);
+        char req[256];
+        int rql = snprintf(req, sizeof req,
+                           "GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: Aurora/0.1\r\nConnection: close\r\n\r\n", host);
         int sl = tls_conn_send_app(&g_conn, (const uint8_t*)req, (size_t)rql, g_scratch, sizeof g_scratch);
-        if (sl > 0 && write(g_fd, g_scratch, sl) == sl)
-            printf("[app] sent %d-byte probe (sealed over the app epoch)\n", rql);
+        if (sl <= 0 || write(g_fd, g_scratch, sl) != sl) {
+            fprintf(stderr, "[http] request send failed\n"); close(g_fd); return 1;
+        }
+        printf("[http] GET / HTTP/1.1 sent (%d bytes, sealed over the app epoch)\n", rql);
     }
 
-    int decrypted = 0;
+    static uint8_t resp[262144]; int rlen = 0, nrec = 0, closed = 0;
     for (;;) {
         const uint8_t *rec; size_t rl; int rc;
         while ((rc = tls_reader_next(&g_reader, &rec, &rl)) == 1) {
-            printf("[rec] application_data record %zu bytes\n", rl);
             size_t pl = 0;
-            int cc = tls_conn_recv_app(&g_conn, rec, rl, g_plain, sizeof g_plain - 1, &pl);
-            if (cc == TLS_CONN_ERR_ALERT) { printf("[TLS] peer alert (close_notify)\n"); goto done; }
-            if (cc < 0) { fprintf(stderr, "[live] recv_app error %d\n", cc); goto done; }
-            decrypted++;                       /* a real app-data record decrypted OK */
-            if (pl > 0) printf("[rec] decrypted %zu plaintext bytes (post-handshake data)\n", pl);
-            else        printf("[rec] decrypted post-handshake msg (NewSessionTicket), out_len=0\n");
-            if (decrypted >= 1) goto done;     /* criterion met; don't wait for more */
+            int cc = tls_conn_recv_app(&g_conn, rec, rl, g_plain, sizeof g_plain, &pl);
+            if (cc == TLS_CONN_ERR_ALERT) { printf("[TLS] close_notify\n"); closed = 1; goto parse; }
+            if (cc < 0) { fprintf(stderr, "[http] recv_app error %d\n", cc); goto parse; }
+            nrec++;
+            if (pl > 0) { int c = (rlen + (int)pl <= (int)sizeof resp) ? (int)pl : (int)sizeof resp - rlen;
+                          memcpy(resp + rlen, g_plain, c); rlen += c; }
         }
-        if (rc < 0) { fprintf(stderr, "[live] malformed record on app stream\n"); break; }
+        if (rc < 0) { fprintf(stderr, "[http] malformed record\n"); break; }
         int n = (int)read(g_fd, g_scratch, sizeof g_scratch);
-        if (n <= 0) { fprintf(stderr, "[live] no application_data before EOF/timeout\n"); break; }
-        printf("[net] recv %d bytes (post-handshake)\n", n);
+        if (n <= 0) { closed = 1; break; }       /* clean TCP EOF / Connection: close */
         tls_reader_feed(&g_reader, g_scratch, (size_t)n);
     }
-done:
+parse:
     close(g_fd);
-    if (decrypted >= 1) {
-        printf("\nLIVE TLS TEST: PASS (CONNECTED + decrypted %d real application_data record(s))\n", decrypted);
+    printf("[http] %d app records, %d response bytes, closed=%d\n", nrec, rlen, closed);
+
+    int status = http_status(resp, rlen);
+    int hbe = header_end(resp, rlen);            /* offset just past CRLFCRLF */
+    int chunked = (hbe > 0) && hdr_has(resp, hbe, "transfer-encoding:", "chunked");
+    int clen = (hbe > 0) ? hdr_content_length(resp, hbe) : -1;
+
+    static uint8_t body[262144]; int blen = 0;
+    if (hbe > 0) {
+        if (chunked)       blen = dechunk(resp + hbe, rlen - hbe, body, (int)sizeof body);
+        else if (clen >= 0) blen = (clen <= rlen - hbe) ? clen : rlen - hbe, memcpy(body, resp + hbe, blen);
+        else               blen = rlen - hbe, memcpy(body, resp + hbe, blen);   /* until close */
+    }
+    printf("[http] status=%d  headers=%dB  body=%dB%s%s\n", status, hbe, blen,
+           chunked ? " (chunked)" : (clen >= 0 ? " (content-length)" : " (until-close)"),
+           closed ? "" : " [no clean close]");
+    if (blen > 0) { int show = blen < 120 ? blen : 120;
+                    printf("[http] body[0..%d]: %.*s%s\n", show, show, (char*)body, blen > show ? " ..." : ""); }
+
+    if (status == 200 && blen > 0) {
+        printf("\nHTTPS GET TEST: PASS (real HTTP/1.1 200 over Aurora TCP->TLS1.3->HTTP, %d-byte body)\n", blen);
         return 0;
     }
-    printf("\nLIVE TLS TEST: INCOMPLETE (reached CONNECTED but no application_data record decrypted)\n");
+    printf("\nHTTPS GET TEST: status=%d body=%d -- not a clean 200 (see above)\n", status, blen);
     return 2;
 }
