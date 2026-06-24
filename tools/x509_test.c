@@ -16,6 +16,15 @@
  * entries (RFC 8448's cert has none). Built by tools (correct DER lengths). */
 #define SAN_CERT "3081ca3081b1a003020102020101300d06092a864886f70d01010b050030123110300e0603550403130754657374204341301e170d3234303130313030303030305a170d3334303130313030303030305a3016311430120603550403130b6578616d706c652e636f6d301f300d06092a864886f70d0101010500030e00300b020400c0ffee0203010001a32b302930270603551d110420301e820b6578616d706c652e636f6d820f7777772e6578616d706c652e636f6d300d06092a864886f70d01010b0500030500deadbeef"
 
+/* A real ECDSA P-256 / ecdsa-with-SHA256 self-signed certificate, CN/SAN =
+ * aurora-ec-test (test/tls/ec_cert.pem). Generated with:
+ *   openssl ecparam -name prime256v1 -genkey -noout -out ec_key.pem
+ *   openssl req -x509 -new -key ec_key.pem -sha256 -days 3650 \
+ *       -subj "/CN=aurora-ec-test" -addext "subjectAltName=DNS:aurora-ec-test" \
+ *       -out ec_cert.pem
+ * This is the analogue of RFC_DER_CERT for the ECDSA verification path. */
+#define EC_CERT "308201a230820148a003020102021475f0594af486a3924c0107c26e17f37afff12fb7300a06082a8648ce3d04030230193117301506035504030c0e6175726f72612d65632d74657374301e170d3236303632343037353834355a170d3336303632313037353834355a30193117301506035504030c0e6175726f72612d65632d746573743059301306072a8648ce3d020106082a8648ce3d0301070342000495982cd8b24b904afc1a61e9ebb41c858b3f7ebe2f237133a0e28e23f67af4501d856285231af5fe01da4df2da8757b4c037be0bce75c1e7ec4f6f6ed76d1a31a36e306c301d0603551d0e04160414504dc74f919284b4687854efb57f3c251615bea4301f0603551d23041830168014504dc74f919284b4687854efb57f3c251615bea4300f0603551d130101ff040530030101ff30190603551d1104123010820e6175726f72612d65632d74657374300a06082a8648ce3d04030203480030450221009a1c56dbedf726b01bcfbb03b67fadc567c88c643a50aa5670fac6d554a8576c02201790e03885d6bdb1eb6f01a266a75bbff57c62d740c20842971d8c61d962d460"
+
 static int failures;
 
 static void check_ok(const char *name, int cond)
@@ -223,12 +232,63 @@ int main(void)
         check_ok("tampered TBSCertificate -> BAD_SIGNATURE",
                  x509_verify_signature(&cert2, cert2.spki_key.p, cert2.spki_key.len) == X509_VERIFY_BAD_SIGNATURE);
 
-        /* dispatcher: an ECDSA-signed cert is reported UNSUPPORTED, not failed */
-        static const uint8_t oid_ecdsa[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x02 };
+        /* dispatcher: a genuinely unimplemented algorithm (ecdsa-with-SHA384) is
+         * reported UNSUPPORTED, not failed. ecdsa-with-SHA256 is now supported and
+         * is exercised against a real ECDSA cert below. */
+        static const uint8_t oid_ecdsa384[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x03 };
         x509_cert fake = cert;
-        fake.sig_oid.p = oid_ecdsa; fake.sig_oid.len = sizeof oid_ecdsa;
-        check_ok("ECDSA signature algorithm -> UNSUPPORTED",
+        fake.sig_oid.p = oid_ecdsa384; fake.sig_oid.len = sizeof oid_ecdsa384;
+        check_ok("unimplemented signature algorithm -> UNSUPPORTED",
                  x509_verify_signature(&fake, cert.spki_key.p, cert.spki_key.len) == X509_VERIFY_UNSUPPORTED);
+    }
+
+    printf("X.509 signature — ECDSA P-256 / SHA-256 self-signed certificate (13.x.4):\n");
+    {
+        uint8_t der[512];
+        int derlen = unhex(EC_CERT, der);
+        x509_cert cert;
+        check_ok("ECDSA certificate parses", x509_parse(der, derlen, &cert) == 0);
+        check_ok("public key algorithm == EC (prime256v1 named curve checked)",
+                 cert.pubkey_algo == X509_PK_EC);
+        check_ok("subject CN == \"aurora-ec-test\"", strcmp(cert.subject_cn, "aurora-ec-test") == 0);
+        check_ok("SAN[0] == aurora-ec-test",
+                 cert.san_count == 1 && strcmp(cert.san_dns[0], "aurora-ec-test") == 0);
+        static const uint8_t oid_ecdsa256[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x02 };
+        check_ok("signature OID == ecdsa-with-SHA256",
+                 x509_slice_eq(&cert.sig_oid, oid_ecdsa256, sizeof oid_ecdsa256));
+        check_ok("EC subjectPublicKey is 65-byte uncompressed point",
+                 cert.spki_key.len == 65 && cert.spki_key.p[0] == 0x04);
+
+        /* KAT #1 — positive: the self-signed ECDSA signature verifies over its
+         * own TBSCertificate (issuer key = the cert's own SubjectPublicKey). */
+        int rc = x509_verify_signature(&cert, cert.spki_key.p, cert.spki_key.len);
+        check_ok("KAT#1 ECDSA/SHA-256 signature verifies (cert -> PASS)", rc == X509_VERIFY_OK);
+        x509_cert roots[] = { cert };
+        check_ok("KAT#1 trusts itself as a root via x509_verify_chain",
+                 x509_verify_chain(&cert, roots, 1) == X509_VERIFY_OK);
+
+        /* KAT #2 — tamper TBSCertificate: flip one content byte (the version
+         * value); the cert still parses but SHA-256(tbs) changes, so the
+         * signature must no longer verify. Proves the signature is actually
+         * checked against the body, not merely that the structure is well-formed. */
+        uint8_t der2[512]; memcpy(der2, der, derlen);
+        x509_cert cert2;
+        check_ok("tampered-TBS cert re-parses", x509_parse(der2, derlen, &cert2) == 0);
+        der2[(cert2.tbs.p - der2) + 8] ^= 1;
+        check_ok("KAT#2 tampered TBSCertificate -> BAD_SIGNATURE (cert -> FAIL)",
+                 x509_verify_signature(&cert2, cert2.spki_key.p, cert2.spki_key.len)
+                     == X509_VERIFY_BAD_SIGNATURE);
+
+        /* KAT #3 — tamper the signature: flip the last byte of the ECDSA-Sig-Value
+         * (changes s). The DER still parses strictly but the verification
+         * equation fails. Exercises the dispatcher + DER signature path. */
+        uint8_t der3[512]; memcpy(der3, der, derlen);
+        x509_cert cert3;
+        check_ok("tampered-signature cert re-parses", x509_parse(der3, derlen, &cert3) == 0);
+        der3[(cert3.signature.p - der3) + cert3.signature.len - 1] ^= 1;
+        check_ok("KAT#3 tampered signature -> BAD_SIGNATURE (cert -> FAIL)",
+                 x509_verify_signature(&cert3, cert3.spki_key.p, cert3.spki_key.len)
+                     == X509_VERIFY_BAD_SIGNATURE);
     }
 
     printf("X.509 trust chain / validity / hostname (synthetic CA + leaf):\n");

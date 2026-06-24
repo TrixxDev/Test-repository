@@ -3,6 +3,7 @@
 #include "asn1.h"
 #include "sha256.h"
 #include "rsa.h"
+#include "ecdsa.h"
 
 /* signatureAlgorithm OIDs (raw DER contents) */
 static const uint8_t OID_SHA256_RSA[]   = { 0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x0b };
@@ -55,13 +56,29 @@ static int verify_rsa_sha256(const x509_cert *cert, const uint8_t *ik, size_t ik
     return X509_VERIFY_OK;
 }
 
+/* ECDSA-with-SHA-256 over the TBSCertificate. For an EC issuer key, the
+ * subjectPublicKey BIT STRING contents (ik) are already the uncompressed point
+ * 0x04 || X || Y, which is exactly what ecdsa_p256_verify expects: it fully
+ * validates the key (length/prefix, coordinates < p, on-curve, correct subgroup)
+ * and parses the X9.62 DER signature strictly before checking the equation. So a
+ * mismatched key (e.g. an RSA key reached via a spoofed ECDSA sig_oid) fails the
+ * key decode rather than being trusted. */
+static int verify_ecdsa_sha256(const x509_cert *cert, const uint8_t *ik, size_t iklen)
+{
+    uint8_t hash[32];
+    sha256(cert->tbs.p, cert->tbs.len, hash);
+    if (ecdsa_p256_verify(ik, iklen, hash, cert->signature.p, cert->signature.len) != 0)
+        return X509_VERIFY_BAD_SIGNATURE;
+    return X509_VERIFY_OK;
+}
+
 int x509_verify_signature(const x509_cert *cert, const uint8_t *ik, size_t iklen)
 {
     if (x509_slice_eq(&cert->sig_oid, OID_SHA256_RSA, sizeof OID_SHA256_RSA))
         return verify_rsa_sha256(cert, ik, iklen);
 
     if (x509_slice_eq(&cert->sig_oid, OID_ECDSA_SHA256, sizeof OID_ECDSA_SHA256))
-        return X509_VERIFY_UNSUPPORTED;     /* ECDSA: a later step */
+        return verify_ecdsa_sha256(cert, ik, iklen);
 
     return X509_VERIFY_UNSUPPORTED;
 }

@@ -49,8 +49,10 @@ Run the vectors: `make crypto-test`.
 | 13.x.2 | **P-256 points** (`crypto/p256_point.c`) — Jacobian add/double/scalar-mul | host KAT: k·G, group invariants, n·G=O | ✅ |
 | 13.x.2b | **EC public-key validation** (`p256_pubkey_decode`) — on-curve, bounds, n·Q=O | host: valid + invalid vectors | ✅ |
 | 13.x.3 | **ECDSA verify** (`crypto/ecdsa.c`) + strict DER + fast field reduction | **484/484 Wycheproof** | ✅ |
-| 13.x.4 | X.509 ECDSA (SPKI EC key + `ecdsa-with-SHA256` signature) | host KAT | next |
-| 13.x.5 / .6 | TLS CertificateVerify 0x0403 · full ECDSA flight → CONNECTED | host + QEMU | later |
+| 13.x.4 | **X.509 ECDSA** — `prime256v1` SPKI + `ecdsa-with-SHA256` in the verify dispatcher | host KAT: cert→PASS, ±TBS→FAIL, ±sig→FAIL | ✅ |
+| 13.x.5 | TLS CertificateVerify 0x0403 + advertise `ecdsa_secp256r1_sha256` in ClientHello | host | next |
+| 13.x.6 | Full ECDSA flight → CONNECTED | host + QEMU | later |
+| 13.x.7 | First real external HTTPS site (Cloudflare/Fastly/GitHub/Let's Encrypt) | real `https://` | later |
 | 13.y | Intermediate CA chains (leaf → intermediate → root) | real chains | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
@@ -1011,3 +1013,39 @@ non-negative so the loop converges to one final subtract. Same `fe` API, so the
 13.x.1a KATs and all 484 Wycheproof vectors re-validate it unchanged: verify
 dropped to ~17 ms and the full suite to ~8 s. The scalar ring stays on `bignum`
 (a handful of ops per verify); a fast mod-n is a later, optional step.
+
+## Step 13.x.4 — ECDSA in the X.509 seam
+
+With the curve math proven, the remaining risk moved out of cryptography and into
+the ASN.1/X.509 join: `SPKI → 04‖X‖Y → validate → ecdsa_verify`. Two small wires:
+
+- **Parse-time named-curve check** (`x509/x509.c`): an EC `SubjectPublicKeyInfo`
+  is only classified `X509_PK_EC` when the AlgorithmIdentifier carries
+  `id-ecPublicKey` **and** the `prime256v1` (P-256) parameters OID. A key on any
+  other curve is left `UNKNOWN` rather than letting a non-P-256 point reach the
+  P-256 verifier. For an EC key the BIT STRING contents are already the
+  uncompressed point `0x04‖X‖Y`, i.e. exactly `ecdsa_p256_verify`'s `pub`.
+- **Dispatcher branch** (`x509/verify_cert.c`): the `ecdsa-with-SHA256` OID, which
+  previously returned `UNSUPPORTED`, now hashes the TBSCertificate and calls
+  `ecdsa_p256_verify(issuer_key, SHA-256(tbs), signature)`. The verifier fully
+  re-validates the key (length/prefix, coords < p, on-curve, subgroup) and parses
+  the signature strictly, so a spoofed `sig_oid` pointing an ECDSA algorithm at a
+  non-EC key fails the key decode instead of being trusted.
+
+Validated with a real `openssl`-generated ECDSA P-256 cert
+(`test/tls/ec_cert.pem`, embedded in the host test) against the three KATs the
+plan called for:
+
+| KAT | input | result |
+|-----|-------|--------|
+| #1 | unmodified self-signed cert | **PASS** (and trusts itself via `x509_verify_chain`) |
+| #2 | one byte flipped in TBSCertificate | **FAIL** (`BAD_SIGNATURE`) — proves the body is actually hashed, not just parsed |
+| #3 | one byte flipped in the signature | **FAIL** (`BAD_SIGNATURE`) — exercises the dispatcher + DER signature path |
+
+After this, `RSA certificates PASS` and `ECDSA certificates PASS`. The kernel
+image is untouched (x509/ is outside its source set); the userspace HTTPS client
+(`tlsconnect.elf`) now links the ECDSA/P-256 objects via `verify_cert.c`. ECDSA is
+**not yet** wired into the TLS CertificateVerify handler or advertised in the
+ClientHello `signature_algorithms` — that is 13.x.5, and until then a server will
+still pick RSA or abort. The throwaway EC private key (`test/tls/ec_key.pem`) is
+gitignored, like the RSA test key.
