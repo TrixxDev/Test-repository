@@ -186,6 +186,7 @@ gui: iso
 	qemu-system-i386 $(GUI_DISPLAY) -m 1024 -vga std -serial stdio \
 	    -drive file=$(DISK),format=raw,if=ide,index=0,media=disk \
 	    -drive file=aurora.iso,format=raw,if=ide,index=2,media=cdrom \
+	    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 	    -boot order=d
 
 # WSLg workaround: VNC server on localhost:5901 (no WSLg window needed).
@@ -195,6 +196,7 @@ gui-vnc: iso
 	qemu-system-i386 -display vnc=:1 -m 1024 -vga std -serial stdio \
 	    -drive file=$(DISK),format=raw,if=ide,index=0,media=disk \
 	    -drive file=aurora.iso,format=raw,if=ide,index=2,media=cdrom \
+	    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 	    -boot order=d
 
 # Verify the portable crypto/ primitives against known-answer vectors (NIST /

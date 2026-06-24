@@ -10,6 +10,7 @@
 
 #define DEF_W   460
 #define DEF_H   240
+#define ARG_MAX 16
 #define MAXCOLS 128         /* fullscreen at 8px/char (1024/8) fits within this */
 #define MAXROWS 48          /* fullscreen at 18px/row (768/18) fits within this */
 
@@ -112,6 +113,134 @@ static int parse_int(const char *s)
     return v * sign;
 }
 
+/* ---- functional shell: run typed commands by fork/exec of /disk programs ---- */
+
+/* Append one transcript line, scrolling the history up when full. */
+static void push_line(const char *s)
+{
+    if (nhist >= ROWS - 1) {
+        for (int i = 0; i < ROWS - 1; i++) memcpy(hist[i], hist[i + 1], MAXCOLS);
+        nhist = ROWS - 2; if (nhist < 0) nhist = 0;
+    }
+    char *h = hist[nhist++];
+    int p = 0;
+    for (; s[p] && p < COLS - 1 && p < MAXCOLS - 1; p++) h[p] = s[p];
+    h[p] = '\0';
+}
+
+/* Echo the committed prompt+input as a transcript line ("aurora> cmd"). */
+static void echo_input(void)
+{
+    char l[MAXCOLS]; int p = 0;
+    const char *pr = "aurora> ";
+    while (pr[p] && p < MAXCOLS - 1) { l[p] = pr[p]; p++; }
+    for (int i = 0; i < ilen && p < MAXCOLS - 1; i++) l[p++] = input[i];
+    l[p] = '\0';
+    push_line(l);
+}
+
+static int sh_tokenize(char *line, char **argv, int max)
+{
+    int argc = 0; char *p = line;
+    while (*p && argc < max - 1) {
+        while (*p == ' ') *p++ = '\0';
+        if (!*p) break;
+        argv[argc++] = p;
+        while (*p && *p != ' ') p++;
+    }
+    argv[argc] = 0;
+    return argc;
+}
+
+static void sh_resolve(char *out, const char *name)
+{
+    const char *pre = "/disk/"; int p = 0;
+    while (pre[p]) { out[p] = pre[p]; p++; }
+    for (int i = 0; name[i]; i++) {
+        char c = name[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        out[p++] = c;
+    }
+    const char *suf = ".ELF";
+    for (int s = 0; suf[s]; s++) out[p++] = suf[s];
+    out[p] = '\0';
+}
+
+/* Drain a child's output pipe into the transcript, splitting on newlines and
+ * wrapping over-long lines. */
+static void render_stream(int fd)
+{
+    char buf[256], line[MAXCOLS]; int ll = 0, r;
+    while ((r = read(fd, buf, sizeof buf)) > 0) {
+        for (int i = 0; i < r; i++) {
+            char c = buf[i];
+            if (c == '\r') continue;
+            if (c == '\n' || ll >= COLS - 1 || ll >= MAXCOLS - 1) {
+                line[ll] = '\0'; push_line(line); ll = 0;
+                if (c != '\n') line[ll++] = c;       /* keep the char that overflowed */
+            } else {
+                line[ll++] = c;
+            }
+        }
+    }
+    if (ll > 0) { line[ll] = '\0'; push_line(line); }
+}
+
+/* Run the current input line: built-ins handled in-process, everything else
+ * fork/exec'd as /disk/NAME.ELF with stdout+stderr captured into the transcript.
+ * The real text shell (user/sh.c) does the same resolution; this gives the GUI
+ * terminal a working command loop instead of a passive transcript. */
+static void run_command(void)
+{
+    echo_input();
+    char cmd[MAXCOLS]; int n = 0;
+    for (int i = 0; i < ilen && n < MAXCOLS - 1; i++) cmd[n++] = input[i];
+    cmd[n] = '\0';
+    ilen = 0;
+
+    char *av[ARG_MAX];
+    int ac = sh_tokenize(cmd, av, ARG_MAX);
+    if (ac == 0) return;
+
+    if (strcmp(av[0], "clear") == 0) { nhist = 0; return; }
+    if (strcmp(av[0], "help") == 0) {
+        push_line("builtins: help, id, clear.  else runs /disk/NAME.ELF");
+        push_line("try: hello | id | cat /disk/POEM.TXT | httpsget <host>");
+        return;
+    }
+    if (strcmp(av[0], "id") == 0) {
+        char b[40]; int p = 0; const char *u = "uid=";
+        while (u[p]) { b[p] = u[p]; p++; }
+        int uid = getuid(); char t[12]; int k = 0; if (uid==0) t[k++]='0';
+        while (uid) { t[k++] = '0' + uid % 10; uid /= 10; }
+        while (k) b[p++] = t[--k];
+        const char *pp = " pid="; for (int i=0; pp[i]; i++) b[p++]=pp[i];
+        int pid = getpid(); k = 0; if (pid==0) t[k++]='0';
+        while (pid) { t[k++] = '0' + pid % 10; pid /= 10; }
+        while (k) b[p++] = t[--k];
+        b[p] = '\0'; push_line(b);
+        return;
+    }
+
+    int pp[2];
+    if (pipe(pp) < 0) { push_line("term: pipe failed"); return; }
+    int pid = fork();
+    if (pid == 0) {                              /* child: exec the program */
+        char path[80]; sh_resolve(path, av[0]);
+        dup2(pp[1], 1); dup2(pp[1], 2);
+        close(pp[0]); close(pp[1]);
+        execv(path, av);
+        const char *e = "sh: command not found\n";
+        int el = 0; while (e[el]) el++;
+        write(1, e, el);
+        _exit(127);
+    }
+    close(pp[1]);
+    render_stream(pp[0]);                          /* blocks until the child closes it */
+    close(pp[0]);
+    int st; wait(&st);
+}
+
 int main(int argc, char **argv)
 {
     /* Optional: argv = {prog, x, y, title}. Lets init stagger several windows. */
@@ -208,7 +337,7 @@ int main(int argc, char **argv)
         } else if (c == 22) {            /* Ctrl+V: request a paste from the server */
             clip_request();
         }
-        else if (c == '\n' || c == '\r') commit_line();
+        else if (c == '\n' || c == '\r') run_command();
         else if (c == '\b')              { if (ilen > 0) ilen--; }
         else if (c >= 32 && c < 127 && ilen < COLS - 10) input[ilen++] = (char)c;
         repaint();
