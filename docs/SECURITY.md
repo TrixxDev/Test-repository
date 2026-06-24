@@ -57,7 +57,7 @@ Run the vectors: `make crypto-test`.
 | 14.0.2 | **ISRG Root X1** — offline validation of a real captured LE chain (depth-3, RSA-4096) | host: 4 cases (PASS + 3 rejects) | ✅ |
 | 14.0.3a | **Real Internet TLS (host)** — Aurora's engine vs a live TLS 1.3 server → CONNECTED + decrypt app record | host via egress proxy | ✅ |
 | 14.0.4 | **HTTP/1.1 GET over live TLS → 200 + body** (de-chunk / Content-Length) | host: github.com 200, 240 KB | ✅ |
-| 14.0.3b | Real Internet TLS+HTTP (QEMU) — same, over Aurora's own net stack | QEMU + real net | next (QEMU-side) |
+| 14.0.3b | **`user/httpsget.c`** — userspace HTTPS client (DNS→TCP→TLS→HTTP) over Aurora's net stack | host-built ✅; QEMU acceptance run pending | ▶ |
 | 14.0.5 | Expand the trust store | host | later |
 | 15.0 | **Memory reduction** — `x509_cert.san_dns[8][256]` → pointer slices (~2 KiB/cert) | host | later |
 | 14.x | **ECDSA P-384 / SHA-384** — for LE ECDSA chains (E-series intermediates) | host KAT | later (gap found in 14.0.2) |
@@ -1323,6 +1323,36 @@ This is the milestone where Aurora **fetched a web page from the internet over
 its own TCP, TLS 1.3, and HTTP stack** — a far more meaningful boundary than one
 more curve. (HTTP parsing here is intentionally minimal: status + body framing,
 no redirects/keep-alive/caching; that is application-level polish, not stack
-correctness.) Remaining: 14.0.3b runs the same over Aurora's *own* net stack in
-QEMU; 15.0 trims the per-cert memory; 14.x adds P-384/SHA-384 to open the ECDSA
-slice of the public web.
+correctness.)
+
+## Step 14.0.3b — `user/httpsget.c`, the userspace HTTPS client
+
+The same proof, but as a real Aurora program over Aurora's *own* network stack
+(not host sockets): the acceptance test for the whole user-facing chain.
+`user/httpsget.c` links the identical freestanding TLS/x509/crypto objects as the
+host harness and does `DNS → TCP → TLS 1.3 → HTTP/1.1 GET → status + body`,
+deliberately dumb (no keep-alive, redirects, cookies, compression, HTTP/2).
+
+```
+httpsget github.com /
+  [TLS] ... CONNECTED
+  HTTP/1.1 200 OK
+  [body ...]
+```
+
+Trust store: a curated set of public **RSA** roots (`user/ca_roots.h`: ISRG Root
+X1, DigiCert Global Root CA/G2, USERTrust RSA, GTS Root R1), so a site whose whole
+chain is RSA-PKCS1-SHA256 or ECDSA-P256-SHA256 verifies. (RSA roots specifically,
+because the anchor's key verifies the intermediate's signature — an ECDSA-P384
+root would re-introduce the 14.x gap one level up.) Expanding this set is 14.0.5.
+
+Built and host-verified: it compiles and links into `httpsget.elf` (BSS ≈ 147 KiB
+— the conn + reader + 5-root store + a 32 KiB response buffer), the kernel image
+is unchanged (additive invariant holds), and the 5-root store parses and verifies
+the real Let's Encrypt chain from 14.0.2 (ISRG Root X1 matches). The only step
+that cannot run here is the live QEMU fetch itself — that is the acceptance run.
+Aurora has no wall clock, so the validity instant is a build-time constant
+(overridable as `argv[3]`); keep it inside the target cert's window.
+
+Remaining after the QEMU acceptance: 15.0 trims the per-cert memory; 14.x adds
+P-384/SHA-384 to open the ECDSA slice of the public web.

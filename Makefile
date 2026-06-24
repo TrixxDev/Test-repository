@@ -33,7 +33,7 @@ USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
               user/wserver.elf user/term.elf user/dock.elf user/files.elf \
               user/viewer.elf user/wmstress.elf user/settings.elf user/fetch.elf \
-              user/tlsconnect.elf
+              user/tlsconnect.elf user/httpsget.elf
 LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o user/libc/clip.o user/libc/http.o
 # Portable graphics/compositor code, built for userspace and linked into wserver.
 WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
@@ -118,6 +118,13 @@ user/tlsconnect.elf: user/tlsconnect.c user/tls_test_root.h user/libc.h user/crt
 	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -c user/tlsconnect.c -o user/tlsconnect.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/tlsconnect.o $(TLS_U_OBJ) $(LIBC_OBJ) -o $@
 
+# httpsget: the userspace HTTPS client (DNS -> TCP -> TLS 1.3 -> HTTP/1.1) over
+# Aurora's own network stack. Same freestanding TLS stack as tlsconnect, plus the
+# curated CA roots header.
+user/httpsget.elf: user/httpsget.c user/ca_roots.h user/libc.h user/crt0.o $(LIBC_OBJ) $(TLS_U_OBJ) user/user.ld
+	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -c user/httpsget.c -o user/httpsget.o
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/httpsget.o $(TLS_U_OBJ) $(LIBC_OBJ) -o $@
+
 $(EMBEDDED): user/init.elf tools/bin2c.py
 	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
 
@@ -131,7 +138,7 @@ $(DISK): $(USER_PROGS) user/poem.txt user/about.txt tools/mkfat32.py
 	    DOCK.ELF user/dock.elf FILES.ELF user/files.elf VIEWER.ELF user/viewer.elf \
 	    ABOUT.TXT user/about.txt POEM.TXT user/poem.txt WMSTRESS.ELF user/wmstress.elf \
 	    SETTINGS.ELF user/settings.elf FETCH.ELF user/fetch.elf \
-	    TLSCONN.ELF user/tlsconnect.elf
+	    TLSCONN.ELF user/tlsconnect.elf HTTPSGET.ELF user/httpsget.elf
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
