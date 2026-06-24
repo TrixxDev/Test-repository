@@ -235,6 +235,24 @@ ecdsa-test:
 	$(CC) -O2 -Icrypto -Itools tools/ecdsa_test.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/bignum.c crypto/sha256.c -o /tmp/aurora_ecdsa_test
 	/tmp/aurora_ecdsa_test
 
+# Live Internet TLS over Aurora's real engine, on the host, through the HTTPS
+# CONNECT proxy (14.0.3a). NEEDS OUTBOUND NETWORK -- diagnostic, not part of the
+# default suite. Drives a real TLS 1.3 handshake to CONNECTED and decrypts at
+# least one real application_data record (NewSessionTicket).
+#
+# Defaults target this sandbox: github.com is reached through the egress proxy's
+# TLS-inspecting terminator, so the trust anchor is the proxy CA (pre-installed at
+# /root/.ccr/agent-proxy-ca.crt). Override for other environments, e.g.
+#   make tls-live-test LIVE_HOST=example.com AURORA_TRUST_PEM=/path/root.pem
+# With no AURORA_TRUST_PEM the harness falls back to the embedded ISRG Root X1.
+LIVE_HOST ?= github.com
+LIVE_PORT ?= 443
+AURORA_TRUST_PEM ?= /root/.ccr/agent-proxy-ca.crt
+.PHONY: tls-live-test
+tls-live-test:
+	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_live_test.c tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/driver.c tls/cert.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c -o /tmp/aurora_tls_live_test
+	AURORA_TRUST_PEM="$(AURORA_TRUST_PEM)" /tmp/aurora_tls_live_test $(LIVE_HOST) $(LIVE_PORT)
+
 # Host-side TCP receive-ring test (net/rxring.c: the buffer behind tcp_recv).
 # Pure data structure, no QEMU — proves space is reused so a connection is no
 # longer capped at one bufferful over its whole lifetime.

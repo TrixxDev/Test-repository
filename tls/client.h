@@ -66,6 +66,7 @@ typedef struct {
     uint8_t  client_random[32];
     char     server_name[256];
     uint16_t cipher_suite;               /* negotiated (from ServerHello) */
+    uint16_t cv_scheme;                  /* CertificateVerify SignatureScheme accepted (0 = none) */
 
     tls_key_schedule ks;                 /* early/handshake/master + hs traffic */
     uint8_t client_hs_finished_key[32];

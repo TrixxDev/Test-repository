@@ -55,7 +55,8 @@ Run the vectors: `make crypto-test`.
 | **14.0** | **Real Internet HTTPS** | | |
 | 14.0.1 | **Intermediate CA support** — depth-N path building + basicConstraints CA:TRUE + keyUsage keyCertSign | host: depth-2 PASS; CA:FALSE/no-keyCertSign/broken-chain → FAIL | ✅ |
 | 14.0.2 | **ISRG Root X1** — offline validation of a real captured LE chain (depth-3, RSA-4096) | host: 4 cases (PASS + 3 rejects) | ✅ |
-| 14.0.3 | **Real Internet TLS** — live site → CONNECTED + decrypt one app record (no HTTP) | QEMU + real net | next |
+| 14.0.3a | **Real Internet TLS (host)** — Aurora's engine vs a live TLS 1.3 server → CONNECTED + decrypt app record | host via egress proxy | ✅ |
+| 14.0.3b | Real Internet TLS (QEMU) — same, over Aurora's own net stack | QEMU + real net | next |
 | 14.0.4 | HTTP/1.1 GET over the live session → 200 OK | real `https://` | later |
 | 14.0.5 | Expand the trust store | host | later |
 | 14.x | **ECDSA P-384 / SHA-384** — for LE ECDSA chains (E-series intermediates) | host KAT | later (gap found in 14.0.2) |
@@ -1249,3 +1250,49 @@ synthetic tests:
   inside both. The one value to watch is `TLS_MAX_CHAIN`: a server sending
   leaf + 2 intermediates + root (4) is at the limit; cheap to raise to 6 (+4.8 KiB)
   if a real site needs it.
+
+## Step 14.0.3a — live Internet TLS, on the host, through Aurora's real engine
+
+Aurora's `crypto/`+`tls/`+`x509/` is portable freestanding C — the very objects
+that link into the QEMU userspace client. `tools/tls_live_test.c` runs that engine
+against a **real external TLS 1.3 server**, using host sockets only as the byte
+transport (through the environment's egress proxy via an HTTP `CONNECT` tunnel).
+This catches the real-world behaviours that a synthetic test never will —
+record coalescing, fragmentation, post-handshake messages, real timing/EOF — on
+genuine bytes, *before* the QEMU bring-up. Narrow criterion (no HTTP parsing):
+
+```
+TCP → proxy CONNECT → Aurora tls_driver → CONNECTED → decrypt ≥1 real application_data record
+```
+
+**Result — PASS.** Against a live TLS 1.3 server reached through the sandbox's
+TLS-inspecting egress proxy, Aurora ran the whole flight with no special-casing:
+ClientHello → ServerHello → handshake keys → EncryptedExtensions → Certificate →
+**chain verified** (depth-2, RSA, against the proxy's CA, pre-trusted out of band
+from `/root/.ccr/agent-proxy-ca.crt`) → **CertificateVerify OK** (rsa_pss_rsae_
+sha256) → Finished → application keys → **CONNECTED**. It then sealed a client
+application record and **decrypted the server's application_data response** — the
+full app epoch (traffic keys, per-epoch sequence, nonce derivation) on real bytes.
+The diagnostic trace the step added (`Certificate depth=2`, `Leaf key=RSA`,
+`CV scheme=rsa_pss_rsae_sha256`, handshake byte count, per-record sizes) made the
+single round trip legible.
+
+Because this sandbox's proxy terminates and re-issues TLS (its CA is in the
+environment trust store), the peer here is the *proxy's* TLS 1.3 stack — a real,
+independent, standards-compliant implementation, not Aurora's loopback and not a
+crafted server. Verification is real (a pre-trusted anchor, not trust-on-first-
+use).
+
+**Genuine public servers — the engine works, blocked only by the algorithm gap.**
+Pointed at the genuine public `letsencrypt.org` (TLS 1.3, ChaCha20-Poly1305,
+X25519, real ISRG Root X1 embedded), Aurora negotiates and runs all the way
+through ServerHello → keys → EncryptedExtensions → Certificate, then stops at
+chain validation — because that chain's leaf is signed by the **E7** intermediate,
+which is **ECDSA P-384 / SHA-384** (see 14.0.2). So the TLS 1.3 machinery
+interoperates with genuine public servers; the only thing standing between Aurora
+and a fully-verified public connection is P-384/SHA-384 support (filed as 14.x).
+RSA and ECDSA-P256 chains verify today.
+
+`make tls-live-test` runs it (needs outbound network); host/port and the trust
+anchor (`AURORA_TRUST_PEM`) are overridable for other environments. Default falls
+back to the embedded ISRG Root X1.

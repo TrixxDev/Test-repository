@@ -27,6 +27,7 @@ void tls_client_init(tls_client *c, const char *server_name,
     if (server_name) { for (; server_name[i] && i < sizeof(c->server_name) - 1; i++) c->server_name[i] = server_name[i]; }
     c->server_name[i] = 0;
     c->cipher_suite = 0;
+    c->cv_scheme = 0;
 
     c->roots = 0;            /* trust off until tls_client_set_trust */
     c->root_count = 0;
@@ -145,6 +146,7 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
                 if (rc == TLS_CV_UNSUPPORTED) emit(c, TLS_EV_FAIL_BAD_SIGSCHEME, scheme);
                 return fail_auth(c);
             }
+            c->cv_scheme = scheme;                           /* remember for diagnostics */
             emit(c, TLS_EV_CERT_VERIFY_OK, 0);
             c->peer_authenticated = 1;                       /* server proved key ownership */
             emit(c, TLS_EV_PEER_AUTHENTICATED, 0);
