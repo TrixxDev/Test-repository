@@ -54,10 +54,11 @@ Run the vectors: `make crypto-test`.
 | 13.x.6 | **Full ECDSA flight → CONNECTED** (no HTTP) — same FSM, no special branch | host: PASS + forged-CV/forged-Finished rejected | ✅ host |
 | **14.0** | **Real Internet HTTPS** | | |
 | 14.0.1 | **Intermediate CA support** — depth-N path building + basicConstraints CA:TRUE + keyUsage keyCertSign | host: depth-2 PASS; CA:FALSE/no-keyCertSign/broken-chain → FAIL | ✅ |
-| 14.0.2 | ISRG Root X1 — offline validation of a real captured chain | host | next |
-| 14.0.3 | HTTP/1.1 GET over TLS | host | later |
-| 14.0.4 | First real external HTTPS site | real `https://` | later |
+| 14.0.2 | **ISRG Root X1** — offline validation of a real captured LE chain (depth-3, RSA-4096) | host: 4 cases (PASS + 3 rejects) | ✅ |
+| 14.0.3 | **Real Internet TLS** — live site → CONNECTED + decrypt one app record (no HTTP) | QEMU + real net | next |
+| 14.0.4 | HTTP/1.1 GET over the live session → 200 OK | real `https://` | later |
 | 14.0.5 | Expand the trust store | host | later |
+| 14.x | **ECDSA P-384 / SHA-384** — for LE ECDSA chains (E-series intermediates) | host KAT | later (gap found in 14.0.2) |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1181,3 +1182,70 @@ lab toy (depth-1, signature-only) and starts to resemble a real browser path
 validator. The userspace HTTPS client picks this up for free (`verify_cert.c` is
 shared). Next, 14.0.2: embed a real root (ISRG Root X1) and validate a captured
 live chain offline.
+
+## Step 14.0.2 — validating a real Let's Encrypt chain, offline
+
+The first contact with genuine internet PKI, before any live socket. A real
+chain was captured from `www.eff.org` and is embedded in the test:
+
+```
+*.eff.org (RSA-2048) → LE "YR1" (RSA-2048) → ISRG "Root YR" (RSA-4096) → ISRG Root X1 (RSA-4096)
+```
+
+The server sends the leaf + two intermediates; **ISRG Root X1** is the trust
+anchor. It really chains to the published ISRG Root X1 (cross-checked with
+`openssl verify`), so this exercises the depth-N builder, byte-exact DN chaining,
+the CA checks, and RSA-PKCS1-SHA256 verification (incl. RSA-4096) on bytes nobody
+crafted for us. Four cases, leading with the rejections so a pass can't be a false
+positive:
+
+| case | result |
+|------|--------|
+| real chain + ISRG Root X1 (+ validity + `www.eff.org` vs `*.eff.org`) | **OK** |
+| drop the YR1 intermediate (broken path) | **UNTRUSTED** |
+| flip one byte of YR1's signature | **BAD_SIGNATURE** |
+| same chain under an unrelated trust anchor | **UNTRUSTED** |
+
+Case 3 motivated a builder refinement: a link whose issuer is found *by name* but
+whose signature fails now yields `BAD_SIGNATURE`, distinct from `UNTRUSTED` (no
+issuer found at all) — so "tampered" and "incomplete" are told apart.
+
+**Finding — an algorithm-coverage gap, not a plumbing gap.** The first chain tried
+was `letsencrypt.org` itself, which today serves an **ECDSA** chain: the leaf is
+signed by intermediate **E7**, and E7 is **ECDSA P-384 / SHA-384**. Aurora
+implements ECDSA **P-256 / SHA-256** only — no P-384, no SHA-384 — so it cannot
+verify that leaf's signature. This is the real shape of the remaining work: the
+TLS/PKI machinery is correct, but a slice of the live web uses curves/hashes
+Aurora hasn't implemented. RSA chains (and ECDSA-P256 chains) work today; P-384/
+SHA-384 is filed as **14.x** for when ECDSA LE sites are needed. The RSA chain
+above is fully representative for a first real connection.
+
+## Memory footprint (measured before going live)
+
+Exact i686 sizes (compiled `--target=i686-elf -m32`, read from symbol sizes), so
+the resource budget is known before a real server sends a chain heavier than the
+synthetic tests:
+
+| item | size | notes |
+|------|------|-------|
+| `sizeof(tls_conn)` | 43,916 B (42.9 KiB) | incl. 32 KiB handshake reassembly + the FSM |
+| `sizeof(tls_record_reader)` | 33,044 B (32.3 KiB) | byte-stream → record buffer (one 16 KiB record + slack) |
+| `sizeof(tls_client)` (the FSM) | 11,032 B | incl. `tls_cert_chain` 9,636 B |
+| `sizeof(x509_cert)` | 2,408 B | dominated by `san_dns[8][256]` = 2 KiB |
+| `tlsconnect.elf` **BSS** | 83,480 B (81.5 KiB) | g_conn + g_reader + g_root + two 2 KiB scratch buffers |
+| `tlsconnect.elf` text | 64,410 B (62.9 KiB) | code |
+
+- **Peak stack ≈ 9.5 KiB** against a **16 KiB** user stack (USTACK_PAGES=4): the
+  RSA verify path dominates (`bignum_modexp` 4,144 B + `bignum_modmul` 2,092 B +
+  `bignum_mul` 1,068 B + `rsa_pss` 1,168 B + callers). Crucially, **path building
+  is a loop**, so peak stack is independent of chain depth, and certs are parsed
+  in place — a heavier chain grows *buffer* use, not stack. The ECDSA-P256 path is
+  far lighter (~3 KiB). bignum frames are already sized for the 8192-bit worst case.
+- **Peak heap = 0.** The crypto/TLS/x509 path uses no dynamic allocation
+  (freestanding); everything is static or stack.
+- **Chain limits:** `TLS_MAX_CHAIN = 4` certs (extras in a Certificate message are
+  skipped); a Certificate message larger than `TLS_CONN_HS_BUF = 32 KiB` is
+  rejected with `ERR_CAPACITY`. Real chains are 3–8 KiB / 2–3 certs, comfortably
+  inside both. The one value to watch is `TLS_MAX_CHAIN`: a server sending
+  leaf + 2 intermediates + root (4) is at the limit; cheap to raise to 6 (+4.8 KiB)
+  if a real site needs it.

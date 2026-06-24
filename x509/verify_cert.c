@@ -113,28 +113,32 @@ int x509_verify_chain(const x509_cert *chain, size_t chain_count,
     if (chain_count == 0) return X509_VERIFY_UNTRUSTED;
 
     const x509_cert *cur = &chain[0];                 /* end-entity certificate */
-    int bad_ca = 0;                                   /* saw a name+sig match blocked by CA rules */
+    int bad_ca = 0, bad_sig = 0;       /* "found the issuer by name but it was unusable" reasons */
 
     for (int depth = 0; depth < X509_MAX_DEPTH; depth++) {
         /* Terminal: is cur signed by a trusted root? Roots are anchors, so they
          * are not themselves subject to the basicConstraints/keyUsage check. */
-        for (size_t i = 0; i < root_count; i++)
-            if (name_eq(&cur->issuer_raw, &roots[i].subject_raw) &&
-                x509_verify_signature(cur, roots[i].spki_key.p, roots[i].spki_key.len) == X509_VERIFY_OK)
+        for (size_t i = 0; i < root_count; i++) {
+            if (!name_eq(&cur->issuer_raw, &roots[i].subject_raw)) continue;
+            if (x509_verify_signature(cur, roots[i].spki_key.p, roots[i].spki_key.len) == X509_VERIFY_OK)
                 return X509_VERIFY_OK;
+            bad_sig = 1;                                  /* name matched, signature did not */
+        }
 
         /* Otherwise climb one link through an intermediate in the chain. */
         const x509_cert *next = 0;
         for (size_t i = 1; i < chain_count; i++) {
             const x509_cert *ca = &chain[i];
             if (ca == cur) continue;
-            if (name_eq(&cur->issuer_raw, &ca->subject_raw) &&
-                x509_verify_signature(cur, ca->spki_key.p, ca->spki_key.len) == X509_VERIFY_OK) {
-                if (!may_sign_certs(ca)) { bad_ca = 1; continue; }   /* not a usable CA */
-                next = ca; break;
+            if (!name_eq(&cur->issuer_raw, &ca->subject_raw)) continue;
+            if (x509_verify_signature(cur, ca->spki_key.p, ca->spki_key.len) != X509_VERIFY_OK) {
+                bad_sig = 1; continue;                   /* name matched, signature did not */
             }
+            if (!may_sign_certs(ca)) { bad_ca = 1; continue; }   /* valid signer, but not a CA */
+            next = ca; break;
         }
-        if (!next) return bad_ca ? X509_VERIFY_BAD_CA : X509_VERIFY_UNTRUSTED;
+        if (!next) return bad_ca  ? X509_VERIFY_BAD_CA :
+                          bad_sig ? X509_VERIFY_BAD_SIGNATURE : X509_VERIFY_UNTRUSTED;
         cur = next;
     }
     return X509_VERIFY_UNTRUSTED;   /* path too long */
