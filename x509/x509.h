@@ -33,11 +33,18 @@ typedef struct {
     char issuer_cn[X509_CN_MAX];   /* issuer Common Name (diagnostic only) */
     char subject_cn[X509_CN_MAX];  /* subject Common Name (diagnostic only) */
 
+    x509_slice issuer_raw;         /* full issuer Name element (tag+len+value), for chaining */
+    x509_slice subject_raw;        /* full subject Name element (tag+len+value), for chaining */
+
     uint64_t not_before;           /* validity, normalized to Unix time */
     uint64_t not_after;
 
     int  san_count;                /* number of dNSName entries captured */
     char san_dns[X509_MAX_SAN][X509_SAN_MAX];
+
+    int        is_ca;              /* basicConstraints cA = TRUE (absent => FALSE) */
+    int        has_key_usage;      /* a KeyUsage extension was present */
+    int        key_cert_sign;      /* KeyUsage keyCertSign bit set */
 
     int        pubkey_algo;        /* X509_PK_* */
     x509_slice spki;               /* full SubjectPublicKeyInfo (tag+len+value) */

@@ -5,6 +5,8 @@
 /* OIDs we recognize (raw DER contents, no tag/length). */
 static const uint8_t OID_CN[]      = { 0x55, 0x04, 0x03 };                              /* 2.5.4.3 commonName */
 static const uint8_t OID_SAN[]     = { 0x55, 0x1d, 0x11 };                              /* 2.5.29.17 subjectAltName */
+static const uint8_t OID_BC[]      = { 0x55, 0x1d, 0x13 };                              /* 2.5.29.19 basicConstraints */
+static const uint8_t OID_KU[]      = { 0x55, 0x1d, 0x0f };                              /* 2.5.29.15 keyUsage */
 static const uint8_t OID_RSA[]     = { 0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x01 }; /* rsaEncryption */
 static const uint8_t OID_EC[]      = { 0x2a,0x86,0x48,0xce,0x3d,0x02,0x01 };           /* id-ecPublicKey */
 static const uint8_t OID_P256[]    = { 0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07 };      /* prime256v1 (P-256) */
@@ -91,7 +93,8 @@ static int parse_name_cn(const asn1_tlv *name, char *cn, size_t cap)
     return 0;
 }
 
-/* Walk the extensions, collecting SubjectAltName dNSName entries. */
+/* Walk the extensions: SubjectAltName dNSName entries, plus the basicConstraints
+ * cA flag and the keyUsage keyCertSign bit (both needed for path building). */
 static int parse_extensions(asn1_cursor *tc, x509_cert *out)
 {
     uint8_t tag;
@@ -117,18 +120,39 @@ static int parse_extensions(asn1_cursor *tc, x509_cert *out)
         asn1_tlv extval;
         if (asn1_expect(&ext, ASN1_OCTET_STRING, &extval) != 0) return -1;
 
-        if (!asn1_oid_equals(&extid, OID_SAN, sizeof OID_SAN)) continue;
-
-        /* extnValue wraps GeneralNames ::= SEQUENCE OF GeneralName */
-        asn1_cursor wrap, gns;
-        asn1_cursor_init(&wrap, extval.value, extval.len);
-        if (asn1_open(&wrap, ASN1_SEQUENCE, &gns) != 0) return -1;
-        while (!asn1_cursor_empty(&gns)) {
-            asn1_tlv gn;
-            if (asn1_next(&gns, &gn) != 0) return -1;
-            if (gn.tag == (ASN1_CONTEXT | 2)) {                      /* dNSName [2] IMPLICIT IA5String */
-                if (out->san_count < X509_MAX_SAN)
-                    copy_str(out->san_dns[out->san_count++], X509_SAN_MAX, gn.value, gn.len);
+        if (asn1_oid_equals(&extid, OID_SAN, sizeof OID_SAN)) {
+            /* extnValue wraps GeneralNames ::= SEQUENCE OF GeneralName */
+            asn1_cursor wrap, gns;
+            asn1_cursor_init(&wrap, extval.value, extval.len);
+            if (asn1_open(&wrap, ASN1_SEQUENCE, &gns) != 0) return -1;
+            while (!asn1_cursor_empty(&gns)) {
+                asn1_tlv gn;
+                if (asn1_next(&gns, &gn) != 0) return -1;
+                if (gn.tag == (ASN1_CONTEXT | 2)) {                  /* dNSName [2] IMPLICIT IA5String */
+                    if (out->san_count < X509_MAX_SAN)
+                        copy_str(out->san_dns[out->san_count++], X509_SAN_MAX, gn.value, gn.len);
+                }
+            }
+        } else if (asn1_oid_equals(&extid, OID_BC, sizeof OID_BC)) {
+            /* BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, ... } */
+            asn1_cursor wrap, bc;
+            asn1_cursor_init(&wrap, extval.value, extval.len);
+            if (asn1_open(&wrap, ASN1_SEQUENCE, &bc) == 0) {
+                uint8_t bt;
+                if (asn1_peek_tag(&bc, &bt) == 0 && bt == ASN1_BOOLEAN) {
+                    asn1_tlv ca;
+                    if (asn1_next(&bc, &ca) == 0 && ca.len == 1 && ca.value[0] != 0)
+                        out->is_ca = 1;
+                }
+            }
+        } else if (asn1_oid_equals(&extid, OID_KU, sizeof OID_KU)) {
+            /* KeyUsage ::= BIT STRING; bit 5 (0x04 of the first data byte) = keyCertSign.
+             * value[0] is the unused-bits count, value[1] the first data byte. */
+            asn1_cursor wrap; asn1_tlv ku;
+            asn1_cursor_init(&wrap, extval.value, extval.len);
+            if (asn1_next(&wrap, &ku) == 0 && ku.tag == ASN1_BIT_STRING && ku.len >= 1) {
+                out->has_key_usage = 1;
+                if (ku.len >= 2 && (ku.value[1] & 0x04)) out->key_cert_sign = 1;
             }
         }
     }
@@ -188,9 +212,11 @@ int x509_parse(const uint8_t *der, size_t len, x509_cert *out)
     asn1_tlv inner_sig;
     if (asn1_expect(&tc, ASN1_SEQUENCE, &inner_sig) != 0) return -1;
 
-    /* issuer Name */
+    /* issuer Name — capture the full element (tag+len+value) for DN chaining */
+    const uint8_t *issuer_start = tc.p;
     asn1_tlv issuer;
     if (asn1_expect(&tc, ASN1_SEQUENCE, &issuer) != 0) return -1;
+    out->issuer_raw.p = issuer_start; out->issuer_raw.len = (size_t)(tc.p - issuer_start);
     if (parse_name_cn(&issuer, out->issuer_cn, sizeof out->issuer_cn) != 0) return -1;
 
     /* validity { notBefore, notAfter } */
@@ -200,9 +226,11 @@ int x509_parse(const uint8_t *der, size_t len, x509_cert *out)
     if (asn1_next(&val, &nb) != 0 || parse_time(&nb, &out->not_before) != 0) return -1;
     if (asn1_next(&val, &na) != 0 || parse_time(&na, &out->not_after) != 0) return -1;
 
-    /* subject Name */
+    /* subject Name — capture the full element (tag+len+value) for DN chaining */
+    const uint8_t *subject_start = tc.p;
     asn1_tlv subject;
     if (asn1_expect(&tc, ASN1_SEQUENCE, &subject) != 0) return -1;
+    out->subject_raw.p = subject_start; out->subject_raw.len = (size_t)(tc.p - subject_start);
     if (parse_name_cn(&subject, out->subject_cn, sizeof out->subject_cn) != 0) return -1;
 
     /* subjectPublicKeyInfo — capture the full element */

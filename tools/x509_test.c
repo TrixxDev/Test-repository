@@ -25,6 +25,22 @@
  * This is the analogue of RFC_DER_CERT for the ECDSA verification path. */
 #define EC_CERT "308201a230820148a003020102021475f0594af486a3924c0107c26e17f37afff12fb7300a06082a8648ce3d04030230193117301506035504030c0e6175726f72612d65632d74657374301e170d3236303632343037353834355a170d3336303632313037353834355a30193117301506035504030c0e6175726f72612d65632d746573743059301306072a8648ce3d020106082a8648ce3d0301070342000495982cd8b24b904afc1a61e9ebb41c858b3f7ebe2f237133a0e28e23f67af4501d856285231af5fe01da4df2da8757b4c037be0bce75c1e7ec4f6f6ed76d1a31a36e306c301d0603551d0e04160414504dc74f919284b4687854efb57f3c251615bea4301f0603551d23041830168014504dc74f919284b4687854efb57f3c251615bea4300f0603551d130101ff040530030101ff30190603551d1104123010820e6175726f72612d65632d74657374300a06082a8648ce3d04030203480030450221009a1c56dbedf726b01bcfbb03b67fadc567c88c643a50aa5670fac6d554a8576c02201790e03885d6bdb1eb6f01a266a75bbff57c62d740c20842971d8c61d962d460"
 
+/* A real ECDSA P-256 PKI for depth-N path building (14.0.1), from openssl:
+ *   PKI_ROOT  (self-signed, CA:TRUE + keyCertSign)
+ *   PKI_INTER (signed by root, CA:TRUE + keyCertSign)
+ *   PKI_LEAF  (signed by inter, CA:FALSE, SAN aurora-leaf.test)
+ * plus adversarial variants that must be REJECTED:
+ *   PKI_INTER_NOTCA  (CA:FALSE but keyCertSign) + PKI_LEAF_B signed by it
+ *   PKI_INTER_NOKUCS (CA:TRUE but no keyCertSign) + PKI_LEAF_C signed by it
+ * All valid 2024-01-01..2034-01-01. */
+#define PKI_ROOT "308201953082013da00302010202144c3bbe68398996e7acaa725699d43cf0b31a377a300a06082a8648ce3d04030230193117301506035504030c0e4175726f726120526f6f74204341301e170d3236303632343130333732335a170d3336303632313130333732335a30193117301506035504030c0e4175726f726120526f6f742043413059301306072a8648ce3d020106082a8648ce3d03010703420004c46549472e5674894eadafd0a188f8e6d39b2458cfe28a47faf333640cc05e16c347b211d13bb98a23c0e9a8337416ac08c7b77783b33d6df8915f62b32df903a3633061301d0603551d0e04160414ae6db9cf67b96411ecf598b33b87b5f32d2f47d7301f0603551d23041830168014ae6db9cf67b96411ecf598b33b87b5f32d2f47d7300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300a06082a8648ce3d0403020346003043021f10a532437b7fd53719fc880d0dd0a92c5a2be8fdbbb2309e1e96995cb835230220736ecbb851c253c54094705130a7c633cb3d80ad447febad6e63ba9d040d030b"
+#define PKI_INTER "308201a030820145a00302010202142766ff78a0e91a5cff4fb67a448784ff86728b47300a06082a8648ce3d04030230193117301506035504030c0e4175726f726120526f6f74204341301e170d3236303632343130333732335a170d3336303632313130333732335a3021311f301d06035504030c164175726f726120496e7465726d6564696174652043413059301306072a8648ce3d020106082a8648ce3d030107034200041eedf17d31f8f1feb31d0812a778e81e105fa1da2900c729227bd61db262ef89b1cb49023d795f152167d03412157dc3cc62dcbd4f61389e8a4f7cdd0d916548a3633061300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106301d0603551d0e04160414f69e954994ab568f9b39ff7475965646de9be986301f0603551d23041830168014ae6db9cf67b96411ecf598b33b87b5f32d2f47d7300a06082a8648ce3d0403020349003046022100a568c1319fc2f57e87c4b5f072a29e1b26db28e3d761cb81fb189264bca91b19022100cf46cc95b2b3d9a82b3bc8822e83e5c04e6055ac23bfe02abbb5a4b8314673bc"
+#define PKI_LEAF "308201b83082015ea0030201020214498150f0b3e2917e31d300d80329ae08d6f8b79e300a06082a8648ce3d0403023021311f301d06035504030c164175726f726120496e7465726d656469617465204341301e170d3236303632343130333732335a170d3336303632313130333732335a301b3119301706035504030c106175726f72612d6c6561662e746573743059301306072a8648ce3d020106082a8648ce3d03010703420004f7de4f07b4f3078145be863e8dd3ab6d53563bcadaa43a5c21b9f2b9672da16512f6432dc62f1975eef28789b0cad76e9ba9e28244e1718f3e04d97111bd895aa37a307830090603551d1304023000300e0603551d0f0101ff040403020780301b0603551d110414301282106175726f72612d6c6561662e74657374301d0603551d0e04160414c7bdf72640996fdb2c118f432017ed6c4abc7ca1301f0603551d23041830168014f69e954994ab568f9b39ff7475965646de9be986300a06082a8648ce3d040302034800304502210085e38fedf083427bf080f1e3b8e5430b6f43d0bb2c62885a0811f15f81ba8bca022077479001e3c199278e06aad27eb845829002ea039a955ac53e15b8e83b27adf2"
+#define PKI_INTER_NOTCA "308201993082013ea00302010202142766ff78a0e91a5cff4fb67a448784ff86728b48300a06082a8648ce3d04030230193117301506035504030c0e4175726f726120526f6f74204341301e170d3236303632343130333732335a170d3336303632313130333732335a301d311b301906035504030c124175726f7261204e6f74434120496e7465723059301306072a8648ce3d020106082a8648ce3d030107034200047550660de844754702e76136813f54f6f1c7c239e8f3281572157cf0d722091b1e296b3b47101b0eb941c1e72d9fdcf0d9a79847e4f7b5a4f8b6babd65af5602a360305e300c0603551d130101ff04023000300e0603551d0f0101ff040403020106301d0603551d0e04160414d8894bcb6cadfee92638a17c2bcf5826d897ca65301f0603551d23041830168014ae6db9cf67b96411ecf598b33b87b5f32d2f47d7300a06082a8648ce3d0403020349003046022100ac6f1dbdb8e37c4e0fb4aafbb73f0569fe76e04ea363cabf04eab6d53b6d07bf022100f1d469519f1dc74defdd1b2145218b81a74b33410ceb20938e4383634a704f78"
+#define PKI_LEAF_B "308201b93082015ea003020102021477c48a4eade8b67f744249e05f54e144f08ccebc300a06082a8648ce3d040302301d311b301906035504030c124175726f7261204e6f74434120496e746572301e170d3236303632343130333732335a170d3336303632313130333732335a301d311b301906035504030c126175726f72612d6c6561662d622e746573743059301306072a8648ce3d020106082a8648ce3d03010703420004efc467b696e78bfc04178c1a9db6a5c63033d1179aa683a07e6d2ca848e25db55063bb5638f2214b68f91aed95cc2d1467ce389ece73672da942d3d69cdf199da37c307a30090603551d1304023000300e0603551d0f0101ff040403020780301d0603551d110416301482126175726f72612d6c6561662d622e74657374301d0603551d0e04160414fac98472081a0406e60bbfc2985232773ed55b53301f0603551d23041830168014d8894bcb6cadfee92638a17c2bcf5826d897ca65300a06082a8648ce3d0403020349003046022100f8dba210d24b808496313574cc516754ddda0f5caa21b67cb60df250a374924302210082a5a167071fab8b6d4774773ea9ca15a046da8603729496cd31707d6074e7c7"
+#define PKI_INTER_NOKUCS "3082019b30820142a00302010202142766ff78a0e91a5cff4fb67a448784ff86728b49300a06082a8648ce3d04030230193117301506035504030c0e4175726f726120526f6f74204341301e170d3236303632343130333732335a170d3336303632313130333732335a301e311c301a06035504030c134175726f7261204e6f4b55435320496e7465723059301306072a8648ce3d020106082a8648ce3d03010703420004ba6e6fa7a84a7baefee30575d4a8727f5077f16485b4213df93ec79c66a1fe2c03c4bc1d80d7423aa54b163b3f8f0e9914c73dfbaa2ee8267340ce5ff4668ac9a3633061300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020780301d0603551d0e0416041463b0708744d56dea9135463f93b7d69895baed80301f0603551d23041830168014ae6db9cf67b96411ecf598b33b87b5f32d2f47d7300a06082a8648ce3d040302034700304402203a1a03a3989bf164986349a216ed58d0eb34d40f234a39297c3c233e8e9237b502206afd79aa9d0004f714335fe8e8538d5c5138f73b230ccd0e2270e0f38525523c"
+#define PKI_LEAF_C "308201ba3082015fa00302010202144271906a21fd299de35cccf0440e0ecf3934b6b1300a06082a8648ce3d040302301e311c301a06035504030c134175726f7261204e6f4b55435320496e746572301e170d3236303632343130333732335a170d3336303632313130333732335a301d311b301906035504030c126175726f72612d6c6561662d632e746573743059301306072a8648ce3d020106082a8648ce3d0301070342000443c7603297eb3a7d8452b5dfa5b90d7c4c43182c7b0a3e76e21f0869e9da55f85cfd5b13c82e3f8ba69033296af5916a5d1b44d9ec1b97127deceb158cd47300a37c307a30090603551d1304023000300e0603551d0f0101ff040403020780301d0603551d110416301482126175726f72612d6c6561662d632e74657374301d0603551d0e0416041406800a4b81524a7d39b6af6d4cce8f8ce97bc140301f0603551d2304183016801463b0708744d56dea9135463f93b7d69895baed80300a06082a8648ce3d0403020349003046022100dcaf8e8b5df68deb29f6a1cbc1fb846d03cc529516e329deb2191f09dd1ef748022100f582ed54cc8ba480fe95bc2b3ea2f7f75b16ee77ef70c38131a9b2caf2f98fd6"
+
 static int failures;
 
 static void check_ok(const char *name, int cond)
@@ -265,7 +281,7 @@ int main(void)
         check_ok("KAT#1 ECDSA/SHA-256 signature verifies (cert -> PASS)", rc == X509_VERIFY_OK);
         x509_cert roots[] = { cert };
         check_ok("KAT#1 trusts itself as a root via x509_verify_chain",
-                 x509_verify_chain(&cert, roots, 1) == X509_VERIFY_OK);
+                 x509_verify_chain(&cert, 1, roots, 1) == X509_VERIFY_OK);
 
         /* KAT #2 — tamper TBSCertificate: flip one content byte (the version
          * value); the cert still parses but SHA-256(tbs) changes, so the
@@ -306,11 +322,11 @@ int main(void)
 
         /* 12.4a — trust chain */
         x509_cert roots_good[] = { ca };
-        check_ok("leaf trusted by CA root", x509_verify_chain(&leaf, roots_good, 1) == X509_VERIFY_OK);
+        check_ok("leaf trusted by CA root", x509_verify_chain(&leaf, 1, roots_good, 1) == X509_VERIFY_OK);
         x509_cert roots_bad[] = { rfc };       /* an unrelated self-signed root */
         check_ok("leaf NOT trusted by unrelated root",
-                 x509_verify_chain(&leaf, roots_bad, 1) == X509_VERIFY_UNTRUSTED);
-        check_ok("CA verifies itself (self-signed)", x509_verify_chain(&ca, roots_good, 1) == X509_VERIFY_OK);
+                 x509_verify_chain(&leaf, 1, roots_bad, 1) == X509_VERIFY_UNTRUSTED);
+        check_ok("CA verifies itself (self-signed)", x509_verify_chain(&ca, 1, roots_good, 1) == X509_VERIFY_OK);
 
         /* 12.4b — validity window (cert valid 2024-01-01 .. 2034-01-01) */
         check_ok("valid in 2026",     x509_check_validity(&leaf, 1767225600ULL) == X509_VALID_OK);
@@ -328,6 +344,60 @@ int main(void)
                  x509_check_hostname(&leaf, "test.example") == -1);
         check_ok("no match: evil.com",          x509_check_hostname(&leaf, "evil.com") == -1);
         check_ok("CN is not used for matching",  x509_check_hostname(&rfc, "rsa") == -1);
+    }
+
+    printf("X.509 depth-N path building (14.0.1: leaf -> intermediate -> root):\n");
+    {
+        uint8_t rootd[700], interd[700], leafd[700];
+        x509_cert root, inter, leaf;
+        check_ok("root parses",  x509_parse(rootd,  unhex(PKI_ROOT,  rootd),  &root)  == 0);
+        check_ok("inter parses", x509_parse(interd, unhex(PKI_INTER, interd), &inter) == 0);
+        check_ok("leaf parses",  x509_parse(leafd,  unhex(PKI_LEAF,  leafd),  &leaf)  == 0);
+        check_ok("intermediate is a CA with keyCertSign",
+                 inter.is_ca == 1 && inter.has_key_usage == 1 && inter.key_cert_sign == 1);
+        check_ok("leaf is not a CA", leaf.is_ca == 0);
+
+        x509_cert roots[] = { root };
+
+        /* 14.0.1a — full chain: leaf -> intermediate -> root */
+        x509_cert chain2[] = { leaf, inter };
+        check_ok("depth-2 chain (leaf,inter) trusted by root",
+                 x509_verify_chain(chain2, 2, roots, 1) == X509_VERIFY_OK);
+
+        /* broken issuer chain: leaf alone, no intermediate to bridge to the root */
+        check_ok("leaf without intermediate -> UNTRUSTED (broken chain)",
+                 x509_verify_chain(&leaf, 1, roots, 1) == X509_VERIFY_UNTRUSTED);
+
+        /* the intermediate itself chains directly to the root (depth-1 sub-path) */
+        check_ok("intermediate verified directly by root",
+                 x509_verify_chain(&inter, 1, roots, 1) == X509_VERIFY_OK);
+
+        /* 14.0.1b — basicConstraints CA:FALSE used as an issuer -> BAD_CA */
+        uint8_t ncad[700], lbd[700];
+        x509_cert notca, leaf_b;
+        check_ok("notca-inter parses", x509_parse(ncad, unhex(PKI_INTER_NOTCA, ncad), &notca) == 0);
+        check_ok("leaf_b parses",      x509_parse(lbd,  unhex(PKI_LEAF_B, lbd),       &leaf_b) == 0);
+        check_ok("notca-inter has CA:FALSE", notca.is_ca == 0);
+        x509_cert chain_b[] = { leaf_b, notca };
+        check_ok("CA:FALSE issuer rejected -> BAD_CA",
+                 x509_verify_chain(chain_b, 2, roots, 1) == X509_VERIFY_BAD_CA);
+
+        /* 14.0.1c — CA:TRUE but no keyCertSign used as an issuer -> BAD_CA */
+        uint8_t nkd[700], lcd[700];
+        x509_cert nokucs, leaf_c;
+        check_ok("nokucs-inter parses", x509_parse(nkd, unhex(PKI_INTER_NOKUCS, nkd), &nokucs) == 0);
+        check_ok("leaf_c parses",       x509_parse(lcd, unhex(PKI_LEAF_C, lcd),        &leaf_c) == 0);
+        check_ok("nokucs-inter is CA but lacks keyCertSign",
+                 nokucs.is_ca == 1 && nokucs.has_key_usage == 1 && nokucs.key_cert_sign == 0);
+        x509_cert chain_c[] = { leaf_c, nokucs };
+        check_ok("CA without keyCertSign rejected -> BAD_CA",
+                 x509_verify_chain(chain_c, 2, roots, 1) == X509_VERIFY_BAD_CA);
+
+        /* wrong root: a valid 2-cert chain but the trust anchor is unrelated */
+        uint8_t rfcd[700]; x509_cert rfc; x509_parse(rfcd, unhex(RFC_DER_CERT, rfcd), &rfc);
+        x509_cert roots_wrong[] = { rfc };
+        check_ok("valid chain but untrusted root -> UNTRUSTED",
+                 x509_verify_chain(chain2, 2, roots_wrong, 1) == X509_VERIFY_UNTRUSTED);
     }
 
     printf(failures ? "\nX509 TEST: %d FAILURE(S)\n" : "\nX509 TEST: ALL PASS\n", failures);

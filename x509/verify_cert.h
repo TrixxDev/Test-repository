@@ -19,7 +19,8 @@
 #define X509_VERIFY_BAD_SIGNATURE -1
 #define X509_VERIFY_UNSUPPORTED   -2   /* signature algorithm we don't implement */
 #define X509_VERIFY_MALFORMED     -3   /* could not parse the issuer public key */
-#define X509_VERIFY_UNTRUSTED     -4   /* no trusted root signed the leaf */
+#define X509_VERIFY_UNTRUSTED     -4   /* no trusted path to a root could be built */
+#define X509_VERIFY_BAD_CA        -5   /* an issuer is not a CA permitted to sign certs */
 
 /* validity-window results */
 #define X509_VALID_OK        0
@@ -38,11 +39,19 @@ int x509_verify_signature(const x509_cert *cert,
 int x509_rsa_pubkey(const uint8_t *spki_key, size_t len,
                     const uint8_t **n, size_t *nlen, const uint8_t **e, size_t *elen);
 
-/* Trust chain (v1: leaf -> trusted root, no intermediates). Returns
- * X509_VERIFY_OK if some root's key validates the leaf's signature, else
- * X509_VERIFY_UNTRUSTED. The array interface is already chain-shaped so
- * intermediate CAs can be added later without an API change. */
-int x509_verify_chain(const x509_cert *leaf, const x509_cert *roots, size_t root_count);
+/* Trust chain — depth-N path building (leaf -> intermediate(s) -> trusted root).
+ * `chain[0]` is the end-entity certificate; `chain[1..]` are candidate
+ * intermediates in any order (typically the rest of the TLS Certificate message).
+ * Starting at the leaf, each step finds an issuer — by matching the child's raw
+ * issuer DN to a candidate's raw subject DN AND verifying the child's signature
+ * with that candidate's key — and stops when a trusted root signs the current
+ * certificate. Any certificate used as an issuer (i.e. an intermediate) must be a
+ * CA permitted to sign certificates (basicConstraints CA:TRUE and keyUsage
+ * keyCertSign); roots in the store are trust anchors. Returns X509_VERIFY_OK on a
+ * complete path, X509_VERIFY_UNTRUSTED if none can be built, or X509_VERIFY_BAD_CA
+ * if an issuer is not allowed to act as a CA. */
+int x509_verify_chain(const x509_cert *chain, size_t chain_count,
+                      const x509_cert *roots, size_t root_count);
 
 /* Validity window: X509_VALID_OK if not_before <= now <= not_after, else
  * X509_VALID_NOT_YET / X509_VALID_EXPIRED. `now` is Unix time. */

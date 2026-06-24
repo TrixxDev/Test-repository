@@ -58,7 +58,8 @@ int tls_verify_certificate_chain(const tls_cert_chain *chain, const char *hostna
     if (chain->count == 0) return TLS_CERT_MALFORMED;
     const x509_cert *leaf = &chain->certs[0];
 
-    if (x509_verify_chain(leaf, roots, root_count) != X509_VERIFY_OK)
+    /* depth-N path building over the certs the server sent (leaf + intermediates) */
+    if (x509_verify_chain(chain->certs, chain->count, roots, root_count) != X509_VERIFY_OK)
         return TLS_CERT_UNTRUSTED;
 
     switch (x509_check_validity(leaf, now)) {

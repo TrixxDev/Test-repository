@@ -83,16 +83,61 @@ int x509_verify_signature(const x509_cert *cert, const uint8_t *ik, size_t iklen
     return X509_VERIFY_UNSUPPORTED;
 }
 
-int x509_verify_chain(const x509_cert *leaf, const x509_cert *roots, size_t root_count)
+#define X509_MAX_DEPTH 8       /* bound on path length (also stops issuer cycles) */
+
+/* Two Names are the same iff their DER encodings match byte-for-byte. RFC 5280
+ * permits this binary comparison when the encodings agree, which they do for
+ * CA-issued certs (the issuer field is copied from the CA's subject). It can only
+ * fail closed — reject a chain whose DNs were re-encoded — never accept a wrong
+ * one. */
+static int name_eq(const x509_slice *a, const x509_slice *b)
 {
-    /* v1: depth 1. A root is trusted if its public key validates the leaf's
-     * signature — that cryptographic fact is the trust relationship; name
-     * chaining and intermediate CAs come later (the array interface already
-     * allows them). */
-    for (size_t i = 0; i < root_count; i++)
-        if (x509_verify_signature(leaf, roots[i].spki_key.p, roots[i].spki_key.len) == X509_VERIFY_OK)
-            return X509_VERIFY_OK;
-    return X509_VERIFY_UNTRUSTED;
+    if (a->len != b->len || a->len == 0) return 0;
+    for (size_t i = 0; i < a->len; i++) if (a->p[i] != b->p[i]) return 0;
+    return 1;
+}
+
+/* A certificate used as an issuer (an intermediate) must be allowed to sign
+ * certificates: basicConstraints cA = TRUE, and — if a KeyUsage is present — the
+ * keyCertSign bit. (A KeyUsage absent does not restrict usage.) */
+static int may_sign_certs(const x509_cert *ca)
+{
+    if (!ca->is_ca) return 0;
+    if (ca->has_key_usage && !ca->key_cert_sign) return 0;
+    return 1;
+}
+
+int x509_verify_chain(const x509_cert *chain, size_t chain_count,
+                      const x509_cert *roots, size_t root_count)
+{
+    if (chain_count == 0) return X509_VERIFY_UNTRUSTED;
+
+    const x509_cert *cur = &chain[0];                 /* end-entity certificate */
+    int bad_ca = 0;                                   /* saw a name+sig match blocked by CA rules */
+
+    for (int depth = 0; depth < X509_MAX_DEPTH; depth++) {
+        /* Terminal: is cur signed by a trusted root? Roots are anchors, so they
+         * are not themselves subject to the basicConstraints/keyUsage check. */
+        for (size_t i = 0; i < root_count; i++)
+            if (name_eq(&cur->issuer_raw, &roots[i].subject_raw) &&
+                x509_verify_signature(cur, roots[i].spki_key.p, roots[i].spki_key.len) == X509_VERIFY_OK)
+                return X509_VERIFY_OK;
+
+        /* Otherwise climb one link through an intermediate in the chain. */
+        const x509_cert *next = 0;
+        for (size_t i = 1; i < chain_count; i++) {
+            const x509_cert *ca = &chain[i];
+            if (ca == cur) continue;
+            if (name_eq(&cur->issuer_raw, &ca->subject_raw) &&
+                x509_verify_signature(cur, ca->spki_key.p, ca->spki_key.len) == X509_VERIFY_OK) {
+                if (!may_sign_certs(ca)) { bad_ca = 1; continue; }   /* not a usable CA */
+                next = ca; break;
+            }
+        }
+        if (!next) return bad_ca ? X509_VERIFY_BAD_CA : X509_VERIFY_UNTRUSTED;
+        cur = next;
+    }
+    return X509_VERIFY_UNTRUSTED;   /* path too long */
 }
 
 int x509_check_validity(const x509_cert *cert, uint64_t now)

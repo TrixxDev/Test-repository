@@ -52,8 +52,12 @@ Run the vectors: `make crypto-test`.
 | 13.x.4 | **X.509 ECDSA** — `prime256v1` SPKI + `ecdsa-with-SHA256` in the verify dispatcher | host KAT: cert→PASS, ±TBS→FAIL, ±sig→FAIL | ✅ |
 | 13.x.5 | **TLS CertificateVerify** dispatch on SignatureScheme (0x0403) + extensible ClientHello sigalg list | host: RSA/ECDSA ✓, crossed scheme ✗ | ✅ |
 | 13.x.6 | **Full ECDSA flight → CONNECTED** (no HTTP) — same FSM, no special branch | host: PASS + forged-CV/forged-Finished rejected | ✅ host |
-| **14.0** | **Real Internet HTTPS** — live external sites (Cloudflare/Fastly/GitHub/Let's Encrypt) | real `https://` | next |
-| 13.y | Intermediate CA chains (leaf → intermediate → root) | real chains | with 14.0 |
+| **14.0** | **Real Internet HTTPS** | | |
+| 14.0.1 | **Intermediate CA support** — depth-N path building + basicConstraints CA:TRUE + keyUsage keyCertSign | host: depth-2 PASS; CA:FALSE/no-keyCertSign/broken-chain → FAIL | ✅ |
+| 14.0.2 | ISRG Root X1 — offline validation of a real captured chain | host | next |
+| 14.0.3 | HTTP/1.1 GET over TLS | host | later |
+| 14.0.4 | First real external HTTPS site | real `https://` | later |
+| 14.0.5 | Expand the trust store | host | later |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1130,3 +1134,50 @@ special-casing. The remaining risk is no longer in the cryptography but in real
 certificate chains, intermediate CAs, chain sizes, HTTP/1.1, and live-server
 behavior — a different class of problem, which is **Phase 14.0 (Real Internet
 HTTPS)**.
+
+# Phase 14.0 — Real Internet HTTPS
+
+The cryptography and authentication are done; this phase is about *realism*. Its
+character is different from everything before it: earlier steps proved new math,
+this one proves the **absence of missing policy**. A bug like "CA:FALSE accepted
+as a CA" or "leaf used as an intermediate" is far likelier now than a flaw in
+SHA-256 or ECDSA, because the crypto has been validated many times over. So the
+tests here lead with the *negative* cases.
+
+## Step 14.0.1 — intermediate CA support (depth-N path building)
+
+Real servers send `leaf → intermediate → root`, not a leaf signed straight by a
+root. `x509_verify_chain` is now a depth-N builder (`chain[0]` = leaf,
+`chain[1..]` = intermediates in any order; the trust store holds the roots):
+
+- **Path building** — from the leaf up, each link finds its issuer by matching the
+  child's raw issuer DN to a candidate's raw subject DN **and** verifying the
+  child's signature with that candidate's key. It stops when a trusted root signs
+  the current cert. DN comparison is byte-for-byte on the captured Name DER (RFC
+  5280 permits this when encodings match, as they do for CA-issued certs; it can
+  only fail closed). A depth bound also stops issuer cycles.
+- **basicConstraints** — any cert used as an *issuer* (an intermediate) must have
+  `cA = TRUE`; otherwise any leaf could be reused to sign others. Trust anchors in
+  the store are not themselves re-checked (they are anchors by definition).
+- **keyUsage** — if present, an issuer must assert `keyCertSign`. (An absent
+  KeyUsage does not restrict usage, per RFC 5280.)
+
+Deliberately deferred (not needed for a first real connection): pathLenConstraint,
+NameConstraints, PolicyConstraints, CRL, OCSP, AIA fetching.
+
+Tested against a real openssl ECDSA P-256 PKI, leading with the rejections:
+
+| chain | result |
+|-------|--------|
+| leaf → intermediate(CA,keyCertSign) → root | **OK** |
+| leaf alone, no intermediate to reach the root | **UNTRUSTED** (broken chain) |
+| leaf → issuer with **basicConstraints CA:FALSE** → root | **BAD_CA** |
+| leaf → issuer **CA:TRUE but no keyCertSign** → root | **BAD_CA** |
+| valid 2-cert chain, but the anchor is an unrelated root | **UNTRUSTED** |
+
+The two `BAD_CA` rows are the ones that matter — they are exactly the
+"non-CA used as a CA" mistake. With them green, Aurora's PKI stops being a
+lab toy (depth-1, signature-only) and starts to resemble a real browser path
+validator. The userspace HTTPS client picks this up for free (`verify_cert.c` is
+shared). Next, 14.0.2: embed a real root (ISRG Root X1) and validate a captured
+live chain offline.
