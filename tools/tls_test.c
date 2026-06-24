@@ -314,6 +314,14 @@ static int build_cert_msg_n(uint8_t *o, const uint8_t *const ders[], const int l
 #define T_LEAF_N    "8e67a321000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007600e22250a7f8ade8900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000282c15e8195233abef"
 #define T_LEAF_D    "22fe92d6e4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bcde4321bce01319c60846392b7840cb3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3f54c0ab3ff045cf9d0b07a7781"
 
+/* ECDSA CertificateVerify KAT (13.x.5): a fixed transcript hash CV_TH, the EC
+ * public point (0x04||X||Y) of test/tls/ec_key.pem, and a real ECDSA-P256-SHA256
+ * signature over the §4.4.3 signed content for CV_TH (openssl dgst -sha256 -sign).
+ * Lets the verify-only library check a genuine ECDSA CertificateVerify. */
+#define CV_TH       "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+#define EC_CV_POINT "0495982cd8b24b904afc1a61e9ebb41c858b3f7ebe2f237133a0e28e23f67af4501d856285231af5fe01da4df2da8757b4c037be0bce75c1e7ec4f6f6ed76d1a31"
+#define EC_CV_SIG   "3046022100fcf3af9b79ca0062750fb6edf8dea6ba4265cdf272755308b1c717f945d169b5022100832998f4819ae8022cb2936ce289456bada585f248e9918401adbf8eb1c61713"
+
 int main(void)
 {
     const char *msg = "hello tls 1.3 record layer";
@@ -826,6 +834,58 @@ int main(void)
 
         /* malformed: truncated Certificate message rejected */
         check_int("truncated Certificate message -> -1", tls_parse_certificate(certmsg, 6, &chain), -1);
+    }
+
+    printf("TLS 1.3 CertificateVerify SignatureScheme dispatch (13.x.5):\n");
+    {
+        /* Dispatch is keyed on the SignatureScheme in the message, not the cert
+         * key type. Build both a real RSA-PSS and a real ECDSA CertificateVerify
+         * over the same fixed transcript hash, then check the 2x2 matrix. */
+        uint8_t th[32]; unhex(CV_TH, th);
+
+        /* RSA leaf key (from T_LEAF_CERT) + RSA-PSS signature over th */
+        uint8_t leafd[512]; int leaflen = unhex(T_LEAF_CERT, leafd);
+        x509_cert leaf_rsa; x509_parse(leafd, leaflen, &leaf_rsa);
+        uint8_t ln[256], ld[256];
+        int lnlen = unhex(T_LEAF_N, ln), ldlen = unhex(T_LEAF_D, ld);
+        uint8_t cvmsg[256]; int cvlen = pss_sign_cv(cvmsg, th, ln, lnlen, ld, ldlen);
+        const uint8_t *rsa_sig = cvmsg + 8; size_t rsa_siglen = (size_t)(cvlen - 8);
+
+        /* EC leaf key (uncompressed point) + ECDSA signature over th */
+        uint8_t ecpt[65]; unhex(EC_CV_POINT, ecpt);
+        uint8_t ecsig[80]; int ecsiglen = unhex(EC_CV_SIG, ecsig);
+
+        /* matched scheme/key -> PASS */
+        check_int("RSA CertificateVerify (0x0804, RSA key) -> OK",
+                  tls_verify_certificate_verify(th, TLS_SIG_RSA_PSS_RSAE_SHA256,
+                      rsa_sig, rsa_siglen, leaf_rsa.spki_key.p, leaf_rsa.spki_key.len), TLS_CV_OK);
+        check_int("ECDSA CertificateVerify (0x0403, EC key) -> OK",
+                  tls_verify_certificate_verify(th, TLS_SIG_ECDSA_SECP256R1_SHA256,
+                      ecsig, (size_t)ecsiglen, ecpt, sizeof ecpt), TLS_CV_OK);
+
+        /* crossed scheme/key -> FAIL (these catch dispatcher bugs) */
+        check_int("RSA signature under ECDSA scheme -> BAD (key not a P-256 point)",
+                  tls_verify_certificate_verify(th, TLS_SIG_ECDSA_SECP256R1_SHA256,
+                      rsa_sig, rsa_siglen, leaf_rsa.spki_key.p, leaf_rsa.spki_key.len), TLS_CV_BAD);
+        check_int("ECDSA signature under RSA scheme -> MALFORMED (key not RSAPublicKey)",
+                  tls_verify_certificate_verify(th, TLS_SIG_RSA_PSS_RSAE_SHA256,
+                      ecsig, (size_t)ecsiglen, ecpt, sizeof ecpt), TLS_CV_MALFORMED);
+
+        /* tamper checks on the ECDSA path */
+        uint8_t ecbad[80]; for (int i = 0; i < ecsiglen; i++) ecbad[i] = ecsig[i];
+        ecbad[ecsiglen - 1] ^= 1;
+        check_int("tampered ECDSA signature -> BAD",
+                  tls_verify_certificate_verify(th, TLS_SIG_ECDSA_SECP256R1_SHA256,
+                      ecbad, (size_t)ecsiglen, ecpt, sizeof ecpt), TLS_CV_BAD);
+        uint8_t th2[32]; for (int i = 0; i < 32; i++) th2[i] = th[i]; th2[0] ^= 1;
+        check_int("ECDSA with wrong transcript -> BAD",
+                  tls_verify_certificate_verify(th2, TLS_SIG_ECDSA_SECP256R1_SHA256,
+                      ecsig, (size_t)ecsiglen, ecpt, sizeof ecpt), TLS_CV_BAD);
+
+        /* unimplemented scheme (ed25519, 0x0807) -> UNSUPPORTED */
+        check_int("ed25519 scheme -> UNSUPPORTED",
+                  tls_verify_certificate_verify(th, 0x0807,
+                      ecsig, (size_t)ecsiglen, ecpt, sizeof ecpt), TLS_CV_UNSUPPORTED);
     }
 
     printf("TLS 1.3 FSM certificate integration (trust gates WAIT_CERT):\n");

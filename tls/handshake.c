@@ -2,6 +2,17 @@
 #include "handshake.h"
 #include "key_schedule.h"
 #include "hmac_sha256.h"
+#include "cert.h"          /* TLS_SIG_* SignatureScheme code points */
+
+/* SignatureScheme values offered in ClientHello.signature_algorithms, in
+ * descending preference. This is the single source of truth for what the client
+ * advertises; adding a scheme (e.g. ed25519) is one line here, and it must also
+ * be handled in tls_verify_certificate_verify. */
+static const uint16_t tls_sigalgs[] = {
+    TLS_SIG_ECDSA_SECP256R1_SHA256,
+    TLS_SIG_RSA_PSS_RSAE_SHA256,
+    TLS_SIG_RSA_PKCS1_SHA256,
+};
 
 /* ------------------------------------------------------------------ */
 /* tiny append-only writer with length back-patching                  */
@@ -50,12 +61,11 @@ int tls_build_client_hello(uint8_t *out, size_t cap,
     w_u16(&b, 10);
     { size_t e = w_open16(&b); w_u16(&b, 2); w_u16(&b, TLS_GROUP_X25519); w_close16(&b, e); }
 
-    /* signature_algorithms (13): a minimal common set */
+    /* signature_algorithms (13): the schemes we can verify (see tls_sigalgs[]) */
     w_u16(&b, 13);
     { size_t e = w_open16(&b); size_t l = w_open16(&b);
-      w_u16(&b, 0x0403);   /* ecdsa_secp256r1_sha256 */
-      w_u16(&b, 0x0804);   /* rsa_pss_rsae_sha256 */
-      w_u16(&b, 0x0401);   /* rsa_pkcs1_sha256 */
+      for (size_t i = 0; i < sizeof tls_sigalgs / sizeof tls_sigalgs[0]; i++)
+          w_u16(&b, tls_sigalgs[i]);
       w_close16(&b, l); w_close16(&b, e); }
 
     /* key_share (51): one entry, x25519 */

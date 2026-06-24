@@ -50,8 +50,8 @@ Run the vectors: `make crypto-test`.
 | 13.x.2b | **EC public-key validation** (`p256_pubkey_decode`) — on-curve, bounds, n·Q=O | host: valid + invalid vectors | ✅ |
 | 13.x.3 | **ECDSA verify** (`crypto/ecdsa.c`) + strict DER + fast field reduction | **484/484 Wycheproof** | ✅ |
 | 13.x.4 | **X.509 ECDSA** — `prime256v1` SPKI + `ecdsa-with-SHA256` in the verify dispatcher | host KAT: cert→PASS, ±TBS→FAIL, ±sig→FAIL | ✅ |
-| 13.x.5 | TLS CertificateVerify 0x0403 + advertise `ecdsa_secp256r1_sha256` in ClientHello | host | next |
-| 13.x.6 | Full ECDSA flight → CONNECTED | host + QEMU | later |
+| 13.x.5 | **TLS CertificateVerify** dispatch on SignatureScheme (0x0403) + extensible ClientHello sigalg list | host: RSA/ECDSA ✓, crossed scheme ✗ | ✅ |
+| 13.x.6 | Full ECDSA flight → CONNECTED (no HTTP) | host + QEMU | next |
 | 13.x.7 | First real external HTTPS site (Cloudflare/Fastly/GitHub/Let's Encrypt) | real `https://` | later |
 | 13.y | Intermediate CA chains (leaf → intermediate → root) | real chains | later |
 
@@ -1049,3 +1049,44 @@ image is untouched (x509/ is outside its source set); the userspace HTTPS client
 ClientHello `signature_algorithms` — that is 13.x.5, and until then a server will
 still pick RSA or abort. The throwaway EC private key (`test/tls/ec_key.pem`) is
 gitignored, like the RSA test key.
+
+## Step 13.x.5 — ECDSA in the TLS CertificateVerify seam
+
+The certificate chain proves *whose* key it is; CertificateVerify proves the peer
+*holds* that key, by signing the handshake transcript. Two wires, governed by two
+invariants:
+
+- **Dispatch on the SignatureScheme, not the certificate key type**
+  (`tls/cert.c`). The signed content (`0x20`×64 ‖ context ‖ `0x00` ‖
+  transcript-hash) is built once, then a `switch (sig_scheme)` routes to
+  `rsa_pss_rsae_sha256` or `ecdsa_secp256r1_sha256`. TLS authenticates the
+  *signature*, whose algorithm is named in the message — so the message is the
+  source of truth, and a scheme/key mismatch fails inside the per-scheme verifier
+  rather than being silently accepted.
+- **One extensible advertised list** (`tls/handshake.c`). The ClientHello
+  `signature_algorithms` extension is emitted from a single
+  `static const uint16_t tls_sigalgs[]` (ECDSA-P256, RSA-PSS, RSA-PKCS1), so
+  adding a scheme later is one line, not edits scattered across the writer. The
+  SignatureScheme code points live in one header (`tls/cert.h`).
+
+The 2×2 dispatch matrix is the test that matters — crossed scheme/key is exactly
+where a dispatcher keyed on the wrong thing breaks:
+
+| signature | scheme announced | result |
+|-----------|------------------|--------|
+| RSA-PSS, RSA key | `rsa_pss_rsae_sha256` | **OK** |
+| ECDSA, EC key | `ecdsa_secp256r1_sha256` | **OK** |
+| RSA-PSS, RSA key | `ecdsa_secp256r1_sha256` | **BAD** — RSA key isn't a P-256 point |
+| ECDSA, EC key | `rsa_pss_rsae_sha256` | **MALFORMED** — EC point isn't an RSAPublicKey |
+
+Both PASS cases use real signatures over a fixed transcript hash (RSA-PSS signed
+in-test, ECDSA signed by `openssl dgst -sha256 -sign` with `ec_key.pem`); tamper
+and wrong-transcript variants reject, and an unimplemented scheme (ed25519) still
+returns `UNSUPPORTED`. The RFC 8448 trace test's old "ECDSA → UNSUPPORTED" check
+now correctly reads "RSA key under ECDSA scheme → BAD".
+
+After this the client can verify **both** an RSA and an ECDSA CertificateVerify
+and advertises both, so cryptographically it understands most modern servers.
+What remains before a real site is 13.x.6: prove a full ECDSA server flight
+(Certificate + CertificateVerify + Finished) drives the existing FSM/driver to
+CONNECTED with no special-case branch.

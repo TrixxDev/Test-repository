@@ -230,8 +230,16 @@ int main(void)
                  (th[0] ^= 1, tls_verify_certificate_verify(th, scheme, cvsig, cvsiglen,
                      chain.certs[0].spki_key.p, chain.certs[0].spki_key.len) == TLS_CV_BAD));
 
-        check_ok("ECDSA scheme -> UNSUPPORTED",
-                 tls_verify_certificate_verify(th, 0x0403, cvsig, cvsiglen,
+        /* 13.x.5 — dispatch is by SignatureScheme, not cert key type. Asking for
+         * ecdsa_secp256r1_sha256 over an RSA leaf key: the key can't be decoded as
+         * a P-256 point, so it fails verification (BAD) rather than being trusted. */
+        check_ok("RSA key under ecdsa_secp256r1_sha256 -> BAD",
+                 tls_verify_certificate_verify(th, TLS_SIG_ECDSA_SECP256R1_SHA256, cvsig, cvsiglen,
+                     chain.certs[0].spki_key.p, chain.certs[0].spki_key.len) == TLS_CV_BAD);
+
+        /* a genuinely unimplemented scheme (ed25519, 0x0807) is still UNSUPPORTED */
+        check_ok("unimplemented scheme (ed25519) -> UNSUPPORTED",
+                 tls_verify_certificate_verify(th, 0x0807, cvsig, cvsiglen,
                      chain.certs[0].spki_key.p, chain.certs[0].spki_key.len) == TLS_CV_UNSUPPORTED);
     }
 

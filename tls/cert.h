@@ -50,15 +50,21 @@ int tls_verify_certificate_chain(const tls_cert_chain *chain, const char *hostna
 #define TLS_CV_UNSUPPORTED -2   /* signature scheme we don't implement */
 #define TLS_CV_MALFORMED   -3   /* could not parse the leaf public key */
 
-/* TLS 1.3 SignatureScheme we support for CertificateVerify */
-#define TLS_SIG_RSA_PSS_RSAE_SHA256 0x0804
+/* TLS 1.3 SignatureScheme code points. CertificateVerify dispatches on the value
+ * announced in the message (RFC 8446 §4.2.3), and ClientHello advertises the set
+ * it can verify (see tls_sigalgs[] in handshake.c). */
+#define TLS_SIG_RSA_PKCS1_SHA256        0x0401
+#define TLS_SIG_ECDSA_SECP256R1_SHA256  0x0403
+#define TLS_SIG_RSA_PSS_RSAE_SHA256     0x0804
 
 /* Verify a server CertificateVerify (RFC 8446 §4.4.3). `transcript_hash` is
  * Transcript-Hash(ClientHello..Certificate); `sig_scheme` is the announced
  * SignatureScheme; `sig` is the raw signature; `leaf_spki_key` is the end-entity
- * certificate's RSAPublicKey bits. Builds the signed content (context string +
- * transcript hash), and for rsa_pss_rsae_sha256 runs RSA-PSS verification with
- * the leaf key. Returns a TLS_CV_* code. */
+ * certificate's subjectPublicKey bits (RSAPublicKey DER for RSA, the uncompressed
+ * point 0x04||X||Y for EC). Builds the signed content (context string + transcript
+ * hash) and dispatches on `sig_scheme` — NOT on the certificate key type — to
+ * rsa_pss_rsae_sha256 or ecdsa_secp256r1_sha256. A scheme/key mismatch fails in
+ * the per-scheme verifier rather than being trusted. Returns a TLS_CV_* code. */
 int tls_verify_certificate_verify(const uint8_t transcript_hash[32],
                                   uint16_t sig_scheme,
                                   const uint8_t *sig, size_t siglen,

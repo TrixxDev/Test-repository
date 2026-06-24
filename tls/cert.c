@@ -4,6 +4,7 @@
 #include "verify_cert.h"
 #include "sha256.h"
 #include "rsa_pss.h"
+#include "ecdsa.h"
 
 static uint32_t rd(const uint8_t *p, int n)
 {
@@ -81,7 +82,12 @@ int tls_verify_certificate_verify(const uint8_t transcript_hash[32],
                                   const uint8_t *sig, size_t siglen,
                                   const uint8_t *leaf_spki_key, size_t leaf_spki_key_len)
 {
-    if (sig_scheme != TLS_SIG_RSA_PSS_RSAE_SHA256) return TLS_CV_UNSUPPORTED;
+    /* Dispatch on the SignatureScheme from the message, not the certificate key
+     * type: TLS authenticates the CertificateVerify signature, whose algorithm is
+     * named here. Reject schemes we don't implement up front. */
+    if (sig_scheme != TLS_SIG_RSA_PSS_RSAE_SHA256 &&
+        sig_scheme != TLS_SIG_ECDSA_SECP256R1_SHA256)
+        return TLS_CV_UNSUPPORTED;
 
     /* signed content = 0x20 x64 || context || 0x00 || transcript_hash */
     uint8_t content[64 + sizeof CV_CONTEXT - 1 + 1 + 32];
@@ -94,10 +100,21 @@ int tls_verify_certificate_verify(const uint8_t transcript_hash[32],
     uint8_t h[32];
     sha256(content, off, h);
 
-    const uint8_t *n, *e; size_t nlen, elen;
-    if (x509_rsa_pubkey(leaf_spki_key, leaf_spki_key_len, &n, &nlen, &e, &elen) != 0)
-        return TLS_CV_MALFORMED;
-
-    if (rsa_pss_sha256_verify(n, nlen, e, elen, sig, siglen, h) != 0) return TLS_CV_BAD;
-    return TLS_CV_OK;
+    switch (sig_scheme) {
+    case TLS_SIG_RSA_PSS_RSAE_SHA256: {
+        const uint8_t *n, *e; size_t nlen, elen;
+        if (x509_rsa_pubkey(leaf_spki_key, leaf_spki_key_len, &n, &nlen, &e, &elen) != 0)
+            return TLS_CV_MALFORMED;
+        if (rsa_pss_sha256_verify(n, nlen, e, elen, sig, siglen, h) != 0) return TLS_CV_BAD;
+        return TLS_CV_OK;
+    }
+    case TLS_SIG_ECDSA_SECP256R1_SHA256:
+        /* leaf_spki_key is the EC subjectPublicKey (0x04||X||Y); ecdsa_p256_verify
+         * validates the key (incl. that it IS a P-256 point) and parses the X9.62
+         * DER signature strictly. An RSA key here fails the point decode -> BAD. */
+        if (ecdsa_p256_verify(leaf_spki_key, leaf_spki_key_len, h, sig, siglen) != 0)
+            return TLS_CV_BAD;
+        return TLS_CV_OK;
+    }
+    return TLS_CV_UNSUPPORTED;   /* unreachable: guarded above */
 }
