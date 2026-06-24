@@ -51,9 +51,9 @@ Run the vectors: `make crypto-test`.
 | 13.x.3 | **ECDSA verify** (`crypto/ecdsa.c`) + strict DER + fast field reduction | **484/484 Wycheproof** | ✅ |
 | 13.x.4 | **X.509 ECDSA** — `prime256v1` SPKI + `ecdsa-with-SHA256` in the verify dispatcher | host KAT: cert→PASS, ±TBS→FAIL, ±sig→FAIL | ✅ |
 | 13.x.5 | **TLS CertificateVerify** dispatch on SignatureScheme (0x0403) + extensible ClientHello sigalg list | host: RSA/ECDSA ✓, crossed scheme ✗ | ✅ |
-| 13.x.6 | Full ECDSA flight → CONNECTED (no HTTP) | host + QEMU | next |
-| 13.x.7 | First real external HTTPS site (Cloudflare/Fastly/GitHub/Let's Encrypt) | real `https://` | later |
-| 13.y | Intermediate CA chains (leaf → intermediate → root) | real chains | later |
+| 13.x.6 | **Full ECDSA flight → CONNECTED** (no HTTP) — same FSM, no special branch | host: PASS + forged-CV/forged-Finished rejected | ✅ host |
+| **14.0** | **Real Internet HTTPS** — live external sites (Cloudflare/Fastly/GitHub/Let's Encrypt) | real `https://` | next |
+| 13.y | Intermediate CA chains (leaf → intermediate → root) | real chains | with 14.0 |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1090,3 +1090,43 @@ and advertises both, so cryptographically it understands most modern servers.
 What remains before a real site is 13.x.6: prove a full ECDSA server flight
 (Certificate + CertificateVerify + Finished) drives the existing FSM/driver to
 CONNECTED with no special-case branch.
+
+## Step 13.x.6 — full ECDSA flight reaches CONNECTED
+
+The proof that the two new seams (X.509 ECDSA, ECDSA CertificateVerify) actually
+compose: a complete server flight — EncryptedExtensions, an EC Certificate, an
+ECDSA CertificateVerify, and Finished — is fed through the **same** `tls_client`
+FSM that handles RSA, and it reaches CONNECTED. The FSM has no `if (ecdsa)`
+branch; it dispatches on the certificate's algorithm and the CertificateVerify's
+SignatureScheme, so the ECDSA path is just data flowing through the RSA machinery.
+One flight exercises both 13.x.4 (the self-signed EC cert verifies as its own
+trust root) and 13.x.5 (the ECDSA CertificateVerify over the live transcript).
+
+Scope is deliberately narrow — no HTTP, no GET, no application data, no external
+network, no OpenSSL. Just: does the handshake authenticate and connect?
+
+- **PASS:** Certificate → WAIT_CV → CertificateVerify → WAIT_FINISHED
+  (`peer_authenticated` set) → Finished → CONNECTED.
+- **Test A (forged CertificateVerify):** flip a signature byte → `FAIL_AUTH`,
+  never CONNECTED, `peer_authenticated` stays 0.
+- **Test B (forged Finished):** valid CV, then flip a Finished byte → rejected,
+  never CONNECTED. A bad Finished is an integrity failure (`TLS_ERR_PROTOCOL`),
+  classified separately from CertificateVerify's peer-auth failure
+  (`TLS_ERR_AUTH`); `peer_authenticated` was already set by the valid CV, which is
+  correct — the peer *did* prove key possession; the transcript MAC is what broke.
+
+**Test-only ECDSA signer.** Producing a CertificateVerify over the *live*
+transcript (rather than fragile pre-recorded bytes) needs a signer; the library
+is verify-only by design, so this lives in the test harness as `ecdsa_sign_for_test`
+— the exact analogue of the existing RSA `pss_sign_cv`. It is a testing tool, not
+a new TLS-client capability: nothing is added to `crypto/`. It signs with a
+SEPARATE throwaway EC key (`test/ec_test_key.pem`, gitignored; the cert DER and
+private scalar are embedded as constants in the test, like the RSA `T_LEAF_*`
+pair). That key is never used in QEMU, `openssl s_server`, the trust store, or any
+live certificate — production secrets ≠ test secrets.
+
+With this, FSM authentication is proven on both paths (RSA and ECDSA) with no
+special-casing. The remaining risk is no longer in the cryptography but in real
+certificate chains, intermediate CAs, chain sizes, HTTP/1.1, and live-server
+behavior — a different class of problem, which is **Phase 14.0 (Real Internet
+HTTPS)**.

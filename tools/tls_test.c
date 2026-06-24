@@ -25,6 +25,10 @@
 #include "sha256.h"
 #include "mgf1.h"
 #include "bignum.h"
+#include "p256_scalar.h"
+#include "p256_point.h"
+#include "p256_field.h"
+#include "ecdsa.h"
 
 static int failures;
 
@@ -266,6 +270,67 @@ static int pss_sign_cv(uint8_t *cvmsg, const uint8_t th[32],
     return 8 + nlen;
 }
 
+/* Test-only ECDSA-P256-SHA256 signer (the library is verify-only, by design — this
+ * is the EC analogue of pss_sign_cv, a harness tool, NOT a product feature). Signs
+ * the digest `h` with private scalar `d`, emitting a DER ECDSA-Sig-Value. The nonce
+ * k is derived deterministically from (d,h) so the test is reproducible — fine for
+ * a test, never acceptable for real signing. Returns the DER length. */
+static int der_uint(uint8_t *out, const uint8_t mag[32])
+{
+    int i = 0; while (i < 31 && mag[i] == 0) i++;        /* strip leading zeros, keep >=1 */
+    int pad = (mag[i] & 0x80) ? 1 : 0, o = 0, n = 32 - i;
+    out[o++] = 0x02; out[o++] = (uint8_t)(n + pad);
+    if (pad) out[o++] = 0x00;                            /* keep INTEGER non-negative */
+    for (int j = i; j < 32; j++) out[o++] = mag[j];
+    return o;
+}
+static int ecdsa_sign_for_test(uint8_t *out, const uint8_t h[32], const sc *d)
+{
+    sc k, r, s, z, kinv, rd, tmp; uint8_t dk[32]; sc_to_bytes(dk, d);
+    uint8_t rb[32], sb[32];
+    for (int ctr = 0; ; ctr++) {                         /* retry until r,s != 0 (k from SHA-256) */
+        uint8_t seed[65], kb[32];
+        for (int i = 0; i < 32; i++) { seed[i] = dk[i]; seed[32 + i] = h[i]; }
+        seed[64] = (uint8_t)ctr;
+        sha256(seed, sizeof seed, kb); sc_reduce(&k, kb);
+        if (sc_is_zero(&k)) continue;
+        p256_point G, R; p256_base_point(&G); p256_scalar_mul(&R, &k, &G);   /* R = k*G */
+        fe rx, ry; if (p256_to_affine(&rx, &ry, &R) != 0) continue;
+        uint8_t rxb[32]; fe_to_bytes(rxb, &rx); sc_reduce(&r, rxb);          /* r = R.x mod n */
+        if (sc_is_zero(&r)) continue;
+        sc_reduce(&z, h); sc_inv(&kinv, &k); sc_mul(&rd, &r, d);
+        sc_add(&tmp, &z, &rd); sc_mul(&s, &kinv, &tmp);                      /* s = k^-1 (z + r d) */
+        if (sc_is_zero(&s)) continue;
+        sc_to_bytes(rb, &r); sc_to_bytes(sb, &s); break;
+    }
+    uint8_t rder[34], sder[34]; int rl = der_uint(rder, rb), sl = der_uint(sder, sb);
+    int o = 0; out[o++] = 0x30; out[o++] = (uint8_t)(rl + sl);               /* body < 128 */
+    for (int j = 0; j < rl; j++) out[o++] = rder[j];
+    for (int j = 0; j < sl; j++) out[o++] = sder[j];
+    return o;
+}
+/* Build an ECDSA CertificateVerify (scheme 0x0403) over Transcript(CH..Certificate),
+ * mirroring pss_sign_cv. Returns the handshake message length. */
+static int ecdsa_sign_cv(uint8_t *cvmsg, const uint8_t th[32], const sc *d)
+{
+    uint8_t content[64 + 33 + 1 + 32]; int o = 0;
+    for (int i = 0; i < 64; i++) content[o++] = 0x20;
+    const char *ctx = "TLS 1.3, server CertificateVerify";
+    for (int i = 0; ctx[i]; i++) content[o++] = (uint8_t)ctx[i];
+    content[o++] = 0;
+    for (int i = 0; i < 32; i++) content[o++] = th[i];
+    uint8_t hh[32]; sha256(content, o, hh);
+
+    uint8_t sig[80]; int siglen = ecdsa_sign_for_test(sig, hh, d);
+    int body = 2 + 2 + siglen;
+    cvmsg[0] = TLS_HS_CERTIFICATE_VERIFY; cvmsg[1] = 0;
+    cvmsg[2] = (uint8_t)(body >> 8); cvmsg[3] = (uint8_t)body;
+    cvmsg[4] = 0x04; cvmsg[5] = 0x03;                    /* ecdsa_secp256r1_sha256 */
+    cvmsg[6] = (uint8_t)(siglen >> 8); cvmsg[7] = (uint8_t)siglen;
+    for (int i = 0; i < siglen; i++) cvmsg[8 + i] = sig[i];
+    return 8 + siglen;
+}
+
 /* Wrap a DER certificate in a TLS 1.3 Certificate handshake message (one entry,
  * empty request context, empty entry extensions). Returns the message length. */
 static int build_cert_msg(uint8_t *o, const uint8_t *der, int derlen)
@@ -321,6 +386,14 @@ static int build_cert_msg_n(uint8_t *o, const uint8_t *const ders[], const int l
 #define CV_TH       "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 #define EC_CV_POINT "0495982cd8b24b904afc1a61e9ebb41c858b3f7ebe2f237133a0e28e23f67af4501d856285231af5fe01da4df2da8757b4c037be0bce75c1e7ec4f6f6ed76d1a31"
 #define EC_CV_SIG   "3046022100fcf3af9b79ca0062750fb6edf8dea6ba4265cdf272755308b1c717f945d169b5022100832998f4819ae8022cb2936ce289456bada585f248e9918401adbf8eb1c61713"
+
+/* A SEPARATE throwaway ECDSA P-256 self-signed cert + its private scalar, for the
+ * 13.x.6 host-only authenticated-flight test. Generated from test/ec_test_key.pem,
+ * which is gitignored and NEVER used in QEMU/s_server/the trust store/live certs —
+ * production secrets != test secrets, same discipline as the RSA T_LEAF_* pair.
+ * CN/SAN = aurora-ectest, valid 2026-06-24 .. 2036-06-21. */
+#define EC_TEST_CERT "3082019e30820145a003020102021413efc0a17ff1e2672fe83c9e88e1a85679a81822300a06082a8648ce3d04030230183116301406035504030c0d6175726f72612d656374657374301e170d3236303632343130313631375a170d3336303632313130313631375a30183116301406035504030c0d6175726f72612d6563746573743059301306072a8648ce3d020106082a8648ce3d03010703420004495e4276a6fca81824258a2b08db88a2c0961019927587367d60bf42dd24d9f16b5b34579a5d0b415d069735d08563ec6302d281e6ffae4d2f25c2bbaedb4b84a36d306b301d0603551d0e04160414f5f9c02050ae2403074e94de5669636559114858301f0603551d23041830168014f5f9c02050ae2403074e94de5669636559114858300f0603551d130101ff040530030101ff30180603551d110411300f820d6175726f72612d656374657374300a06082a8648ce3d040302034700304402207b83db60419e1df1e4deaa31c7533c63c0c19b4b39beb477a74e13da0f62ae670220169c2e901c0a5ff05499907b952b9f8e4664689ce78ca7273475f12e933850c9"
+#define EC_TEST_D    "9368c8ff42ba53077616e2a02cf6bf0f3e89fbc9ff81585d631c47c0c8fc1da5"
 
 int main(void)
 {
@@ -1021,6 +1094,99 @@ int main(void)
         tls_client_recv_handshake(&c4, ee, eelen, out, sizeof out, &outlen);
         int rh = tls_client_recv_handshake(&c4, certmsg, cmlen, out, sizeof out, &outlen);
         check_int("bad hostname -> CERT error (before any CV)", (rh == -1 && c4.error == TLS_ERR_CERT), 1);
+    }
+
+    printf("TLS 1.3 authenticated handshake — ECDSA path (13.x.6, EC cert + ECDSA CV):\n");
+    {
+        /* The point of this phase: the SAME FSM that did RSA reaches CONNECTED on an
+         * ECDSA Certificate + ECDSA CertificateVerify with no special-case branch.
+         * It exercises 13.x.4 (cert-chain ECDSA verify, self-signed root) AND 13.x.5
+         * (ECDSA CertificateVerify) over one live transcript. */
+        uint8_t ecd[700]; int eclen = unhex(EC_TEST_CERT, ecd);
+        x509_cert ec_leaf;
+        check_int("EC test cert parses", x509_parse(ecd, eclen, &ec_leaf), 0);
+        check_int("EC test cert is P-256", ec_leaf.pubkey_algo == X509_PK_EC, 1);
+        uint8_t certmsg[800]; int cmlen = build_cert_msg(certmsg, ecd, eclen);
+
+        uint8_t dbytes[32]; unhex(EC_TEST_D, dbytes);
+        sc d; check_int("EC test private scalar < n", sc_from_bytes(&d, dbytes), 0);
+
+        uint64_t now_ec = 1900000000ULL;   /* 2030, inside the cert validity window */
+
+        uint8_t cpriv[32], spriv[32], crand[32], srand[32];
+        for (int i=0;i<32;i++){ cpriv[i]=(uint8_t)(i+9); spriv[i]=(uint8_t)(0xC0+i);
+                                crand[i]=(uint8_t)(0x77+i); srand[i]=(uint8_t)(0x88+i); }
+        uint8_t spub[32], cpub[32]; x25519_base(spub, spriv); x25519_base(cpub, cpriv);
+
+        tls_client cl; tls_client_init(&cl, "aurora-ectest", cpriv, crand);
+        tls_client_set_trust(&cl, &ec_leaf, 1, now_ec);   /* self-signed: the leaf IS the root */
+        uint8_t ch[1024]; int chlen = tls_client_start(&cl, ch, sizeof ch);
+
+        tls_transcript ts; tls_transcript_init(&ts);
+        tls_transcript_update(&ts, ch, chlen);
+        uint8_t sh[256]; int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        tls_transcript_update(&ts, sh, shlen);
+        uint8_t hello_hash[32], ecdhe[32]; tls_transcript_hash(&ts, hello_hash);
+        x25519(ecdhe, spriv, cpub);
+        tls_key_schedule kss; tls_key_schedule_derive(&kss, ecdhe, hello_hash);
+
+        uint8_t ee[64]; int eelen = build_hs(ee, TLS_HS_ENCRYPTED_EXTENSIONS, (const uint8_t*)"\x00\x00", 2);
+        tls_transcript_update(&ts, ee, eelen);
+        tls_transcript_update(&ts, certmsg, cmlen);
+
+        /* forge a real ECDSA CertificateVerify over Transcript(CH..Certificate) */
+        uint8_t th_cert[32]; tls_transcript_hash(&ts, th_cert);
+        uint8_t cvmsg[256]; int cvlen = ecdsa_sign_cv(cvmsg, th_cert, &d);
+        check_int("CV announces ecdsa_secp256r1_sha256 (0x0403)",
+                  ((cvmsg[4] << 8) | cvmsg[5]) == TLS_SIG_ECDSA_SECP256R1_SHA256, 1);
+        tls_transcript_update(&ts, cvmsg, cvlen);
+
+        uint8_t sfk[32], th_cv[32], svd[32], sfin[64];
+        tls_finished_key(sfk, kss.server_hs_traffic);
+        tls_transcript_hash(&ts, th_cv);
+        tls_finished_verify_data(svd, sfk, th_cv);
+        int sfinlen = build_hs(sfin, TLS_HS_FINISHED, svd, 32);
+
+        uint8_t out[64]; size_t outlen;
+        tls_client_recv_handshake(&cl, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cl, ee, eelen, out, sizeof out, &outlen);
+        int rcc = tls_client_recv_handshake(&cl, certmsg, cmlen, out, sizeof out, &outlen);
+        check_int("EC Certificate accepted -> WAIT_CV", (rcc==0 && cl.state==TLS_ST_WAIT_CV), 1);
+        int rcv = tls_client_recv_handshake(&cl, cvmsg, cvlen, out, sizeof out, &outlen);
+        check_int("ECDSA CertificateVerify accepted -> WAIT_FINISHED", (rcv==0 && cl.state==TLS_ST_WAIT_FINISHED), 1);
+        check_int("peer_authenticated after ECDSA CV", cl.peer_authenticated, 1);
+        int rcf = tls_client_recv_handshake(&cl, sfin, sfinlen, out, sizeof out, &outlen);
+        check_int("Finished accepted -> CONNECTED (ECDSA path)", (rcf==0 && cl.state==TLS_ST_CONNECTED), 1);
+        check_int("ECDSA path: CONNECTED implies authenticated", (tls_client_connected(&cl) && cl.peer_authenticated), 1);
+
+        /* Test A — valid EC cert, FORGED CertificateVerify -> FAIL_AUTH, never connected */
+        tls_client ca2; tls_client_init(&ca2, "aurora-ectest", cpriv, crand);
+        tls_client_set_trust(&ca2, &ec_leaf, 1, now_ec);
+        uint8_t chA[1024]; tls_client_start(&ca2, chA, sizeof chA);
+        tls_client_recv_handshake(&ca2, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&ca2, ee, eelen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&ca2, certmsg, cmlen, out, sizeof out, &outlen);
+        uint8_t badcv[256]; memcpy(badcv, cvmsg, cvlen); badcv[cvlen-1] ^= 1;   /* flip last signature byte */
+        int rA = tls_client_recv_handshake(&ca2, badcv, cvlen, out, sizeof out, &outlen);
+        check_int("Test A: forged ECDSA CV -> FAIL_AUTH, not connected",
+                  (rA==-1 && ca2.state==TLS_ST_ERROR && ca2.error==TLS_ERR_AUTH
+                   && !tls_client_connected(&ca2) && ca2.peer_authenticated==0), 1);
+
+        /* Test B — valid ECDSA CV, FORGED Finished -> never connected. A bad Finished
+         * is an integrity/protocol failure (TLS_ERR_PROTOCOL), distinct from CV's
+         * peer-auth failure; peer_authenticated was already set by the valid CV. */
+        tls_client cb2; tls_client_init(&cb2, "aurora-ectest", cpriv, crand);
+        tls_client_set_trust(&cb2, &ec_leaf, 1, now_ec);
+        uint8_t chB[1024]; tls_client_start(&cb2, chB, sizeof chB);
+        tls_client_recv_handshake(&cb2, sh, shlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cb2, ee, eelen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cb2, certmsg, cmlen, out, sizeof out, &outlen);
+        tls_client_recv_handshake(&cb2, cvmsg, cvlen, out, sizeof out, &outlen);
+        uint8_t badfin[64]; memcpy(badfin, sfin, sfinlen); badfin[sfinlen-1] ^= 1;
+        int rB = tls_client_recv_handshake(&cb2, badfin, sfinlen, out, sizeof out, &outlen);
+        check_int("Test B: forged Finished -> rejected (PROTOCOL), not connected",
+                  (rB==-1 && cb2.state==TLS_ST_ERROR && cb2.error==TLS_ERR_PROTOCOL
+                   && !tls_client_connected(&cb2)), 1);
     }
 
     printf("TLS 1.3 handshake trace (event milestones):\n");

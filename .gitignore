@@ -41,3 +41,5 @@ __pycache__/
 # Throwaway TLS test private keys (local s_server only; never commit a key)
 test/tls/key.pem
 test/tls/ec_key.pem
+# Host-test-only ECDSA key (cert DER + private scalar are embedded in tools/tls_test.c)
+test/ec_test_key.pem
