@@ -13,7 +13,7 @@ INCLUDES := -Iinclude -Iarch/i386 -Idrivers -Ilib -Ikernel -Ifs -Inet
 CFLAGS  := --target=$(TARGET) -m32 -ffreestanding -nostdlib \
            -fno-pic -fno-pie -fno-stack-protector \
            -mno-sse -mno-mmx -mno-sse2 \
-           -std=gnu11 -O2 -g -Wall -Wextra $(INCLUDES)
+           -std=gnu11 -O2 -g -Wall -Wextra -MMD -MP $(INCLUDES)
 
 ASFLAGS := --target=$(TARGET) -m32 -ffreestanding $(INCLUDES)
 
@@ -54,7 +54,12 @@ $(KERNEL): $(OBJ) linker.ld
 # --- user programs (crt0 provides _start and calls main) ---
 UCFLAGS := --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
            -mno-sse -mno-mmx -mno-sse2 \
-           -O2 -Iinclude -Iuser -Ikernel
+           -O2 -MMD -MP -Iinclude -Iuser -Ikernel
+
+# Auto-generated header dependencies (-MMD): a header edit now rebuilds every
+# object that includes it. Without this, e.g. an x509.h struct change could leave
+# stale .tlsu.o with a mismatched layout linked into the userspace TLS programs.
+-include $(shell find . -name '*.d' 2>/dev/null)
 
 # The portable crypto/tls/x509 trees compiled for userspace (freestanding, same
 # sources as the host tests and the kernel-excluded build). tlsconnect links them.
@@ -380,4 +385,5 @@ stress: $(KERNEL) $(DISK)
 
 clean:
 	rm -f $(OBJ) $(KERNEL) $(DISK) $(EMBEDDED) user/*.o user/*.elf user/libc/*.o $(TLS_U_OBJ)
+	rm -f $(shell find . -name '*.d' 2>/dev/null)
 	rm -rf isodir aurora.iso
