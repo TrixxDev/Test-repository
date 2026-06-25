@@ -57,10 +57,17 @@ Run the vectors: `make crypto-test`.
 | 14.0.2 | **ISRG Root X1** — offline validation of a real captured LE chain (depth-3, RSA-4096) | host: 4 cases (PASS + 3 rejects) | ✅ |
 | 14.0.3a | **Real Internet TLS (host)** — Aurora's engine vs a live TLS 1.3 server → CONNECTED + decrypt app record | host via egress proxy | ✅ |
 | 14.0.4 | **HTTP/1.1 GET over live TLS → 200 + body** (de-chunk / Content-Length) | host: github.com 200, 240 KB | ✅ |
-| 14.0.3b | **`user/httpsget.c`** — userspace HTTPS client (DNS→TCP→TLS→HTTP) over Aurora's net stack | host-built ✅; QEMU acceptance run pending | ▶ |
-| 14.0.5 | Expand the trust store | host | later |
+| 14.0.3b | **`user/httpsget.c`** — userspace HTTPS client (DNS→TCP→TLS→HTTP) over Aurora's net stack | QEMU: secure 200 (see 14.x.7) | ✅ |
+| **14.x** | **ECDSA P-384 / SHA-384** (the last algorithm gap for modern ECDSA chains) | | |
+| 14.x.1 | **SHA-384 / SHA-512** (`crypto/sha384.c`) — one 64-bit core, freestanding (no libgcc) | NIST FIPS 180-4 KATs | ✅ |
+| 14.x.2 | **P-384 field + scalar** (`crypto/p384_field.c`, `p384_scalar.c`) — GF(p) Solinas, GF(n) | host KAT vs Python | ✅ |
+| 14.x.3 | **P-384 points + ECDSA-P384-SHA384 verify** (`p384_point.c`, `ecdsa384.c`) | **504/504 Wycheproof** | ✅ |
+| 14.x.4 | **X.509** — `secp384r1` SPKI + `ecdsa-with-SHA384` in the verify dispatcher | host: real P-384 chain (OK + 3 rejects) | ✅ |
+| 14.x.5 | **TLS CertificateVerify** `ecdsa_secp384r1_sha384` (0x0503) + advertised in ClientHello | host: P-384 CV matrix | ✅ |
+| 14.x.6 | **QEMU live-TLS diagnosis** — engine proven correct in QEMU (200 OK); failures were cert-policy, now surfaced (`cert_reason`) | QEMU: 200 (validation off), reliable | ✅ |
+| 14.x.7 | **Secure HTTPS 200 OK in QEMU** — validation ON, depth-N Root→Inter→Leaf, RSA + P-256 + P-384 | `tools/securehttps_qemu.py`: 3/3 PASS | ✅ |
+| 14.0.5 | Expand the trust store toward a browser bundle | host | later |
 | 15.0 | **Memory reduction** — `x509_cert.san_dns[8][256]` → pointer slices (~2 KiB/cert) | host | later |
-| 14.x | **ECDSA P-384 / SHA-384** — for LE ECDSA chains (E-series intermediates) | host KAT | later (gap found in 14.0.2) |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1349,8 +1356,45 @@ root would re-introduce the 14.x gap one level up.) Expanding this set is 14.0.5
 Built and host-verified: it compiles and links into `httpsget.elf` (BSS ≈ 147 KiB
 — the conn + reader + 5-root store + a 32 KiB response buffer), the kernel image
 is unchanged (additive invariant holds), and the 5-root store parses and verifies
-the real Let's Encrypt chain from 14.0.2 (ISRG Root X1 matches). The only step
-that cannot run here is the live QEMU fetch itself — that is the acceptance run.
+the real Let's Encrypt chain from 14.0.2 (ISRG Root X1 matches).
+
+## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
+
+14.x.6 chased a phantom: a handshake that reached 200 on the host appeared to
+fail "at the record layer" in QEMU. Deep instrumentation of the live QEMU path
+showed there is **no engine bug** — the i686 crypto, key schedule, AEAD, record
+layer and kernel TCP/IP stack are all correct. With certificate validation off,
+httpsget in QEMU completes a full TLS 1.3 handshake against a live server and
+returns HTTP 200, reliably. The apparent "record error" was the X.509 layer
+**correctly rejecting an untrusted certificate** (`TLS_DRIVE_PROTOCOL`, FSM error
+`TLS_ERR_CERT`); the host probes had simply skipped trust or used a matching
+anchor. The specific reason is now preserved (`tls_client.cert_reason`) and
+printed by httpsget, instead of being mis-blamed on the (closed) P-384 gap.
+
+14.x.7 then proved the **secure** path with validation ON. `tools/securehttps_qemu.py`
+generates a fresh controlled PKI for each key type — Root CA → Intermediate →
+Leaf (leaf SAN `10.0.2.2`) — installs the test Root into Aurora's trust store,
+serves the leaf+intermediate from a local TLS 1.3 server (ChaCha20-Poly1305 +
+X25519) over SLIRP, and runs `httpsget 10.0.2.2 /` in QEMU. For **RSA, ECDSA
+P-256 and ECDSA P-384** the run reaches *Certificate chain OK → CertificateVerify
+OK → Peer authenticated → CONNECTED → HTTP 200* — depth-N path building,
+basicConstraints/keyUsage, hostname validation and the per-curve signature all
+exercised end-to-end, inside the OS. No private keys are committed (the PKI is
+regenerated per run; the production trust store is restored on exit).
+
+The from-scratch HTTPS stack is now a closed cycle, demonstrated in QEMU:
+
+```
+TCP ✓   TLS 1.3 ✓   X25519 ✓   ChaCha20-Poly1305 ✓
+RSA ✓   ECDSA P-256 ✓   ECDSA P-384 ✓
+X.509 depth-N ✓   basicConstraints/keyUsage ✓   hostname validation ✓
+HTTPS (validation ON) ✓   QEMU ✓
+```
+
+A real public-site 200 from QEMU now depends only on trust-store coverage
+(whether the site's chain builds to one of the bundled roots), not on any
+TLS/crypto/PKI capability — that is the 14.0.5 direction. With the correctness
+cycle closed, 15.0 (memory reduction) optimises a fully working system.
 Aurora has no wall clock, so the validity instant is a build-time constant
 (overridable as `argv[3]`); keep it inside the target cert's window.
 

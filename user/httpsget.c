@@ -136,8 +136,13 @@ int main(int argc, char **argv)
     }
     int lk = g_conn.fsm.certs.count ? g_conn.fsm.certs.certs[0].pubkey_algo : 0;
     const char *kt = lk == X509_PK_EC ? "EC P-256" : lk == X509_PK_EC384 ? "EC P-384" : "RSA";
-    printf("[TLS] Certificate depth=%d  Leaf key=%s  CV scheme=0x%04x\n",
-           (int)g_conn.fsm.certs.count, kt, g_conn.fsm.cv_scheme);
+    uint16_t cv = g_conn.fsm.cv_scheme;
+    const char *cvn = cv == TLS_SIG_ECDSA_SECP384R1_SHA384 ? "ecdsa_secp384r1_sha384"
+                    : cv == TLS_SIG_ECDSA_SECP256R1_SHA256 ? "ecdsa_secp256r1_sha256"
+                    : cv == TLS_SIG_RSA_PSS_RSAE_SHA256     ? "rsa_pss_rsae_sha256"
+                    : cv == TLS_SIG_RSA_PKCS1_SHA256        ? "rsa_pkcs1_sha256" : "?";
+    printf("[TLS] Certificate depth=%d  Leaf key=%s  CV scheme=%s\n",
+           (int)g_conn.fsm.certs.count, kt, cvn);
     printf("[TLS] CONNECTED\n");
 
     /* HTTP/1.1 GET over the application epoch */
