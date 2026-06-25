@@ -130,8 +130,11 @@ static int parse_extensions(asn1_cursor *tc, x509_cert *out)
                 asn1_tlv gn;
                 if (asn1_next(&gns, &gn) != 0) return -1;
                 if (gn.tag == (ASN1_CONTEXT | 2)) {                  /* dNSName [2] IMPLICIT IA5String */
-                    if (out->san_count < X509_MAX_SAN)
-                        copy_str(out->san_dns[out->san_count++], X509_SAN_MAX, gn.value, gn.len);
+                    if (out->san_count < X509_MAX_SAN) {
+                        out->san_dns[out->san_count].p   = gn.value;  /* view into the DER, no copy */
+                        out->san_dns[out->san_count].len = gn.len;
+                        out->san_count++;
+                    }
                 }
             }
         } else if (asn1_oid_equals(&extid, OID_BC, sizeof OID_BC)) {

@@ -87,6 +87,14 @@ static int parse1(const uint8_t *buf, size_t len, asn1_tlv *t)
     return asn1_next(&c, t);
 }
 
+/* SAN entries are now (ptr,len) views into the DER, not NUL-terminated copies. */
+static int san_is(const x509_cert *cert, int i, const char *s)
+{
+    size_t n = strlen(s);
+    return i < cert->san_count && cert->san_dns[i].len == n &&
+           memcmp(cert->san_dns[i].p, s, n) == 0;
+}
+
 int main(void)
 {
     printf("ASN.1 DER reader — TLV basics:\n");
@@ -242,8 +250,8 @@ int main(void)
         check_ok("issuer CN == \"Test CA\"", strcmp(cert.issuer_cn, "Test CA") == 0);
         check_ok("public key algorithm == RSA", cert.pubkey_algo == X509_PK_RSA);
         check_ok("san_count == 2", cert.san_count == 2);
-        check_ok("SAN[0] == example.com",     cert.san_count > 0 && strcmp(cert.san_dns[0], "example.com") == 0);
-        check_ok("SAN[1] == www.example.com", cert.san_count > 1 && strcmp(cert.san_dns[1], "www.example.com") == 0);
+        check_ok("SAN[0] == example.com",     san_is(&cert, 0, "example.com"));
+        check_ok("SAN[1] == www.example.com", san_is(&cert, 1, "www.example.com"));
         check_ok("notBefore == 2024-01-01Z (1704067200)", cert.not_before == 1704067200ULL);
         check_ok("notAfter  == 2034-01-01Z (2019686400)", cert.not_after == 2019686400ULL);
     }
@@ -288,7 +296,7 @@ int main(void)
                  cert.pubkey_algo == X509_PK_EC);
         check_ok("subject CN == \"aurora-ec-test\"", strcmp(cert.subject_cn, "aurora-ec-test") == 0);
         check_ok("SAN[0] == aurora-ec-test",
-                 cert.san_count == 1 && strcmp(cert.san_dns[0], "aurora-ec-test") == 0);
+                 cert.san_count == 1 && san_is(&cert, 0, "aurora-ec-test"));
         static const uint8_t oid_ecdsa256[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x02 };
         check_ok("signature OID == ecdsa-with-SHA256",
                  x509_slice_eq(&cert.sig_oid, oid_ecdsa256, sizeof oid_ecdsa256));

@@ -16,7 +16,6 @@
 
 #define X509_MAX_SAN   8
 #define X509_CN_MAX    128
-#define X509_SAN_MAX   256
 
 /* public-key algorithm (from SubjectPublicKeyInfo) */
 #define X509_PK_UNKNOWN 0
@@ -41,7 +40,7 @@ typedef struct {
     uint64_t not_after;
 
     int  san_count;                /* number of dNSName entries captured */
-    char san_dns[X509_MAX_SAN][X509_SAN_MAX];
+    x509_slice san_dns[X509_MAX_SAN];  /* dNSName SANs as views into the DER (not copied) */
 
     int        is_ca;              /* basicConstraints cA = TRUE (absent => FALSE) */
     int        has_key_usage;      /* a KeyUsage extension was present */

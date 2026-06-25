@@ -172,25 +172,30 @@ int x509_check_validity(const x509_cert *cert, uint64_t now)
 
 static char lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
 
-static int ci_equal(const char *a, const char *b)
+/* Case-insensitive compare of a C string `a` against a (ptr,len) slice `b`. The
+ * SAN entries are now views into the DER (not NUL-terminated), so matching works
+ * on the explicit length. */
+static int ci_equal_slice(const char *a, const uint8_t *b, size_t blen)
 {
-    while (*a && *b) { if (lower(*a) != lower(*b)) return 0; a++; b++; }
-    return *a == 0 && *b == 0;
+    size_t i = 0;
+    while (a[i] && i < blen) { if (lower(a[i]) != lower((char)b[i])) return 0; i++; }
+    return a[i] == 0 && i == blen;
 }
 
 int x509_check_hostname(const x509_cert *cert, const char *host)
 {
     for (int i = 0; i < cert->san_count; i++) {
-        const char *san = cert->san_dns[i];
-        if (san[0] == '*' && san[1] == '.') {
+        const uint8_t *san = cert->san_dns[i].p;
+        size_t slen = cert->san_dns[i].len;
+        if (slen >= 2 && san[0] == '*' && san[1] == '.') {
             /* wildcard matches exactly one left-most label: strip the first
              * label of host and compare the remainder to the part after "*." */
             const char *dot = host;
             while (*dot && *dot != '.') dot++;
             if (*dot != '.' || dot == host) continue;   /* host needs a non-empty first label */
-            if (ci_equal(dot + 1, san + 2)) return 0;
+            if (ci_equal_slice(dot + 1, san + 2, slen - 2)) return 0;
         } else {
-            if (ci_equal(host, san)) return 0;
+            if (ci_equal_slice(host, san, slen)) return 0;
         }
     }
     return -1;
