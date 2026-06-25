@@ -112,9 +112,26 @@ int main(int argc, char **argv)
     tls_transport t = { xport_read, xport_write, 0 };
     int r = tls_driver_handshake(&g_conn, &g_reader, &t, g_scratch, sizeof g_scratch);
     if (r != TLS_DRIVE_OK) {
-        fprintf(2, "[httpsget] TLS FAILED (driver=%d, tls_error=%d). For an ECDSA P-384\n"
-                   "           chain (e.g. Let's Encrypt E-series) this is the known 14.x gap.\n",
-                r, (int)g_conn.fsm.error);
+        const char *why = "?";
+        if (g_conn.fsm.error == TLS_ERR_CERT) {
+            switch (g_conn.fsm.cert_reason) {
+                case TLS_CERT_UNTRUSTED:    why = "chain does not build to a trusted root"; break;
+                case TLS_CERT_EXPIRED:      why = "leaf expired (vs the build-time clock)"; break;
+                case TLS_CERT_NOT_YET:      why = "leaf not yet valid (vs the build-time clock)"; break;
+                case TLS_CERT_BAD_HOSTNAME: why = "hostname does not match the leaf SAN"; break;
+                case TLS_CERT_MALFORMED:    why = "certificate message malformed"; break;
+                default: why = "certificate rejected"; break;
+            }
+            fprintf(2, "[httpsget] TLS FAILED: certificate validation -- %s\n"
+                       "           (driver=%d cert_reason=%d). The handshake itself succeeded;\n"
+                       "           the chain is not verifiable against the %u-root trust store.\n",
+                    why, r, g_conn.fsm.cert_reason, (unsigned)CA_ROOTS_N);
+        } else {
+            const char *e = g_conn.fsm.error == TLS_ERR_AUTH ? "CertificateVerify (key ownership)"
+                          : g_conn.fsm.error == TLS_ERR_PROTOCOL ? "protocol/record" : "transport";
+            fprintf(2, "[httpsget] TLS FAILED: %s (driver=%d tls_error=%d)\n",
+                    e, r, (int)g_conn.fsm.error);
+        }
         close(g_fd); return 1;
     }
     int lk = g_conn.fsm.certs.count ? g_conn.fsm.certs.certs[0].pubkey_algo : 0;

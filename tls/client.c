@@ -35,6 +35,7 @@ void tls_client_init(tls_client *c, const char *server_name,
     c->leaf_spki_len = 0;
     c->peer_authenticated = 0;
     c->error = TLS_ERR_NONE;
+    c->cert_reason = 0;
     c->trace = 0;
     c->trace_ctx = 0;
 }
@@ -115,9 +116,10 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
         tls_transcript_update(&c->transcript, msg, len);     /* always enters the transcript */
         emit(c, TLS_EV_CERTIFICATE, 0);
         if (c->roots) {                                      /* trust store installed: validate */
-            if (tls_parse_certificate(msg, len, &c->certs) != 0) return fail_cert(c);
-            if (tls_verify_certificate_chain(&c->certs, c->server_name, c->now,
-                                             c->roots, c->root_count) != TLS_CERT_OK) return fail_cert(c);
+            if (tls_parse_certificate(msg, len, &c->certs) != 0) { c->cert_reason = TLS_CERT_MALFORMED; return fail_cert(c); }
+            int cr = tls_verify_certificate_chain(&c->certs, c->server_name, c->now,
+                                                  c->roots, c->root_count);
+            if (cr != TLS_CERT_OK) { c->cert_reason = cr; return fail_cert(c); }
             /* keep the leaf public key for CertificateVerify: the parsed slices
              * point into `msg`, which is gone by the next message */
             const x509_slice *k = &c->certs.certs[0].spki_key;

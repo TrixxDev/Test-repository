@@ -84,6 +84,7 @@ typedef struct {
 
     int       peer_authenticated;        /* true only after CertificateVerify passes */
     tls_error error;                     /* reason, when state == TLS_ST_ERROR        */
+    int       cert_reason;               /* the specific TLS_CERT_* code, when error == TLS_ERR_CERT */
 
     tls_trace_sink trace;                /* handshake trace sink (NULL = no tracing) */
     void          *trace_ctx;
