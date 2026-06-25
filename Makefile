@@ -250,6 +250,12 @@ ecdsa-test:
 	$(CC) -O2 -Icrypto -Itools tools/ecdsa_test.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/bignum.c crypto/sha256.c -o /tmp/aurora_ecdsa_test
 	/tmp/aurora_ecdsa_test
 
+# Host-side ECDSA-P384-SHA384 verification against the official Wycheproof vectors.
+.PHONY: ecdsa384-test
+ecdsa384-test:
+	$(CC) -O2 -Icrypto -Itools tools/ecdsa384_test.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c crypto/bignum.c crypto/sha384.c -o /tmp/aurora_ecdsa384_test
+	/tmp/aurora_ecdsa384_test
+
 # Live Internet TLS over Aurora's real engine, on the host, through the HTTPS
 # CONNECT proxy (14.0.3a). NEEDS OUTBOUND NETWORK -- diagnostic, not part of the
 # default suite. Drives a real TLS 1.3 handshake to CONNECTED and decrypts at
