@@ -182,6 +182,7 @@ static void render_stream(int fd)
                 line[ll++] = c;
             }
         }
+        repaint();                  /* stream output live instead of all-at-once at exit */
     }
     if (ll > 0) { line[ll] = '\0'; push_line(line); }
 }
@@ -221,6 +222,8 @@ static void run_command(void)
         b[p] = '\0'; push_line(b);
         return;
     }
+
+    repaint();                                   /* show the echoed command immediately */
 
     int pp[2];
     if (pipe(pp) < 0) { push_line("term: pipe failed"); return; }

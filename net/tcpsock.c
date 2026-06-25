@@ -80,10 +80,23 @@ void tcpsock_close(vfs_node_t *node)
     struct tcpsock *t = (struct tcpsock *)node->priv;
     if (t) {
         if (t->h >= 0) {
+            /* The teardown poll loop is timed by net_now_ms(), which only advances
+             * while the PIT ticks. close() and process exit reach here through the
+             * interrupt-gated (IRQs-off) syscall path, so without enabling IRQs the
+             * clock is frozen, the 1.5s deadline never fires, and a peer that is
+             * slow to finish the FIN handshake wedges the loop forever (hanging the
+             * whole machine, since with IRQs off nothing can preempt it). Enable
+             * IRQs for the wait, then restore the caller's flag -- process_exit
+             * relies on IRQs staying off through its later address-space teardown. */
+            uint32_t fl;
+            __asm__ volatile("pushf; pop %0" : "=r"(fl));
+            __asm__ volatile("sti");
             tcp_close(t->h);
             uint64_t dl = net_now_ms() + 1500;
             while (net_now_ms() < dl && tcp_state(t->h) != TCP_CLOSED)
                 net_poll();
+            if (!(fl & 0x200))
+                __asm__ volatile("cli");
         }
         kfree(t);
     }
