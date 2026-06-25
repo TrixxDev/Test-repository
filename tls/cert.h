@@ -55,6 +55,7 @@ int tls_verify_certificate_chain(const tls_cert_chain *chain, const char *hostna
  * it can verify (see tls_sigalgs[] in handshake.c). */
 #define TLS_SIG_RSA_PKCS1_SHA256        0x0401
 #define TLS_SIG_ECDSA_SECP256R1_SHA256  0x0403
+#define TLS_SIG_ECDSA_SECP384R1_SHA384  0x0503
 #define TLS_SIG_RSA_PSS_RSAE_SHA256     0x0804
 
 /* Verify a server CertificateVerify (RFC 8446 §4.4.3). `transcript_hash` is

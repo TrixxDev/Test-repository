@@ -29,6 +29,10 @@
 #include "p256_point.h"
 #include "p256_field.h"
 #include "ecdsa.h"
+#include "sha384.h"
+#include "p384_scalar.h"
+#include "p384_point.h"
+#include "p384_field.h"
 
 static int failures;
 
@@ -329,6 +333,44 @@ static int ecdsa_sign_cv(uint8_t *cvmsg, const uint8_t th[32], const sc *d)
     cvmsg[6] = (uint8_t)(siglen >> 8); cvmsg[7] = (uint8_t)siglen;
     for (int i = 0; i < siglen; i++) cvmsg[8 + i] = sig[i];
     return 8 + siglen;
+}
+
+/* P-384 ECDSA signer for the test harness (the P-384 analogue of
+ * ecdsa_sign_for_test): deterministic k from SHA-384(d,h,ctr), emits a DER
+ * ECDSA-Sig-Value over the 48-byte digest h. Harness tool, never real signing. */
+static int der_uint48(uint8_t *out, const uint8_t mag[48])
+{
+    int i = 0; while (i < 47 && mag[i] == 0) i++;
+    int pad = (mag[i] & 0x80) ? 1 : 0, o = 0, n = 48 - i;
+    out[o++] = 0x02; out[o++] = (uint8_t)(n + pad);
+    if (pad) out[o++] = 0x00;
+    for (int j = i; j < 48; j++) out[o++] = mag[j];
+    return o;
+}
+static int ecdsa384_sign_for_test(uint8_t *out, const uint8_t h[48], const sc384 *d)
+{
+    sc384 k, r, s, z, kinv, rd, tmp; uint8_t dk[48]; sc384_to_bytes(dk, d);
+    uint8_t rb[48], sb[48];
+    for (int ctr = 0; ; ctr++) {
+        uint8_t seed[97], kb[48];
+        for (int i = 0; i < 48; i++) { seed[i] = dk[i]; seed[48 + i] = h[i]; }
+        seed[96] = (uint8_t)ctr;
+        sha384(seed, sizeof seed, kb); sc384_reduce(&k, kb);
+        if (sc384_is_zero(&k)) continue;
+        p384_point G, R; p384_base_point(&G); p384_scalar_mul(&R, &k, &G);
+        fe384 rx, ry; if (p384_to_affine(&rx, &ry, &R) != 0) continue;
+        uint8_t rxb[48]; fe384_to_bytes(rxb, &rx); sc384_reduce(&r, rxb);
+        if (sc384_is_zero(&r)) continue;
+        sc384_reduce(&z, h); sc384_inv(&kinv, &k); sc384_mul(&rd, &r, d);
+        sc384_add(&tmp, &z, &rd); sc384_mul(&s, &kinv, &tmp);
+        if (sc384_is_zero(&s)) continue;
+        sc384_to_bytes(rb, &r); sc384_to_bytes(sb, &s); break;
+    }
+    uint8_t rder[51], sder[51]; int rl = der_uint48(rder, rb), sl = der_uint48(sder, sb);
+    int o = 0; out[o++] = 0x30; out[o++] = (uint8_t)(rl + sl);   /* body < 128 for P-384 */
+    for (int j = 0; j < rl; j++) out[o++] = rder[j];
+    for (int j = 0; j < sl; j++) out[o++] = sder[j];
+    return o;
 }
 
 /* Wrap a DER certificate in a TLS 1.3 Certificate handshake message (one entry,
@@ -959,6 +1001,43 @@ int main(void)
         check_int("ed25519 scheme -> UNSUPPORTED",
                   tls_verify_certificate_verify(th, 0x0807,
                       ecsig, (size_t)ecsiglen, ecpt, sizeof ecpt), TLS_CV_UNSUPPORTED);
+
+        /* --- P-384 CertificateVerify (0x0503, ecdsa_secp384r1_sha384) — 14.x.5 ---
+         * Sign the same fixed transcript with a P-384 key (SHA-384 over content)
+         * and check the dispatch matrix the same way. */
+        sc384 d384;
+        { uint8_t sd[48]; for (int i = 0; i < 48; i++) sd[i] = (uint8_t)(0x11 * (i + 3));
+          sc384_reduce(&d384, sd); }                          /* deterministic private scalar */
+        p384_point G384, Q384; p384_base_point(&G384); p384_scalar_mul(&Q384, &d384, &G384);
+        fe384 qx, qy; p384_to_affine(&qx, &qy, &Q384);
+        uint8_t q384[97]; q384[0] = 0x04;
+        fe384_to_bytes(q384 + 1, &qx); fe384_to_bytes(q384 + 49, &qy);
+
+        uint8_t c384[64 + 33 + 1 + 32]; int co = 0;          /* CV content over th */
+        for (int i = 0; i < 64; i++) c384[co++] = 0x20;
+        const char *cvctx = "TLS 1.3, server CertificateVerify";
+        for (int i = 0; cvctx[i]; i++) c384[co++] = (uint8_t)cvctx[i];
+        c384[co++] = 0; for (int i = 0; i < 32; i++) c384[co++] = th[i];
+        uint8_t h384[48]; sha384(c384, co, h384);
+        uint8_t sig384[160]; int sl384 = ecdsa384_sign_for_test(sig384, h384, &d384);
+
+        check_int("ECDSA-P384 CertificateVerify (0x0503, P-384 key) -> OK",
+                  tls_verify_certificate_verify(th, TLS_SIG_ECDSA_SECP384R1_SHA384,
+                      sig384, (size_t)sl384, q384, sizeof q384), TLS_CV_OK);
+        uint8_t bad384[160]; for (int i = 0; i < sl384; i++) bad384[i] = sig384[i];
+        bad384[sl384 - 1] ^= 1;
+        check_int("tampered ECDSA-P384 signature -> BAD",
+                  tls_verify_certificate_verify(th, TLS_SIG_ECDSA_SECP384R1_SHA384,
+                      bad384, (size_t)sl384, q384, sizeof q384), TLS_CV_BAD);
+        check_int("ECDSA-P384 wrong transcript -> BAD",
+                  tls_verify_certificate_verify(th2, TLS_SIG_ECDSA_SECP384R1_SHA384,
+                      sig384, (size_t)sl384, q384, sizeof q384), TLS_CV_BAD);
+        check_int("P-256 point under 0x0503 -> BAD (not a P-384 point)",
+                  tls_verify_certificate_verify(th, TLS_SIG_ECDSA_SECP384R1_SHA384,
+                      sig384, (size_t)sl384, ecpt, sizeof ecpt), TLS_CV_BAD);
+        check_int("P-384 point under 0x0403 -> BAD (not a P-256 point)",
+                  tls_verify_certificate_verify(th, TLS_SIG_ECDSA_SECP256R1_SHA256,
+                      ecsig, (size_t)ecsiglen, q384, sizeof q384), TLS_CV_BAD);
     }
 
     printf("TLS 1.3 FSM certificate integration (trust gates WAIT_CERT):\n");

@@ -9,6 +9,7 @@
  * advertises; adding a scheme (e.g. ed25519) is one line here, and it must also
  * be handled in tls_verify_certificate_verify. */
 static const uint16_t tls_sigalgs[] = {
+    TLS_SIG_ECDSA_SECP384R1_SHA384,
     TLS_SIG_ECDSA_SECP256R1_SHA256,
     TLS_SIG_RSA_PSS_RSAE_SHA256,
     TLS_SIG_RSA_PKCS1_SHA256,

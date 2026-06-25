@@ -117,10 +117,10 @@ int main(int argc, char **argv)
                 r, (int)g_conn.fsm.error);
         close(g_fd); return 1;
     }
+    int lk = g_conn.fsm.certs.count ? g_conn.fsm.certs.certs[0].pubkey_algo : 0;
+    const char *kt = lk == X509_PK_EC ? "EC P-256" : lk == X509_PK_EC384 ? "EC P-384" : "RSA";
     printf("[TLS] Certificate depth=%d  Leaf key=%s  CV scheme=0x%04x\n",
-           (int)g_conn.fsm.certs.count,
-           g_conn.fsm.certs.count && g_conn.fsm.certs.certs[0].pubkey_algo==X509_PK_EC ? "EC" : "RSA",
-           g_conn.fsm.cv_scheme);
+           (int)g_conn.fsm.certs.count, kt, g_conn.fsm.cv_scheme);
     printf("[TLS] CONNECTED\n");
 
     /* HTTP/1.1 GET over the application epoch */

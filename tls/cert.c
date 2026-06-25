@@ -3,8 +3,10 @@
 #include "handshake.h"     /* TLS_HS_CERTIFICATE */
 #include "verify_cert.h"
 #include "sha256.h"
+#include "sha384.h"
 #include "rsa_pss.h"
 #include "ecdsa.h"
+#include "ecdsa384.h"
 
 static uint32_t rd(const uint8_t *p, int n)
 {
@@ -87,10 +89,15 @@ int tls_verify_certificate_verify(const uint8_t transcript_hash[32],
      * type: TLS authenticates the CertificateVerify signature, whose algorithm is
      * named here. Reject schemes we don't implement up front. */
     if (sig_scheme != TLS_SIG_RSA_PSS_RSAE_SHA256 &&
-        sig_scheme != TLS_SIG_ECDSA_SECP256R1_SHA256)
+        sig_scheme != TLS_SIG_ECDSA_SECP256R1_SHA256 &&
+        sig_scheme != TLS_SIG_ECDSA_SECP384R1_SHA384)
         return TLS_CV_UNSUPPORTED;
 
-    /* signed content = 0x20 x64 || context || 0x00 || transcript_hash */
+    /* signed content = 0x20 x64 || context || 0x00 || transcript_hash. The
+     * transcript_hash is the cipher suite's hash (SHA-256 for the only suite we
+     * run); the SignatureScheme then names how that content is hashed and signed,
+     * so SHA-256-based schemes digest it with SHA-256 and the P-384 scheme with
+     * SHA-384. */
     uint8_t content[64 + sizeof CV_CONTEXT - 1 + 1 + 32];
     size_t off = 0;
     for (int i = 0; i < 64; i++) content[off++] = 0x20;
@@ -98,24 +105,31 @@ int tls_verify_certificate_verify(const uint8_t transcript_hash[32],
     content[off++] = 0x00;
     for (int i = 0; i < 32; i++) content[off++] = transcript_hash[i];
 
-    uint8_t h[32];
-    sha256(content, off, h);
-
     switch (sig_scheme) {
     case TLS_SIG_RSA_PSS_RSAE_SHA256: {
+        uint8_t h[32]; sha256(content, off, h);
         const uint8_t *n, *e; size_t nlen, elen;
         if (x509_rsa_pubkey(leaf_spki_key, leaf_spki_key_len, &n, &nlen, &e, &elen) != 0)
             return TLS_CV_MALFORMED;
         if (rsa_pss_sha256_verify(n, nlen, e, elen, sig, siglen, h) != 0) return TLS_CV_BAD;
         return TLS_CV_OK;
     }
-    case TLS_SIG_ECDSA_SECP256R1_SHA256:
+    case TLS_SIG_ECDSA_SECP256R1_SHA256: {
         /* leaf_spki_key is the EC subjectPublicKey (0x04||X||Y); ecdsa_p256_verify
          * validates the key (incl. that it IS a P-256 point) and parses the X9.62
          * DER signature strictly. An RSA key here fails the point decode -> BAD. */
+        uint8_t h[32]; sha256(content, off, h);
         if (ecdsa_p256_verify(leaf_spki_key, leaf_spki_key_len, h, sig, siglen) != 0)
             return TLS_CV_BAD;
         return TLS_CV_OK;
+    }
+    case TLS_SIG_ECDSA_SECP384R1_SHA384: {
+        /* P-384 leaf: 97-byte point, SHA-384 over the same content. */
+        uint8_t h[48]; sha384(content, off, h);
+        if (ecdsa_p384_verify(leaf_spki_key, leaf_spki_key_len, h, sig, siglen) != 0)
+            return TLS_CV_BAD;
+        return TLS_CV_OK;
+    }
     }
     return TLS_CV_UNSUPPORTED;   /* unreachable: guarded above */
 }
