@@ -31,7 +31,14 @@
 
 /* Reassembly buffer: room for handshake bytes left over from a previous record
  * plus one full record's plaintext. A handshake message (e.g. a large
- * certificate chain) larger than this is rejected rather than overflowing. */
+ * certificate chain) larger than this is rejected rather than overflowing.
+ *
+ * Sizing (15.0.4 analysis): the single largest handshake message is Certificate.
+ * With TLS_MAX_CHAIN=6 and RSA-4096 certs (~1.8 KiB each) a chain can reach
+ * ~11 KiB, and recv_record may add one more full 16 KiB-plaintext record before
+ * run_splitter consumes it, so the peak (~27 KiB) needs more than 1x 16 KiB. 2x
+ * (32 KiB) covers it with margin; this is NOT over-provisioned -- 1x would reject
+ * a deep RSA chain. Verify-only client, so no constant-time concern. */
 #define TLS_CONN_HS_BUF (2 * TLS_RECORD_MAX_PLAINTEXT)
 
 /* Return codes. >=0 from the byte-producing calls is a length; the codes below

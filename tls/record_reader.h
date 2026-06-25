@@ -22,7 +22,15 @@
 #define TLS_RECORD_MAX_WIRE  (TLS_RECORD_HEADER_LEN + TLS_RECORD_MAX_BODY)
 
 /* Buffer = one max record plus a generous feed chunk, so a caller that drains
- * after each feed never overflows. */
+ * after each feed never overflows.
+ *
+ * Sizing (15.0.4 analysis): feed() compacts then appends, and callers drain every
+ * complete record before the next read, so the peak is (one partial wire record,
+ * < TLS_RECORD_MAX_WIRE) + (one feed chunk). The floor is hard -- a compliant
+ * server may send a full 16 KiB-plaintext record, which must fit whole before it
+ * can be framed. The +16384 margin admits feed chunks up to a full record, which
+ * keeps the contract general (current callers feed <= 4 KiB; this leaves headroom
+ * rather than constraining the read size). Not over-provisioned for the RFC max. */
 #define TLS_READER_BUF       (TLS_RECORD_MAX_WIRE + 16384)
 
 typedef struct {

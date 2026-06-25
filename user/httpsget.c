@@ -29,7 +29,9 @@ static tls_record_reader g_reader;
 static x509_cert         g_roots[CA_ROOTS_N];
 static uint8_t           g_scratch[4096];
 static uint8_t           g_plain[17000];
-static uint8_t           g_resp[32768];     /* captured response (status+headers+body preview) */
+static uint8_t           g_resp[8192];      /* captured response prefix: status + headers + a
+                                             * body preview (only ~512 B of body is shown), so a
+                                             * few KiB suffices -- not the whole transfer (15.0.4). */
 static int               g_fd;
 
 static int xport_read(void *ctx, uint8_t *buf, size_t cap)  { (void)ctx; return read(g_fd, buf, (int)cap); }
