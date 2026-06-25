@@ -87,12 +87,22 @@ static int parse1(const uint8_t *buf, size_t len, asn1_tlv *t)
     return asn1_next(&c, t);
 }
 
-/* SAN entries are now (ptr,len) views into the DER, not NUL-terminated copies. */
-static int san_is(const x509_cert *cert, int i, const char *s)
+/* CN and SAN entries are now (ptr,len) views into the DER, not NUL-terminated
+ * copies, so they are matched on the explicit length. */
+static int slice_is(const x509_slice *sl, const char *s)
 {
     size_t n = strlen(s);
-    return i < cert->san_count && cert->san_dns[i].len == n &&
-           memcmp(cert->san_dns[i].p, s, n) == 0;
+    return sl->p && sl->len == n && memcmp(sl->p, s, n) == 0;
+}
+static int san_is(const x509_cert *cert, int i, const char *s)
+{
+    return i < cert->san_count && slice_is(&cert->san_dns[i], s);
+}
+/* The slices must be VIEWS into the DER buffer (not copies): assert a slice's
+ * bytes lie inside [der, der+derlen). This pins the DER-lifetime invariant. */
+static int slice_in(const x509_slice *sl, const uint8_t *der, size_t derlen)
+{
+    return sl->p && sl->p >= der && sl->p + sl->len <= der + derlen;
 }
 
 int main(void)
@@ -225,8 +235,8 @@ int main(void)
         check_ok("certificate parses", x509_parse(der, derlen, &cert) == 0);
         check_ok("version == 2 (v3)", cert.version == 2);
         check_ok("serialNumber == 2", cert.serial.len == 1 && cert.serial.p[0] == 2);
-        check_ok("issuer CN == \"rsa\"", strcmp(cert.issuer_cn, "rsa") == 0);
-        check_ok("subject CN == \"rsa\"", strcmp(cert.subject_cn, "rsa") == 0);
+        check_ok("issuer CN == \"rsa\"", slice_is(&cert.issuer_cn, "rsa"));
+        check_ok("subject CN == \"rsa\"", slice_is(&cert.subject_cn, "rsa"));
         check_ok("public key algorithm == RSA", cert.pubkey_algo == X509_PK_RSA);
         check_ok("SPKI length == 162 (full element)", cert.spki.len == 162);
         check_ok("TBSCertificate length == 281 (full element)", cert.tbs.len == 281);
@@ -246,12 +256,20 @@ int main(void)
         int derlen = unhex(SAN_CERT, der);
         x509_cert cert;
         check_ok("certificate parses", x509_parse(der, derlen, &cert) == 0);
-        check_ok("subject CN == \"example.com\"", strcmp(cert.subject_cn, "example.com") == 0);
-        check_ok("issuer CN == \"Test CA\"", strcmp(cert.issuer_cn, "Test CA") == 0);
+        check_ok("subject CN == \"example.com\"", slice_is(&cert.subject_cn, "example.com"));
+        check_ok("issuer CN == \"Test CA\"", slice_is(&cert.issuer_cn, "Test CA"));
         check_ok("public key algorithm == RSA", cert.pubkey_algo == X509_PK_RSA);
         check_ok("san_count == 2", cert.san_count == 2);
         check_ok("SAN[0] == example.com",     san_is(&cert, 0, "example.com"));
         check_ok("SAN[1] == www.example.com", san_is(&cert, 1, "www.example.com"));
+        /* CN and SAN are now slices: assert they are VIEWS into the DER, not
+         * copies, so the documented "DER must outlive the x509_cert" invariant is
+         * real (reading them after the DER is gone would be a use-after-free). */
+        check_ok("CN/SAN are views into the DER (lifetime invariant)",
+                 slice_in(&cert.subject_cn, der, derlen) &&
+                 slice_in(&cert.issuer_cn,  der, derlen) &&
+                 slice_in(&cert.san_dns[0], der, derlen) &&
+                 slice_in(&cert.san_dns[1], der, derlen));
         check_ok("notBefore == 2024-01-01Z (1704067200)", cert.not_before == 1704067200ULL);
         check_ok("notAfter  == 2034-01-01Z (2019686400)", cert.not_after == 2019686400ULL);
     }
@@ -294,7 +312,7 @@ int main(void)
         check_ok("ECDSA certificate parses", x509_parse(der, derlen, &cert) == 0);
         check_ok("public key algorithm == EC (prime256v1 named curve checked)",
                  cert.pubkey_algo == X509_PK_EC);
-        check_ok("subject CN == \"aurora-ec-test\"", strcmp(cert.subject_cn, "aurora-ec-test") == 0);
+        check_ok("subject CN == \"aurora-ec-test\"", slice_is(&cert.subject_cn, "aurora-ec-test"));
         check_ok("SAN[0] == aurora-ec-test",
                  cert.san_count == 1 && san_is(&cert, 0, "aurora-ec-test"));
         static const uint8_t oid_ecdsa256[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x02 };

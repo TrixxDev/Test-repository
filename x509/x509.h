@@ -15,7 +15,6 @@
 #include <stddef.h>
 
 #define X509_MAX_SAN   8
-#define X509_CN_MAX    128
 
 /* public-key algorithm (from SubjectPublicKeyInfo) */
 #define X509_PK_UNKNOWN 0
@@ -30,8 +29,8 @@ typedef struct {
     uint32_t   version;            /* raw X.509 version: 0=v1, 1=v2, 2=v3 */
     x509_slice serial;             /* serialNumber INTEGER contents (raw) */
 
-    char issuer_cn[X509_CN_MAX];   /* issuer Common Name (diagnostic only) */
-    char subject_cn[X509_CN_MAX];  /* subject Common Name (diagnostic only) */
+    x509_slice issuer_cn;          /* issuer Common Name — view into DER, diagnostic only */
+    x509_slice subject_cn;         /* subject Common Name — view into DER, diagnostic only */
 
     x509_slice issuer_raw;         /* full issuer Name element (tag+len+value), for chaining */
     x509_slice subject_raw;        /* full subject Name element (tag+len+value), for chaining */

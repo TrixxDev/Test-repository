@@ -933,7 +933,9 @@ int main(void)
         tls_cert_chain chain;
         check_int("Certificate message parses", tls_parse_certificate(certmsg, cmlen, &chain), 0);
         check_int("chain has one entry", (int)chain.count, 1);
-        check_int("leaf subject CN == example.com", strcmp(chain.certs[0].subject_cn, "example.com") == 0, 1);
+        check_int("leaf subject CN == example.com",
+                  chain.certs[0].subject_cn.len == 11 &&
+                  memcmp(chain.certs[0].subject_cn.p, "example.com", 11) == 0, 1);
 
         uint64_t now2026 = 1767225600ULL;
         check_int("valid chain -> TLS_CERT_OK",

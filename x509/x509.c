@@ -19,13 +19,6 @@ int x509_slice_eq(const x509_slice *s, const uint8_t *bytes, size_t n)
     return 1;
 }
 
-static void copy_str(char *dst, size_t cap, const uint8_t *src, size_t len)
-{
-    size_t n = len < cap - 1 ? len : cap - 1;
-    for (size_t i = 0; i < n; i++) dst[i] = (char)src[i];
-    dst[n] = 0;
-}
-
 /* days since the Unix epoch for a proleptic-Gregorian date (Hinnant's algorithm) */
 static int64_t days_from_civil(int y, int m, int d)
 {
@@ -74,9 +67,9 @@ static int parse_time(const asn1_tlv *t, uint64_t *out)
 }
 
 /* Extract the Common Name from a Name (RDNSequence). Leaves cn empty if absent. */
-static int parse_name_cn(const asn1_tlv *name, char *cn, size_t cap)
+static int parse_name_cn(const asn1_tlv *name, x509_slice *cn)
 {
-    cn[0] = 0;
+    cn->p = 0; cn->len = 0;
     asn1_cursor rdns; asn1_cursor_init(&rdns, name->value, name->len);
     while (!asn1_cursor_empty(&rdns)) {
         asn1_cursor set;
@@ -87,8 +80,9 @@ static int parse_name_cn(const asn1_tlv *name, char *cn, size_t cap)
             asn1_tlv type, val;
             if (asn1_next(&atv, &type) != 0) return -1;
             if (asn1_next(&atv, &val) != 0) return -1;
-            if (asn1_oid_equals(&type, OID_CN, sizeof OID_CN))
-                copy_str(cn, cap, val.value, val.len);   /* last CN wins */
+            if (asn1_oid_equals(&type, OID_CN, sizeof OID_CN)) {
+                cn->p = val.value; cn->len = val.len;        /* last CN wins; view into DER */
+            }
         }
     }
     return 0;
@@ -221,7 +215,7 @@ int x509_parse(const uint8_t *der, size_t len, x509_cert *out)
     asn1_tlv issuer;
     if (asn1_expect(&tc, ASN1_SEQUENCE, &issuer) != 0) return -1;
     out->issuer_raw.p = issuer_start; out->issuer_raw.len = (size_t)(tc.p - issuer_start);
-    if (parse_name_cn(&issuer, out->issuer_cn, sizeof out->issuer_cn) != 0) return -1;
+    if (parse_name_cn(&issuer, &out->issuer_cn) != 0) return -1;
 
     /* validity { notBefore, notAfter } */
     asn1_cursor val;
@@ -235,7 +229,7 @@ int x509_parse(const uint8_t *der, size_t len, x509_cert *out)
     asn1_tlv subject;
     if (asn1_expect(&tc, ASN1_SEQUENCE, &subject) != 0) return -1;
     out->subject_raw.p = subject_start; out->subject_raw.len = (size_t)(tc.p - subject_start);
-    if (parse_name_cn(&subject, out->subject_cn, sizeof out->subject_cn) != 0) return -1;
+    if (parse_name_cn(&subject, &out->subject_cn) != 0) return -1;
 
     /* subjectPublicKeyInfo — capture the full element */
     const uint8_t *spki_start = tc.p;
