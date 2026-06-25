@@ -17,7 +17,10 @@
 #include <stddef.h>
 #include "x509.h"
 
-#define TLS_MAX_CHAIN 4
+/* Max certificates accepted in a server's chain (leaf + intermediates). Raised
+ * to 6 once 15.0.1/.2 shrank x509_cert to ~184 B (so each slot is cheap): real
+ * deployments with cross-signed or multi-intermediate PKIs occasionally send 4-5. */
+#define TLS_MAX_CHAIN 6
 
 typedef struct {
     x509_cert certs[TLS_MAX_CHAIN];   /* certs[0] is the end-entity certificate */
