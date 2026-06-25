@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "sha256.h"
+#include "sha384.h"
 #include "hmac_sha256.h"
 #include "hkdf.h"
 #include "chacha20.h"
@@ -84,6 +85,49 @@ int main(void)
         for (int i = 0; i < 1000; i++) sha256_update(&c, buf, sizeof(buf));
         sha256_final(&c, d);
         check("1,000,000 x 'a'", d, 32, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    }
+
+    {   /* SHA-384 / SHA-512 (NIST FIPS 180-4). The 112-byte two-block message and
+         * the one-million-'a' case exercise multi-block + length-encoding paths. */
+        uint8_t d64[64];
+        const char *m2 = "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn"
+                         "hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"; /* 112 bytes */
+
+        printf("SHA-384 (NIST FIPS 180-4):\n");
+        sha384("", 0, d64);
+        check("\"\"", d64, 48, "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf"
+                               "63f6e1da274edebfe76f65fbd51ad2f14898b95b");
+        sha384("abc", 3, d64);
+        check("\"abc\"", d64, 48, "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a"
+                                  "43ff5bed8086072ba1e7cc2358baeca134c825a7");
+        sha384(m2, 112, d64);
+        check("112-byte string", d64, 48, "09330c33f71147e83d192fc782cd1b4753111b173b3b05d2"
+                                          "2fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039");
+        {   sha512_ctx c; sha384_init(&c);
+            char buf[1000]; memset(buf, 'a', sizeof(buf));
+            for (int i = 0; i < 1000; i++) sha512_update(&c, buf, sizeof(buf));
+            sha384_final(&c, d64);
+            check("1,000,000 x 'a'", d64, 48, "9d0e1809716474cb086e834e310a4a1ced149e9c00f24852"
+                                              "7972cec5704c2a5b07b8b3dc38ecc4ebae97ddd87f3d8985");
+        }
+
+        printf("SHA-512 (NIST FIPS 180-4):\n");
+        sha512("", 0, d64);
+        check("\"\"", d64, 64, "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+                               "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e");
+        sha512("abc", 3, d64);
+        check("\"abc\"", d64, 64, "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                                  "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
+        sha512(m2, 112, d64);
+        check("112-byte string", d64, 64, "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018"
+                                          "501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909");
+        {   sha512_ctx c; sha512_init(&c);
+            char buf[1000]; memset(buf, 'a', sizeof(buf));
+            for (int i = 0; i < 1000; i++) sha512_update(&c, buf, sizeof(buf));
+            sha512_final(&c, d64);
+            check("1,000,000 x 'a'", d64, 64, "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973eb"
+                                              "de0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b");
+        }
     }
 
     printf("HMAC-SHA256 (RFC 4231):\n");

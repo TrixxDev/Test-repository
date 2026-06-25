@@ -203,7 +203,7 @@ gui-vnc: iso
 # RFC 4231), natively on the host — no QEMU, each primitive checked in isolation.
 .PHONY: crypto-test
 crypto-test:
-	$(CC) -O2 -Icrypto tools/crypto_test.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c -o /tmp/aurora_crypto_test
+	$(CC) -O2 -Icrypto tools/crypto_test.c crypto/sha256.c crypto/sha384.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c -o /tmp/aurora_crypto_test
 	/tmp/aurora_crypto_test
 
 # Host-side TLS protocol tests (tls/ over the verified crypto/ primitives).
