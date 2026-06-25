@@ -21,7 +21,8 @@
 /* public-key algorithm (from SubjectPublicKeyInfo) */
 #define X509_PK_UNKNOWN 0
 #define X509_PK_RSA     1
-#define X509_PK_EC      2
+#define X509_PK_EC      2       /* EC on prime256v1 (P-256) */
+#define X509_PK_EC384   3       /* EC on secp384r1 (P-384) */
 
 /* A view into the DER buffer (pointer + length), never owning memory. */
 typedef struct { const uint8_t *p; size_t len; } x509_slice;

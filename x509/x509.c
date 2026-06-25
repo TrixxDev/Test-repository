@@ -10,6 +10,7 @@ static const uint8_t OID_KU[]      = { 0x55, 0x1d, 0x0f };                      
 static const uint8_t OID_RSA[]     = { 0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x01 }; /* rsaEncryption */
 static const uint8_t OID_EC[]      = { 0x2a,0x86,0x48,0xce,0x3d,0x02,0x01 };           /* id-ecPublicKey */
 static const uint8_t OID_P256[]    = { 0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07 };      /* prime256v1 (P-256) */
+static const uint8_t OID_P384[]    = { 0x2b,0x81,0x04,0x00,0x22 };                     /* secp384r1 (P-384) */
 
 int x509_slice_eq(const x509_slice *s, const uint8_t *bytes, size_t n)
 {
@@ -247,13 +248,16 @@ int x509_parse(const uint8_t *der, size_t len, x509_cert *out)
         out->pubkey_algo = X509_PK_RSA;
     } else if (asn1_oid_equals(&pkoid, OID_EC, sizeof OID_EC)) {
         /* For EC the AlgorithmIdentifier parameters carry the namedCurve OID.
-         * We support prime256v1 (P-256) only, so a key on any other curve is
-         * treated as unknown rather than letting a non-P-256 point reach the
-         * P-256 verifier. */
+         * We support prime256v1 (P-256) and secp384r1 (P-384); a key on any other
+         * curve is treated as unknown rather than letting a point reach a verifier
+         * for the wrong curve. */
         asn1_tlv curve;
         if (asn1_next(&pkalg, &curve) == 0 && curve.tag == ASN1_OID &&
             asn1_oid_equals(&curve, OID_P256, sizeof OID_P256))
             out->pubkey_algo = X509_PK_EC;
+        else if (curve.tag == ASN1_OID &&
+            asn1_oid_equals(&curve, OID_P384, sizeof OID_P384))
+            out->pubkey_algo = X509_PK_EC384;
         else
             out->pubkey_algo = X509_PK_UNKNOWN;
     } else {

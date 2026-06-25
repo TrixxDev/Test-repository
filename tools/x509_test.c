@@ -41,6 +41,14 @@
 #define PKI_INTER_NOKUCS "3082019b30820142a00302010202142766ff78a0e91a5cff4fb67a448784ff86728b49300a06082a8648ce3d04030230193117301506035504030c0e4175726f726120526f6f74204341301e170d3236303632343130333732335a170d3336303632313130333732335a301e311c301a06035504030c134175726f7261204e6f4b55435320496e7465723059301306072a8648ce3d020106082a8648ce3d03010703420004ba6e6fa7a84a7baefee30575d4a8727f5077f16485b4213df93ec79c66a1fe2c03c4bc1d80d7423aa54b163b3f8f0e9914c73dfbaa2ee8267340ce5ff4668ac9a3633061300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020780301d0603551d0e0416041463b0708744d56dea9135463f93b7d69895baed80301f0603551d23041830168014ae6db9cf67b96411ecf598b33b87b5f32d2f47d7300a06082a8648ce3d040302034700304402203a1a03a3989bf164986349a216ed58d0eb34d40f234a39297c3c233e8e9237b502206afd79aa9d0004f714335fe8e8538d5c5138f73b230ccd0e2270e0f38525523c"
 #define PKI_LEAF_C "308201ba3082015fa00302010202144271906a21fd299de35cccf0440e0ecf3934b6b1300a06082a8648ce3d040302301e311c301a06035504030c134175726f7261204e6f4b55435320496e746572301e170d3236303632343130333732335a170d3336303632313130333732335a301d311b301906035504030c126175726f72612d6c6561662d632e746573743059301306072a8648ce3d020106082a8648ce3d0301070342000443c7603297eb3a7d8452b5dfa5b90d7c4c43182c7b0a3e76e21f0869e9da55f85cfd5b13c82e3f8ba69033296af5916a5d1b44d9ec1b97127deceb158cd47300a37c307a30090603551d1304023000300e0603551d0f0101ff040403020780301d0603551d110416301482126175726f72612d6c6561662d632e74657374301d0603551d0e0416041406800a4b81524a7d39b6af6d4cce8f8ce97bc140301f0603551d2304183016801463b0708744d56dea9135463f93b7d69895baed80300a06082a8648ce3d0403020349003046022100dcaf8e8b5df68deb29f6a1cbc1fb846d03cc529516e329deb2191f09dd1ef748022100f582ed54cc8ba480fe95bc2b3ea2f7f75b16ee77ef70c38131a9b2caf2f98fd6"
 
+/* A P-384 chain (openssl-generated, all ecdsa-with-SHA384 / secp384r1) for the
+ * 14.x.4 X.509 dispatch: root (CA) -> intermediate (CA, pathlen 0) -> leaf
+ * (p384.aurora.test). Exercises OID_P384 key classification and the
+ * ecdsa-with-SHA384 signature path through x509_verify_chain. */
+#define PKI384_ROOT "308201d83082015ea003020102021436e8de5a97ab62d457731d89b59781623c4f2bd5300a06082a8648ce3d040303301b3119301706035504030c104175726f7261205033383420526f6f74301e170d3236303632353130343432365a170d3336303632323130343432365a301b3119301706035504030c104175726f7261205033383420526f6f743076301006072a8648ce3d020106052b81040022036200044d09f321dc09000b6e8b56df0861e0d1a25bdcc8123634c40553e0910aafeac398543397ad6b9110a0e31c71b28a02fd27ca8c5f25914b6a908611cc1449f66a6f2a5e92e7374390ef321c9c4069f4daa52abe48f66547fbf8bb2cfcffac838ca3633061301d0603551d0e04160414ef006a819eabf91e371b9b7e3310eaa3e4cfe715301f0603551d23041830168014ef006a819eabf91e371b9b7e3310eaa3e4cfe715300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300a06082a8648ce3d0403030368003065023019b8f8aef372e347764128978d2ed1f10b415e3250aebbec706faeb2ddf0d88d6e0a623436642562861db89790a885320231009f103dc42b5070d4ea3df4e1905140f367f6e95b72fe126d20fb3d7916c9fb79c8c12e18e536d34756e01dc586b3bbc9"
+#define PKI384_INTER "308201e230820169a00302010202143d4eb0232e7e890f4257c19c5a0f5658886fefe1300a06082a8648ce3d040303301b3119301706035504030c104175726f7261205033383420526f6f74301e170d3236303632353130343432365a170d3336303632323130343432365a30233121301f06035504030c184175726f7261205033383420496e7465726d6564696174653076301006072a8648ce3d020106052b81040022036200041c9720aeaa8f193b60b1826059e2e8356856c8ca2621f33cdaadcdedfb9b4e5f6ce3e028fb4b6b941486e86e87524cd0be9e613d4b5fe9ef7f3319770a49874730ea2dd14df8f574f6480bbbfc0df3b6cb02022e1f59a960aa65a50db4efc3fba366306430120603551d130101ff040830060101ff020100300e0603551d0f0101ff040403020106301d0603551d0e04160414993e08132eb535189e4684a46f4c0a66560b6757301f0603551d23041830168014ef006a819eabf91e371b9b7e3310eaa3e4cfe715300a06082a8648ce3d040303036700306402300d5577d3e24e4d1db05153e930b0fd20cd5d907ac1656db9988fc8b6cbe20cd6d30ede7c27fc6a3058d9c547864c6a71023063aed2c665a62f7312f27529a09614497f6bb28095568fb3279e87a5172038e016c84e49fd036e6cc378eb9aaf3326d6"
+#define PKI384_LEAF "308201fa30820180a0030201020214442a7c6186dd072787a0ffc01997e337854869e8300a06082a8648ce3d04030330233121301f06035504030c184175726f7261205033383420496e7465726d656469617465301e170d3236303632353130343432365a170d3336303632323130343432365a301b3119301706035504030c10703338342e6175726f72612e746573743076301006072a8648ce3d020106052b81040022036200048893c789bbda82f1161862bdc429255132e8335dc7a9ddcdbc5e0c89450d1d67d273ec3be71a235f369380bb92751d0acb4b0beeaedee690dfd8a283b2626bcf3f683c6cb584074353d6edbec33973fe5df9494165cc133c9552c975cc31d663a37d307b300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301b0603551d11041430128210703338342e6175726f72612e74657374301d0603551d0e04160414cda30d2fa29cb669b03e89fbd27887a4431f7064301f0603551d23041830168014993e08132eb535189e4684a46f4c0a66560b6757300a06082a8648ce3d0403030368003065023025239ef748094bb025075a8d0889519024d467fbfc9590e9d4822b716b82a22274a8853bc44b784659815a9461397b66023100bcfd7f733e64a6b04657062ceaf51a2832716f35f67ee76983dd0132c916d9bbee63fe29e6da452f0c4a4212a2183b78"
+
 /* A REAL captured Let's Encrypt chain (www.eff.org, June 2026) for offline
  * validation (14.0.2). All RSA-PKCS1-SHA256, which Aurora can verify:
  *   PKI_LE_LEAF   (*.eff.org, RSA-2048) -> PKI_LE_YR1 (LE "YR1", RSA-2048)
@@ -260,12 +268,12 @@ int main(void)
         check_ok("tampered TBSCertificate -> BAD_SIGNATURE",
                  x509_verify_signature(&cert2, cert2.spki_key.p, cert2.spki_key.len) == X509_VERIFY_BAD_SIGNATURE);
 
-        /* dispatcher: a genuinely unimplemented algorithm (ecdsa-with-SHA384) is
-         * reported UNSUPPORTED, not failed. ecdsa-with-SHA256 is now supported and
-         * is exercised against a real ECDSA cert below. */
-        static const uint8_t oid_ecdsa384[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x03 };
+        /* dispatcher: a genuinely unimplemented algorithm (ecdsa-with-SHA512) is
+         * reported UNSUPPORTED, not failed. ecdsa-with-SHA256/SHA384 are supported
+         * and exercised against real ECDSA certs below. */
+        static const uint8_t oid_ecdsa512[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x04 };
         x509_cert fake = cert;
-        fake.sig_oid.p = oid_ecdsa384; fake.sig_oid.len = sizeof oid_ecdsa384;
+        fake.sig_oid.p = oid_ecdsa512; fake.sig_oid.len = sizeof oid_ecdsa512;
         check_ok("unimplemented signature algorithm -> UNSUPPORTED",
                  x509_verify_signature(&fake, cert.spki_key.p, cert.spki_key.len) == X509_VERIFY_UNSUPPORTED);
     }
@@ -458,6 +466,46 @@ int main(void)
         x509_cert other_anchor[] = { other };
         check_ok("CASE 4: different trust store -> UNTRUSTED",
                  x509_verify_chain(chain, 3, other_anchor, 1) == X509_VERIFY_UNTRUSTED);
+    }
+
+    {   /* 14.x.4 — P-384 chain: ecdsa-with-SHA384 + secp384r1 through the verifier */
+        static uint8_t rd[1024], id[1024], ld[1024];
+        int rdl = unhex(PKI384_ROOT, rd), idl = unhex(PKI384_INTER, id), ldl = unhex(PKI384_LEAF, ld);
+        x509_cert root, inter, leaf;
+        check_ok("P384 root parses",  x509_parse(rd, rdl, &root)  == 0);
+        check_ok("P384 inter parses", x509_parse(id, idl, &inter) == 0);
+        check_ok("P384 leaf parses",  x509_parse(ld, ldl, &leaf)  == 0);
+        check_ok("P384 keys classified as secp384r1 (EC384)",
+                 root.pubkey_algo == X509_PK_EC384 && inter.pubkey_algo == X509_PK_EC384 &&
+                 leaf.pubkey_algo == X509_PK_EC384);
+        check_ok("P384 intermediate is a CA with keyCertSign",
+                 inter.is_ca && inter.key_cert_sign);
+        check_ok("P384 leaf SAN p384.aurora.test matches",
+                 x509_check_hostname(&leaf, "p384.aurora.test") == 0);
+
+        x509_cert chain[]  = { leaf, inter };
+        x509_cert anchor[] = { root };
+        check_ok("P384 CASE 1: leaf+inter trusted by P384 root -> OK",
+                 x509_verify_chain(chain, 2, anchor, 1) == X509_VERIFY_OK);
+
+        /* tamper the intermediate's signature: leaf->inter still verifies but
+         * inter->root fails -> BAD_SIGNATURE (issuer found by name, rejected) */
+        static uint8_t ibad[1024]; memcpy(ibad, id, idl); ibad[idl - 1] ^= 1;
+        x509_cert interbad; check_ok("P384 tampered inter re-parses", x509_parse(ibad, idl, &interbad) == 0);
+        x509_cert chain_bad[] = { leaf, interbad };
+        check_ok("P384 CASE 2: tampered intermediate signature -> BAD_SIGNATURE",
+                 x509_verify_chain(chain_bad, 2, anchor, 1) == X509_VERIFY_BAD_SIGNATURE);
+
+        /* drop the intermediate: no path to the anchor -> UNTRUSTED */
+        x509_cert chain_missing[] = { leaf };
+        check_ok("P384 CASE 3: missing intermediate -> UNTRUSTED",
+                 x509_verify_chain(chain_missing, 1, anchor, 1) == X509_VERIFY_UNTRUSTED);
+
+        /* different trust store -> UNTRUSTED */
+        uint8_t otherd[700]; x509_cert other; x509_parse(otherd, unhex(RFC_DER_CERT, otherd), &other);
+        x509_cert other_anchor[] = { other };
+        check_ok("P384 CASE 4: different trust store -> UNTRUSTED",
+                 x509_verify_chain(chain, 2, other_anchor, 1) == X509_VERIFY_UNTRUSTED);
     }
 
     printf(failures ? "\nX509 TEST: %d FAILURE(S)\n" : "\nX509 TEST: ALL PASS\n", failures);

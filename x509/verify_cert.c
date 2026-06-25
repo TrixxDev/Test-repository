@@ -2,12 +2,15 @@
 #include "verify_cert.h"
 #include "asn1.h"
 #include "sha256.h"
+#include "sha384.h"
 #include "rsa.h"
 #include "ecdsa.h"
+#include "ecdsa384.h"
 
 /* signatureAlgorithm OIDs (raw DER contents) */
 static const uint8_t OID_SHA256_RSA[]   = { 0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x0b };
 static const uint8_t OID_ECDSA_SHA256[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x02 };
+static const uint8_t OID_ECDSA_SHA384[] = { 0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x03 };
 
 /* DER DigestInfo prefix for id-sha256 (algorithm + the 32-byte OCTET STRING tag).
  * The 32-byte digest is appended to form the full DigestInfo. */
@@ -72,6 +75,19 @@ static int verify_ecdsa_sha256(const x509_cert *cert, const uint8_t *ik, size_t 
     return X509_VERIFY_OK;
 }
 
+/* ECDSA-with-SHA-384 over the TBSCertificate. The issuer's EC subjectPublicKey
+ * (ik) is the uncompressed point 0x04 || X || Y; ecdsa_p384_verify validates it
+ * fully (97 bytes, on-curve P-384, correct subgroup) and parses the DER signature
+ * strictly, so a non-P-384 key reached via a spoofed sig_oid fails the decode. */
+static int verify_ecdsa_sha384(const x509_cert *cert, const uint8_t *ik, size_t iklen)
+{
+    uint8_t hash[48];
+    sha384(cert->tbs.p, cert->tbs.len, hash);
+    if (ecdsa_p384_verify(ik, iklen, hash, cert->signature.p, cert->signature.len) != 0)
+        return X509_VERIFY_BAD_SIGNATURE;
+    return X509_VERIFY_OK;
+}
+
 int x509_verify_signature(const x509_cert *cert, const uint8_t *ik, size_t iklen)
 {
     if (x509_slice_eq(&cert->sig_oid, OID_SHA256_RSA, sizeof OID_SHA256_RSA))
@@ -79,6 +95,9 @@ int x509_verify_signature(const x509_cert *cert, const uint8_t *ik, size_t iklen
 
     if (x509_slice_eq(&cert->sig_oid, OID_ECDSA_SHA256, sizeof OID_ECDSA_SHA256))
         return verify_ecdsa_sha256(cert, ik, iklen);
+
+    if (x509_slice_eq(&cert->sig_oid, OID_ECDSA_SHA384, sizeof OID_ECDSA_SHA384))
+        return verify_ecdsa_sha384(cert, ik, iklen);
 
     return X509_VERIFY_UNSUPPORTED;
 }

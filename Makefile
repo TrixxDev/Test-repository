@@ -58,10 +58,11 @@ UCFLAGS := --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
 
 # The portable crypto/tls/x509 trees compiled for userspace (freestanding, same
 # sources as the host tests and the kernel-excluded build). tlsconnect links them.
-TLS_U_SRC := crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c \
+TLS_U_SRC := crypto/sha256.c crypto/sha384.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c \
              crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c \
              crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c \
              crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c \
+             crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c \
              tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c \
              tls/handshake.c tls/client.c tls/conn.c tls/cert.c tls/trace.c tls/driver.c \
              x509/asn1.c x509/x509.c x509/verify_cert.c
@@ -209,20 +210,20 @@ crypto-test:
 # Host-side TLS protocol tests (tls/ over the verified crypto/ primitives).
 .PHONY: tls-test
 tls-test:
-	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_test.c tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/driver.c tls/cert.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c -o /tmp/aurora_tls_test
+	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_test.c tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/driver.c tls/cert.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_tls_test
 	/tmp/aurora_tls_test
 
 # RFC 8448 trace runner: replays the published Simple 1-RTT Handshake through the
 # tls/ engine and checks every derived value byte-for-byte against the RFC.
 .PHONY: tls-trace-test
 tls-trace-test:
-	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_trace_test.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/cert.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/x25519.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/bignum.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c -o /tmp/aurora_tls_trace_test
+	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_trace_test.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/cert.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/x25519.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/bignum.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_tls_trace_test
 	/tmp/aurora_tls_trace_test
 
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
 .PHONY: x509-test
 x509-test:
-	$(CC) -O2 -Ix509 -Icrypto tools/x509_test.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/bignum.c crypto/rsa.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c -o /tmp/aurora_x509_test
+	$(CC) -O2 -Ix509 -Icrypto tools/x509_test.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/sha384.c crypto/bignum.c crypto/rsa.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_x509_test
 	/tmp/aurora_x509_test
 
 # Host-side RSA / big-integer math tests (crypto/ layer: pure math, no ASN.1).
@@ -271,7 +272,7 @@ LIVE_PORT ?= 443
 AURORA_TRUST_PEM ?= /root/.ccr/agent-proxy-ca.crt
 .PHONY: tls-live-test
 tls-live-test:
-	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_live_test.c tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/driver.c tls/cert.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c -o /tmp/aurora_tls_live_test
+	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_live_test.c tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/driver.c tls/cert.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_tls_live_test
 	AURORA_TRUST_PEM="$(AURORA_TRUST_PEM)" /tmp/aurora_tls_live_test $(LIVE_HOST) $(LIVE_PORT)
 
 # Host-side TCP receive-ring test (net/rxring.c: the buffer behind tcp_recv).
