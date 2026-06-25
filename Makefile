@@ -238,6 +238,12 @@ p256-test:
 	$(CC) -O2 -Icrypto -Itools tools/p256_test.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/bignum.c -o /tmp/aurora_p256_test
 	/tmp/aurora_p256_test
 
+# Host-side P-384 field (mod p) + scalar (mod n) arithmetic vs Python KATs.
+.PHONY: p384-test
+p384-test:
+	$(CC) -O2 -Icrypto -Itools tools/p384_test.c crypto/p384_field.c crypto/p384_scalar.c crypto/bignum.c -o /tmp/aurora_p384_test
+	/tmp/aurora_p384_test
+
 # Host-side ECDSA-P256-SHA256 verification against the official Wycheproof vectors.
 .PHONY: ecdsa-test
 ecdsa-test:
