@@ -126,10 +126,14 @@ user/tlsconnect.elf: user/tlsconnect.c user/tls_test_root.h user/libc.h user/crt
 
 # httpsget: the userspace HTTPS client (DNS -> TCP -> TLS 1.3 -> HTTP/1.1) over
 # Aurora's own network stack. Same freestanding TLS stack as tlsconnect, plus the
-# curated CA roots header.
-user/httpsget.elf: user/httpsget.c user/ca_roots.h user/libc.h user/crt0.o $(LIBC_OBJ) $(TLS_U_OBJ) user/user.ld
+# curated CA roots header. user/url.o (15.2) resolves redirect Location headers
+# and is also a plain http:// transport for cross-scheme redirects.
+user/url.o: user/url.c user/url.h
+	$(CC) $(UCFLAGS) -c user/url.c -o user/url.o
+
+user/httpsget.elf: user/httpsget.c user/url.o user/ca_roots.h user/libc.h user/crt0.o $(LIBC_OBJ) $(TLS_U_OBJ) user/user.ld
 	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -c user/httpsget.c -o user/httpsget.o
-	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/httpsget.o $(TLS_U_OBJ) $(LIBC_OBJ) -o $@
+	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/httpsget.o user/url.o $(TLS_U_OBJ) $(LIBC_OBJ) -o $@
 
 $(EMBEDDED): user/init.elf tools/bin2c.py
 	python3 tools/bin2c.py user/init.elf user_elf > $(EMBEDDED)
@@ -261,6 +265,13 @@ ecdsa-test:
 ecdsa384-test:
 	$(CC) -O2 -Icrypto -Itools tools/ecdsa384_test.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c crypto/bignum.c crypto/sha384.c -o /tmp/aurora_ecdsa384_test
 	/tmp/aurora_ecdsa384_test
+
+# Host-side URL parse/resolve test (user/url.c: RFC 3986 reference resolution
+# used to follow HTTP redirects, 15.2). Pure data, no networking.
+.PHONY: url-test
+url-test:
+	$(CC) -O2 -Iuser tools/url_test.c user/url.c -o /tmp/aurora_url_test
+	/tmp/aurora_url_test
 
 # Live Internet TLS over Aurora's real engine, on the host, through the HTTPS
 # CONNECT proxy (14.0.3a). NEEDS OUTBOUND NETWORK -- diagnostic, not part of the

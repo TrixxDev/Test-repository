@@ -73,6 +73,7 @@ Run the vectors: `make crypto-test`.
 | 15.0.3 | `TLS_MAX_CHAIN` 4 → 6 (cheap now that each slot is ~184 B) | host | ✅ |
 | 15.0.4 | `tls_conn.hs_buf` / record-reader buffer analysis — confirmed correctly sized, documented not shrunk; `httpsget` response buffer 32 KiB → 8 KiB | host + QEMU | ✅ |
 | **15.1** | **Trust store expansion** — 3 ECDSA P-384 roots (ISRG Root X2, GTS Root R3/R4) alongside the 5 RSA roots | host: parse + self-signature verify; QEMU: 8-root smoke + 14.x.7 regression | ✅ |
+| **15.2** | **HTTP redirects** — `user/url.c` (RFC 3986 §5.3 reference resolution) + a per-hop full pipeline restart in `httpsget` (301/302/303/307/308, ≤20 hops, loop guard, scheme/host/port changes) | `make url-test` (31 cases); `tools/redirects_qemu.py`: 3/3 PASS; 14.x.7 regression still 3/3 | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1391,6 +1392,65 @@ Verified two ways:
 
 No private keys involved (these are public root certificates); nothing in the
 PKI/TLS engine changed — 15.1 is data-only.
+
+## Step 15.2 — HTTP redirects
+
+`httpsget` followed exactly one URL (argv) and stopped. 15.2 makes it follow
+301/302/303/307/308 redirects the way a browser does: **a redirect is a new
+transaction**, not a continuation of the old one. Every hop gets a fresh DNS
+lookup, a fresh TCP connect, and — since the scheme can change — either a fresh
+TLS 1.3 handshake (with full certificate validation against the same trust
+store) or a plain HTTP request, then a fresh GET. No TLS session, connection,
+or buffer is reused across hops. This is deliberately the simple option: full
+restart is easier to reason about and to get right than threading session
+state through a scheme/host/port change, and it doesn't foreclose keep-alive
+or session resumption later (15.4/15.5) — those are additive on top of this
+shape, not a rewrite of it.
+
+Two new pieces:
+
+- **`user/url.c`/`url.h`** — absolute-URL parsing and RFC 3986 §5.3 reference
+  resolution: a `Location:` value can be an absolute URI, a network-path
+  reference (`//host/path`), an absolute-path reference (`/path`), a
+  query-only reference (`?q=1`), or a relative-path reference (`next`,
+  `../next`), and each is resolved against the URL the response came from.
+  Relative and absolute-path references get RFC 3986 §5.2.4 dot-segment
+  removal (`/a/b/../c` → `/a/c`), with excess `..` at the root silently
+  dropped rather than erroring (the same forgiving behavior browsers use).
+  Freestanding like `x509/` and `tls/` — no libc, fixed-size buffers, no
+  allocation — so the same object links into `httpsget.elf` and a host test
+  binary unchanged.
+- **`httpsget.c` restructuring** — the old single-shot `main()` body (TCP
+  connect → TLS handshake → GET → read) became `do_fetch()`, callable once per
+  hop against a `struct url`; `main()` now drives a redirect loop around it.
+  The redirect controller: a hard `MAX_REDIRECTS` (20) ceiling, plus a
+  visited-URL list checked before every hop so a cycle is reported as
+  "redirect loop detected" immediately rather than silently spending the
+  whole hop budget. Only 301/302/303/307/308 are followed (these are the
+  status codes the read flow already in use — a no-body GET — handles
+  identically; method-switching logic from the spec's finer distinctions
+  doesn't apply since `httpsget` never sends anything but GET).
+
+Verified two ways:
+- **Host (`make url-test`)**: 31 cases against `url_parse`/`url_resolve` —
+  absolute URLs (default/explicit ports, query, fragment-stripping,
+  case-insensitive scheme, rejection of malformed input), and every
+  RFC 3986 §5.3 reference kind including dot-segment collapsing, scheme/host/
+  port changes, and an oversized-path case that must fail cleanly rather than
+  overflow a fixed buffer.
+- **QEMU (`tools/redirects_qemu.py`)**: three fresh-boot scenarios against a
+  local `openssl s_server -HTTP` (raw canned HTTP responses — `-www`/`-WWW`
+  always force a "200 ok" status line and can't produce a redirect) plus a
+  small raw-socket plain-HTTP responder for the cross-scheme hop:
+  1. same-host HTTPS→HTTPS redirect (301, absolute-path Location) → 200
+  2. cross-scheme HTTPS→HTTP redirect (302, absolute-URI Location) → 200 —
+     proving the plain-HTTP transport branch and the scheme/port switch run
+     for real in the freestanding environment, not just in the host unit test
+  3. a two-hop redirect cycle → "redirect loop detected"
+
+  All 3/3 PASS, and the pre-existing 14.x.7 regression (RSA/P-256/P-384
+  controlled chains, validation ON) still passes 3/3 unchanged — the
+  `do_fetch` refactor didn't disturb the existing single-hop path.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 
