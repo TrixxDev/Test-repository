@@ -66,8 +66,13 @@ Run the vectors: `make crypto-test`.
 | 14.x.5 | **TLS CertificateVerify** `ecdsa_secp384r1_sha384` (0x0503) + advertised in ClientHello | host: P-384 CV matrix | ✅ |
 | 14.x.6 | **QEMU live-TLS diagnosis** — engine proven correct in QEMU (200 OK); failures were cert-policy, now surfaced (`cert_reason`) | QEMU: 200 (validation off), reliable | ✅ |
 | 14.x.7 | **Secure HTTPS 200 OK in QEMU** — validation ON, depth-N Root→Inter→Leaf, RSA + P-256 + P-384 | `tools/securehttps_qemu.py`: 3/3 PASS | ✅ |
-| 14.0.5 | Expand the trust store toward a browser bundle | host | later |
-| 15.0 | **Memory reduction** — `x509_cert.san_dns[8][256]` → pointer slices (~2 KiB/cert) | host | later |
+| 14.0.5 | Expand the trust store toward a browser bundle | superseded by 15.1 | — |
+| **15.0** | **Memory reduction** — DER-slice fields, `TLS_MAX_CHAIN` 4→6, buffer sizing analysis | host | ✅ |
+| 15.0.1 | `x509_cert.san_dns[8][256]` → `x509_slice` views into the DER (no copy) | host | ✅ |
+| 15.0.2 | `issuer_cn`/`subject_cn` → `x509_slice`; `sizeof(x509_cert)` 2408 B → 184 B (−92%) | host: DER-lifetime invariant test | ✅ |
+| 15.0.3 | `TLS_MAX_CHAIN` 4 → 6 (cheap now that each slot is ~184 B) | host | ✅ |
+| 15.0.4 | `tls_conn.hs_buf` / record-reader buffer analysis — confirmed correctly sized, documented not shrunk; `httpsget` response buffer 32 KiB → 8 KiB | host + QEMU | ✅ |
+| **15.1** | **Trust store expansion** — 3 ECDSA P-384 roots (ISRG Root X2, GTS Root R3/R4) alongside the 5 RSA roots | host: parse + self-signature verify; QEMU: 8-root smoke + 14.x.7 regression | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1347,16 +1352,45 @@ httpsget github.com /
   [body ...]
 ```
 
-Trust store: a curated set of public **RSA** roots (`user/ca_roots.h`: ISRG Root
-X1, DigiCert Global Root CA/G2, USERTrust RSA, GTS Root R1), so a site whose whole
-chain is RSA-PKCS1-SHA256 or ECDSA-P256-SHA256 verifies. (RSA roots specifically,
-because the anchor's key verifies the intermediate's signature — an ECDSA-P384
-root would re-introduce the 14.x gap one level up.) Expanding this set is 14.0.5.
+Trust store (as of 14.x.7): a curated set of public **RSA** roots (`user/ca_roots.h`:
+ISRG Root X1, DigiCert Global Root CA/G2, USERTrust RSA, GTS Root R1), so a site
+whose whole chain is RSA-PKCS1-SHA256 or ECDSA-P256-SHA256 verifies. (RSA roots
+specifically, because the anchor's key verifies the intermediate's signature — an
+ECDSA-P384 root would re-introduce the 14.x gap one level up.) Expanding this set
+is 15.1, once P-384 closes that gap.
 
 Built and host-verified: it compiles and links into `httpsget.elf` (BSS ≈ 147 KiB
 — the conn + reader + 5-root store + a 32 KiB response buffer), the kernel image
 is unchanged (additive invariant holds), and the 5-root store parses and verifies
 the real Let's Encrypt chain from 14.0.2 (ISRG Root X1 matches).
+
+## Step 15.1 — trust store expansion: ECDSA P-384 roots
+
+With ECDSA P-384 closing the "anchor can't verify an EC intermediate" gap (14.x),
+the trust store gains three production ECDSA roots, fetched directly from their
+issuers (not the host's local CA bundle): **ISRG Root X2** (Let's Encrypt) and
+**GTS Root R3** / **GTS Root R4** (Google Trust Services) — all secp384r1.
+`user/ca_roots.h` now carries 8 roots (5 RSA + 3 ECDSA P-384); `CA_ROOTS_N` and
+every consumer (`g_roots[]`, `tls_client_set_trust`) are sized off that constant,
+so the change is purely additive data, no logic touched.
+
+Verified two ways:
+- **Host, against Aurora's own parser/verifier** (not openssl): all 8 roots parse
+  (the 3 new ones report `pubkey_algo == X509_PK_EC384`), and each new root's
+  self-signature verifies under `x509_verify_signature` using Aurora's
+  `ecdsa_p384_verify` on the real production DER — not a synthetic test vector.
+  (The three pre-existing RSA roots whose self-signature uses SHA-1 or an
+  unimplemented `sha384WithRSAEncryption` correctly report `UNSUPPORTED`; this is
+  pre-existing and irrelevant to trust — `x509_verify_chain` never checks a root's
+  own self-signature, only intermediates/leaves against the root's public key.)
+- **QEMU**: booting Aurora and running `httpsget` prints
+  `(trust store: 8 roots)` with no parse failure, and the full 14.x.7
+  `tools/securehttps_qemu.py` regression (RSA/P-256/P-384 controlled chains,
+  validation ON) still passes 3/3 — the new roots add no regression to the
+  existing depth-N path-building/CertificateVerify/hostname logic.
+
+No private keys involved (these are public root certificates); nothing in the
+PKI/TLS engine changed — 15.1 is data-only.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 
