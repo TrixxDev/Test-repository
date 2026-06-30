@@ -136,7 +136,11 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
 
     kprintf("[boot] probing network...\n");
     virtio_net_init();      /* PCI scan for virtio-net (no-op if absent) */
-    net_init();             /* ARP cache + protocol layers */
+    net_init();             /* ARP cache + protocol layers; static config live */
+    if (cmdline_has_word(mb, "nodhcp"))
+        kprintf("[dhcp] skipped (nodhcp)\n");
+    else if (dhcp_configure(3000) != 0)
+        kprintf("[dhcp] not configured -- staying on the static config\n");
     if (cmdline_has_word(mb, "nettest"))
         net_selftest();     /* opt-in self-test (ping/UDP/DNS/TCP); off by default
                              * so a NIC-equipped GUI boot reaches the desktop fast */

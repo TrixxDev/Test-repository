@@ -3,9 +3,10 @@
 #include "udp.h"
 #include "netstack.h"
 #include "inet.h"
+#include "netcfg.h"
 #include "string.h"
 
-#define IP_DNS          IP4(10, 0, 2, 3)    /* SLIRP virtual DNS server */
+#define IP_DNS          (g_net_config.dns[0])   /* live config: static default, or a DHCP lease */
 #define DNS_PORT        53
 #define DNS_CLIENT_PORT 50053               /* our ephemeral source port */
 

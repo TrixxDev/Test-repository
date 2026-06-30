@@ -273,6 +273,16 @@ url-test:
 	$(CC) -O2 -Iuser tools/url_test.c user/url.c -o /tmp/aurora_url_test
 	/tmp/aurora_url_test
 
+# Host-side DHCP client test (net/dhcp.c: pure packet build/parse + lease-timer
+# logic, RFC 2131/2132, Phase 15.3). net/netcfg.c is linked for real (it's pure);
+# the handful of hardware-touching calls (udp_*/net_poll/net_now_ms/virtio_net_*/
+# kprintf) are stubbed in tools/dhcp_test.c since nothing here calls the live
+# dhcp_configure()/dhcp_tick() transaction path -- that's QEMU-only.
+.PHONY: dhcp-test
+dhcp-test:
+	$(CC) -O2 -Inet -Iinclude -Idrivers tools/dhcp_test.c net/dhcp.c net/netcfg.c -o /tmp/aurora_dhcp_test
+	/tmp/aurora_dhcp_test
+
 # Live Internet TLS over Aurora's real engine, on the host, through the HTTPS
 # CONNECT proxy (14.0.3a). NEEDS OUTBOUND NETWORK -- diagnostic, not part of the
 # default suite. Drives a real TLS 1.3 handshake to CONNECTED and decrypts at

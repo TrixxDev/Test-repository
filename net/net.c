@@ -1,6 +1,7 @@
 /* Network glue: time base, the RX pump, and the Phase 4/5/6 self-test. */
 #include "netstack.h"
 #include "inet.h"
+#include "netcfg.h"
 #include "eth.h"
 #include "arp.h"
 #include "ipv4.h"
@@ -8,6 +9,7 @@
 #include "udp.h"
 #include "dns.h"
 #include "tcp.h"
+#include "dhcp.h"
 #include "virtio_net.h"
 #include "pit.h"
 #include "perf.h"
@@ -26,7 +28,7 @@ uint16_t inet_csum(const void *data, uint32_t len)
     return (uint16_t)~sum;
 }
 
-void net_init(void) { arp_init(); ipv4_init(); udp_init(); tcp_init(); }
+void net_init(void) { netcfg_init(); arp_init(); ipv4_init(); udp_init(); tcp_init(); dhcp_init(); }
 
 /* Drain every pending RX frame up into the dispatcher, then run net timers. */
 void net_poll(void)
@@ -36,6 +38,7 @@ void net_poll(void)
     while ((n = net_recv_frame(frame, sizeof(frame))) > 0)
         eth_input(frame, (size_t)n);
     tcp_tick();             /* TIME_WAIT -> CLOSED */
+    dhcp_tick();            /* T1/T2 lease renewal (Phase 15.3.3) */
 }
 
 /* Poll the wire until `ip` resolves in the cache, or `timeout_ms` elapses. */

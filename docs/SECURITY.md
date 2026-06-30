@@ -74,6 +74,7 @@ Run the vectors: `make crypto-test`.
 | 15.0.4 | `tls_conn.hs_buf` / record-reader buffer analysis — confirmed correctly sized, documented not shrunk; `httpsget` response buffer 32 KiB → 8 KiB | host + QEMU | ✅ |
 | **15.1** | **Trust store expansion** — 3 ECDSA P-384 roots (ISRG Root X2, GTS Root R3/R4) alongside the 5 RSA roots | host: parse + self-signature verify; QEMU: 8-root smoke + 14.x.7 regression | ✅ |
 | **15.2** | **HTTP redirects** — `user/url.c` (RFC 3986 §5.3 reference resolution) + a per-hop full pipeline restart in `httpsget` (301/302/303/307/308, ≤20 hops, loop guard, scheme/host/port changes) | `make url-test` (31 cases); `tools/redirects_qemu.py`: 3/3 PASS; 14.x.7 regression still 3/3 | ✅ |
+| **15.3** | **DHCP** — `net/dhcp.c` (DISCOVER→OFFER→REQUEST→ACK, T1/T2 renewal) + `net/netcfg.c` (`struct net_config` — the single live IP/mask/gateway/DNS, replacing the scattered `IP_LOCAL`/`IP_GATEWAY`/`IP_DNS` compile-time constants) | `make dhcp-test` (47 cases); `tools/dhcp_qemu.py`: 3/3 PASS (default subnet matches static fallback byte-for-byte, a different subnet is correctly adopted and ARP/ICMP-usable, `nodhcp` opts out); 14.x.7 + 15.2 regressions still 3/3 + 3/3 | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1451,6 +1452,96 @@ Verified two ways:
   All 3/3 PASS, and the pre-existing 14.x.7 regression (RSA/P-256/P-384
   controlled chains, validation ON) still passes 3/3 unchanged — the
   `do_fetch` refactor didn't disturb the existing single-hop path.
+
+## Step 15.3 — DHCP
+
+Every IP address, gateway and DNS server in the stack was a compile-time
+constant matching QEMU SLIRP's defaults (`10.0.2.15`/`10.0.2.2`/`10.0.2.3`).
+15.3 makes them a runtime lease: a real RFC 2131 DISCOVER → OFFER → REQUEST →
+ACK exchange against whatever DHCP server is actually on the wire, with T1/T2
+renewal for as long as the lease lives and a safe fallback to the static
+defaults on timeout, NAK, or lease loss.
+
+Two new pieces:
+
+- **`net/netcfg.c`/`netcfg.h`** — `struct net_config { ip, mask, gateway,
+  dns[2] }`, one global instance, seeded with the static SLIRP defaults by
+  `net_init()` before anything else runs. `net/inet.h`'s `IP_LOCAL`/
+  `IP_GATEWAY` macros now read `g_net_config.{ip,gateway}` instead of
+  expanding to a constant — every consumer (`arp.c`, `ipv4.c`, `tcp.c`,
+  `net.c`) keeps using the same macro names and needed *zero* changes beyond
+  that header. `dns.c`'s `IP_DNS` and `ipv4.c`'s subnet-mask check
+  (`next_hop()`) were the only two call sites that referenced a value
+  `net_config` doesn't expose through those macros, so they read
+  `g_net_config.dns[0]`/`.mask` directly. The result matches the architecture
+  asked for: static config, a DHCP lease, and a future GUI settings panel
+  differ only in who calls `netcfg_set()`, never in the stack itself.
+- **`net/dhcp.c`/`dhcp.h`** — the client itself, split the same way `dns.c` is
+  (pure packet build/parse vs. the live transaction):
+  - `dhcp_build_discover`/`dhcp_build_request`/`dhcp_parse_reply` are pure
+    functions over byte buffers (RFC 2131 fig. 1 header + RFC 2132 TLV
+    options: subnet mask, router, DNS, lease time, server identifier).
+    `dhcp_build_request`'s `ciaddr` parameter selects the RFC 2131 state:
+    zero means SELECTING (options 50/54 state the offer explicitly,
+    broadcast flag set, since we have no usable address yet to receive a
+    unicast reply); nonzero means RENEWING/REBINDING (ciaddr states the held
+    lease directly, options 50/54 are omitted per §4.3.6).
+  - `dhcp_configure(timeout_ms)` drives the SELECTING handshake, blocking and
+    pumping `net_poll()` exactly like `dns_query()` already does — same
+    idiom, new protocol. On ACK it calls `netcfg_set()`; on any failure
+    `g_net_config` is untouched (the static seed from `net_init()` survives).
+  - `dhcp_tick()`, called from `net_poll()` (same place `tcp_tick()` already
+    runs), checks `dhcp_lease_due()` — a pure function of wall time, the same
+    test-without-waiting idea as `arp_test_expire_all()` — and fires one
+    renewal attempt per T1/T2 window: a unicast REQUEST to the leasing server
+    at T1, a broadcast REQUEST at T2 if T1 never got an answer, and a fall
+    back to `netcfg_reset_static()` at lease expiry if neither did. It must
+    never call `net_poll()` itself (it runs *inside* `net_poll()`), so
+    renewal is asynchronous: the request goes out immediately, the ACK/NAK is
+    picked up opportunistically on a later tick via the same UDP handler
+    `dhcp_configure()` uses. This is a deliberate simplification of RFC
+    2131's full per-state retransmission schedule — one attempt per
+    threshold, not a retry timer — sufficient for "lease storage + T1/T2 +
+    renewal + fallback" without adding retry-timing complexity that isn't
+    separately verifiable here.
+
+  Two small additions outside `dhcp.c` make broadcast actually work:
+  `ipv4_input()` now accepts `dst == 255.255.255.255` in addition to
+  `dst == IP_LOCAL` (a DHCP reply is broadcast back since we have no unicast-
+  reachable address yet), and `ipv4_send()` sends straight to the Ethernet
+  broadcast MAC — no ARP — when the destination is the limited broadcast
+  address (ARP-ing `255.255.255.255` would never get an answer).
+  `kernel/kmain.c` calls `dhcp_configure(3000)` right after `net_init()`,
+  before anything else touches the network; a `nodhcp` cmdline word skips it
+  outright for static-only boots.
+
+Verified two ways:
+- **Host (`make dhcp-test`)**: 47 cases against the pure functions — DISCOVER/
+  REQUEST(SELECTING)/REQUEST(RENEWING) packet shape (op/htype/xid/broadcast
+  flag/ciaddr/chaddr/magic cookie/options), OFFER/ACK/NAK parsing (every
+  option, including a two-DNS-server reply), seven rejection paths (wrong
+  xid, wrong chaddr, wrong op, bad magic cookie, truncated, missing message-
+  type option), and the full T1/RENEW → T2/REBIND → EXPIRED timeline from
+  `dhcp_lease_due()`. `net/netcfg.c` is linked for real (it's pure); the
+  handful of hardware-touching calls (`udp_*`/`net_poll`/`net_now_ms`/
+  `virtio_net_*`/`kprintf`) are test doubles, since nothing here calls the
+  live transaction — that path is QEMU-only.
+- **QEMU (`tools/dhcp_qemu.py`)**, against SLIRP's own built-in DHCP server
+  (no host-side DHCP server needed):
+  1. default subnet (`10.0.2.0/24`) — the leased config comes out
+     byte-identical to the static fallback, proving 15.3 is a drop-in: no
+     other phase's behavior changes when DHCP is just confirming what was
+     already hardcoded.
+  2. a **different** subnet (`192.168.77.0/24`, set via `-netdev
+     user,...,net=...`) — Aurora leases `192.168.77.15/24`, gateway
+     `192.168.77.2`, DNS `192.168.77.3`, none of which exist anywhere in the
+     source, and `nettest`'s gateway ping (4/4 replies) proves the leased
+     address is actually wired into ARP/IPv4, not just printed.
+  3. `nodhcp` on the cmdline — no DISCOVER is sent; the boot logs "skipped"
+     and stays on the static config.
+
+  All 3/3 PASS, and both the 14.x.7 (RSA/P-256/P-384) and 15.2 (redirects)
+  QEMU regressions still pass 3/3 + 3/3 unchanged.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

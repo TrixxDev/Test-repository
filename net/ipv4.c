@@ -6,6 +6,7 @@
 #include "eth.h"
 #include "arp.h"
 #include "inet.h"
+#include "netcfg.h"
 #include "string.h"
 
 #define IPV4_VERSION    4
@@ -22,11 +23,11 @@ void ipv4_init(void) { ip_id = 0; rx_ok = 0; rx_drop = 0; }
 unsigned ipv4_rx_ok(void)      { return rx_ok; }
 unsigned ipv4_rx_dropped(void) { return rx_drop; }
 
-/* Next hop for `dst` (host order): on-link addresses go direct, everything else
- * via the gateway. Our network is a /24 (SLIRP 10.0.2.0/24). */
+/* Next hop for `dst` (host order): on-link addresses (per the live subnet
+ * mask, Phase 15.3.4) go direct, everything else via the gateway. */
 static uint32_t next_hop(uint32_t dst)
 {
-    if ((dst & 0xffffff00u) == (IP_LOCAL & 0xffffff00u))
+    if ((dst & g_net_config.mask) == (IP_LOCAL & g_net_config.mask))
         return dst;
     return IP_GATEWAY;
 }
@@ -48,7 +49,8 @@ void ipv4_input(const void *packet, size_t len)
 
     if (inet_csum(h, hlen) != 0) { rx_drop++; return; }          /* bad checksum */
 
-    if (ntohl(h->dst) != IP_LOCAL) { rx_drop++; return; }        /* not for us */
+    uint32_t dst = ntohl(h->dst);
+    if (dst != IP_LOCAL && dst != IP_BROADCAST) { rx_drop++; return; }   /* not for us */
 
     rx_ok++;
     const uint8_t *payload = (const uint8_t *)packet + hlen;
@@ -76,7 +78,9 @@ int ipv4_send(uint32_t dst, uint8_t proto, const void *payload, size_t len)
         return -1;
 
     uint8_t mac[6];
-    if (!arp_resolve(next_hop(dst), mac))
+    if (dst == IP_BROADCAST)
+        memcpy(mac, eth_broadcast, 6);           /* limited broadcast: no ARP, ever */
+    else if (!arp_resolve(next_hop(dst), mac))
         return -1;                              /* E_PENDING: ARP in flight */
 
     struct ipv4_hdr *h = (struct ipv4_hdr *)ip_tx;

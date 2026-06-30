@@ -6,6 +6,7 @@
  * MAC addresses and raw frame bytes are never byte-swapped. */
 #pragma once
 #include <stdint.h>
+#include "netcfg.h"
 
 static inline uint16_t htons(uint16_t x) { return (uint16_t)((x << 8) | (x >> 8)); }
 static inline uint16_t ntohs(uint16_t x) { return htons(x); }
@@ -20,9 +21,11 @@ static inline uint32_t ntohl(uint32_t x) { return htonl(x); }
 #define IP4(a, b, c, d) \
     (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | ((uint32_t)(c) << 8) | (uint32_t)(d))
 
-/* QEMU user-mode (SLIRP) defaults: guest 10.0.2.15, gateway 10.0.2.2. */
-#define IP_LOCAL    IP4(10, 0, 2, 15)
-#define IP_GATEWAY  IP4(10, 0, 2, 2)
+/* Live network configuration (net/netcfg.c): the QEMU SLIRP static defaults
+ * until a DHCP lease (net/dhcp.c, Phase 15.3) overwrites them. */
+#define IP_LOCAL      (g_net_config.ip)
+#define IP_GATEWAY    (g_net_config.gateway)
+#define IP_BROADCAST  IP4(255, 255, 255, 255)
 
 /* EtherTypes (host order; htons() at the wire). */
 #define ETH_P_IPV4  0x0800
