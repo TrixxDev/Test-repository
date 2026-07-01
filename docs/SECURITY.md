@@ -82,6 +82,7 @@ Run the vectors: `make crypto-test`.
 | **15.10** | **gzip / DEFLATE decompression** (RFC 1951 + RFC 1952) — a from-scratch, genuinely incremental inflate (`compress/inflate.c`: bit reader, stored/fixed/dynamic Huffman, 32 KiB sliding window) wrapped in a gzip container (`compress/gzip.c`: header/trailer, CRC32/ISIZE verification); `httpsget` sends `Accept-Encoding: gzip` and decompresses a `Content-Encoding: gzip` response as wire bytes arrive, not after buffering the whole compressed body | `make crc32-test` + `make inflate-test` (real raw-deflate streams incl. a 32 KiB+ window wraparound, plus a tiny-chunk/tiny-output-buffer streaming test) + `make gzip-test` (real gzip streams incl. FLG.FNAME, CRC32/ISIZE tamper rejection); `tools/gzip_qemu.py` against a real TLS 1.3 server: the server sees the real `Accept-Encoding: gzip` request header and answers with genuine gzip-compressed bytes, which `httpsget` decompresses to the original readable text inside QEMU; 14.x.7 + 15.2 + 15.3 + 15.4 + 15.7 regressions unaffected | ✅ |
 | **15.9** | **Cookie jar** (RFC 6265) — a compact, fixed-size (`user/cookiejar.c`, 32 entries, LRU eviction) process-lifetime jar: Domain/Path scoping, Max-Age/Expires (Max-Age wins when both are present), Secure/HttpOnly, deletion via a past/zero expiry, and rejecting a Domain attribute for a host that doesn't control it. `httpsget` parses every `Set-Cookie` on a response and sends a scoped `Cookie:` header on every request | `make cookiejar-test` (30 cases: domain/path matching incl. the no-slash-boundary negative case, Max-Age-vs-Expires precedence, deletion, overwrite-on-same-identity, LRU eviction, Secure/host-only enforcement, unrelated-domain rejection); `tools/cookies_qemu.py` against a real TLS 1.3 server: a session cookie set on one request comes back correctly on later requests in the same run, and a `Path=/admin`-scoped cookie is confirmed both withheld outside its path and included inside it — real RFC 6265 scoping, not "send everything ever seen"; 14.x.7 + 15.2 + 15.3 + 15.4 + 15.7 + 15.10 regressions unaffected | ✅ |
 | **15.8** | **Multi-origin session cache** — the single global TLS connection/reader/ticket-cache is replaced by `TLS_SESSION_SLOTS` (4) origin-keyed slots, each able to hold a live, reusable connection *and* a session ticket independently and simultaneously; a redirect to a different origin no longer closes the origin it left, so a later hop back to it can reuse the still-open connection (zero handshake) or, failing that, its ticket (PSK resumption) — no threads, timers, or queues, exactly as synchronous as every phase before it | `tools/session_cache_qemu.py` against two real TLS 1.3 servers on different ports of the same host (two distinct origins): a redirect chain A → B → A shows exactly one TCP connection to each of A and B, and the return to A is served by reusing its still-open connection with zero further TLS activity; full existing host + QEMU regression suite (incl. 15.7 resumption, whose ticket now lives inside the same slot) unaffected | ✅ |
+| **16.1** | **HTTP POST** (opening the "Web Platform" series, `16.x`, distinct from the `15.x` HTTPS v2 milestone) — `httpsget --post <host> <path> <body>` sends `body` as `application/x-www-form-urlencoded` with an auto-computed `Content-Length`; a redirect after a POST downgrades to a bodyless GET on the next hop (legacy 301/302/303 behavior; RFC 7231's method-and-body-preserving 307/308 explicitly not yet implemented) | `tools/post_qemu.py` against a real TLS 1.3 server: the server inspects the *actual* incoming request (not just httpsget's own log) and confirms method, `Content-Type`, `Content-Length` and the exact body bytes, then confirms the following redirect hop arrives as a bodyless GET; full existing host + QEMU regression suite unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2101,6 +2102,62 @@ and no dependency beyond the freestanding TLS/X.509/crypto stack this
 project has built from scratch throughout. HTTP/2, IPv6, WebSockets and
 request bodies (POST/PUT) are deliberately not part of this milestone —
 each is its own separate, later project.
+
+## Step 16.1 — HTTP POST
+
+The first step of a new series (`16.x`, "Web Platform") explicitly kept
+separate from the `15.x` HTTPS v2 milestone: everything up to here could
+only read the web. `httpsget` gains `--post <host> <path> <body>`, sending
+`body` as `application/x-www-form-urlencoded` with an auto-computed
+`Content-Length` — the one body shape this client's CLI can actually
+construct, since Aurora's shell (`user/sh.c`) has no argument quoting, so
+`body` has to be a single whitespace-free token.
+
+The method and body apply only to the very first request in a redirect
+chain; any hop after that reverts to a bodyless GET, matching what browsers
+have done for 301/302/303 since long before it was standardized (RFC 7231
+codifies it as legacy behavior, and recommends 307/308 for a server that
+actually wants the method and body preserved across a redirect). Aurora
+doesn't implement that preservation yet — this is a deliberate first-cut
+simplification, not an oversight, and easy to add later without disturbing
+anything here: it would only mean threading `method`/`body` through one
+more hop of `fetch_one()`'s loop instead of hard-resetting to GET at hop 1.
+
+Two small pieces, both inside `user/httpsget.c`:
+
+- **`build_request()`** grew a `method` parameter (previously hardcoded to
+  `"GET"`) and optional `body`/`bodylen` parameters: when present, it
+  writes `Content-Type: application/x-www-form-urlencoded` and
+  `Content-Length: <n>` before the blank line, then the raw body bytes
+  after it, all into the same request buffer as the headers (a POST that
+  size can't legitimately reach is out of scope for a diagnostic CLI, not
+  a general-purpose uploader) — so `fetch_request()` still sends the whole
+  request in the one write it always did.
+- **Buffer sizing**: `POST_BODY_MAX` (4 KiB) caps how large a body this
+  client will ever send, and the request buffer (`REQ_BUF_MAX`) and the
+  outgoing-record scratch buffer (`g_scratch`) are both sized to comfortably
+  hold headers + a full Cookie: line + the largest possible body in one
+  TLS record (`TLS_RECORD_MAX_PLAINTEXT` is 16 KiB, so this never needs to
+  span records). Both are still plain `static` globals — the same
+  discipline 15.10's stack-overflow postmortem established and 15.8
+  already applied proactively to the session-slot array.
+
+Verified two ways:
+- **Host**: the full existing suite (`make crypto-test` through
+  `make cookiejar-test`) passes completely unchanged — the GET path
+  through `build_request()`/`fetch_request()` is byte-identical when
+  `body` is NULL.
+- **QEMU (`tools/post_qemu.py`)**, against a real TLS 1.3 server:
+  `httpsget --post 10.0.2.2 /submit name=alice&age=30` is checked from the
+  *server's* side (not just httpsget's own "sent" log line) — the request
+  really is a `POST`, really carries
+  `Content-Type: application/x-www-form-urlencoded`, a `Content-Length`
+  that matches the real body length, and the exact bytes
+  `name=alice&age=30`. `/submit` then redirects to `/landing`, and that
+  second request arrives as a bodyless `GET` with no `Content-Length` at
+  all, confirming the documented downgrade actually happens on the wire.
+  All 9 checks pass, and the full existing host + QEMU regression suite is
+  unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

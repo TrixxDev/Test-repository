@@ -1,6 +1,15 @@
 /* httpsget — Aurora's userspace HTTPS client (14.0.3b / 14.0.4 in QEMU; 15.2
  * adds redirects; 15.4 adds HTTP keep-alive; 15.8 adds a multi-origin
- * session cache; 15.9 adds cookies; 15.10 adds gzip).
+ * session cache; 15.9 adds cookies; 15.10 adds gzip; 16.1 adds HTTP POST).
+ *
+ * HTTP POST (Phase 16.1, opening the "Web Platform" series that follows
+ * HTTPS v2): `httpsget --post <host> <path> <body> [now_unix]` sends `body`
+ * (a single whitespace-free CLI argument -- Aurora's shell has no quoting)
+ * as application/x-www-form-urlencoded, with an auto-computed
+ * Content-Length. The method/body apply only to the very first request; a
+ * redirect downgrades to a bodyless GET on the next hop, matching legacy
+ * browser behavior for 301/302/303 (RFC 7231's method-and-body-preserving
+ * 307/308 are not yet implemented -- a deliberate first-cut simplification).
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -104,9 +113,16 @@
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
 #define MAX_PATHS     16
 #define FETCH_REUSE_MAX_BODY (64u * 1024u)  /* don't bother draining a response this big just to reuse the connection */
+#define POST_BODY_MAX 4096           /* a diagnostic CLI, not a general uploader (Phase 16.1) */
+#define REQ_BUF_MAX   (2048 + POST_BODY_MAX)  /* headers (incl. a full Cookie: line) + body */
 
 static x509_cert         g_roots[CA_ROOTS_N];
-static uint8_t           g_scratch[4096];
+/* Outgoing-record scratch: sized for REQ_BUF_MAX plaintext plus TLS/AEAD
+ * overhead (record header + auth tag, a few dozen bytes) sealed into one
+ * record -- comfortably under TLS_RECORD_MAX_PLAINTEXT (16 KiB), so a POST
+ * body never needs to span multiple records. Also reused for the handshake
+ * scratch and for raw incoming reads, both far smaller. */
+static uint8_t           g_scratch[REQ_BUF_MAX + 256];
 static uint8_t           g_plain[17000];
 static uint8_t           g_resp[8192];      /* captured response prefix: status + headers + a
                                              * body preview (only ~512 B of body is shown), so a
@@ -235,26 +251,38 @@ static void close_all_slots(void)
     for (int i = 0; i < TLS_SESSION_SLOTS; i++) slot_close(&g_slots[i]);
 }
 
-/* "GET <path> HTTP/1.1\r\nHost: <host>[:<port>]\r\nUser-Agent: ...\r\nConnection:
- * keep-alive\r\n[Cookie: ...\r\n]\r\n" -- the port is included only when it
- * isn't the scheme default. We always ask for keep-alive: it costs nothing
- * (the caller closes the connection itself once it decides not to reuse it
- * -- see reusable()), and asking only on "the requests that need it" would
+static void app_uint(char *d, int *n, unsigned v)
+{
+    char t[10]; int tn = 0;
+    do { t[tn++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (tn > 0) d[(*n)++] = t[--tn];
+}
+
+/* "<method> <path> HTTP/1.1\r\nHost: <host>[:<port>]\r\nUser-Agent: ...\r\n
+ * Connection: keep-alive\r\n[Cookie: ...\r\n][Content-Type: ...\r\nContent-
+ * Length: N\r\n]\r\n[body]" -- the port is included only when it isn't the
+ * scheme default. We always ask for keep-alive: it costs nothing (the
+ * caller closes the connection itself once it decides not to reuse it --
+ * see reusable()), and asking only on "the requests that need it" would
  * require knowing in advance whether a redirect is coming, which we don't.
  * The Cookie header (Phase 15.9) is built fresh per request from whatever's
  * in the jar right now -- host/path/https-scoped, so a redirect to a
- * different origin naturally sends a different (or no) cookie set. */
-static void build_request(char *req, int *rn, const struct url *u, uint64_t now)
+ * different origin naturally sends a different (or no) cookie set.
+ *
+ * `body`/`bodylen` (Phase 16.1) are optional (NULL/0 for a bodyless
+ * request); when present they're sent as application/x-www-form-urlencoded
+ * -- the one body shape this client's CLI can actually construct (a single
+ * whitespace-free token; Aurora's shell has no quoting, see main()). */
+static void build_request(char *req, int *rn, const struct url *u, uint64_t now,
+                          const char *method, const uint8_t *body, int bodylen)
 {
     *rn = 0;
-    app(req, rn, "GET "); app(req, rn, u->path); app(req, rn, " HTTP/1.1\r\nHost: ");
+    app(req, rn, method); req[(*rn)++] = ' '; app(req, rn, u->path); app(req, rn, " HTTP/1.1\r\nHost: ");
     app(req, rn, u->host);
     int defport = u->https ? 443 : 80;
     if (u->port != defport) {
-        char t[8]; int tn = 0; unsigned v = (unsigned)u->port;
-        do { t[tn++] = (char)('0' + v % 10); v /= 10; } while (v);
         req[(*rn)++] = ':';
-        while (tn > 0) req[(*rn)++] = t[--tn];
+        app_uint(req, rn, (unsigned)u->port);
     }
     app(req, rn, "\r\nUser-Agent: Aurora-httpsget/0.3\r\nConnection: keep-alive\r\nAccept-Encoding: gzip\r\n");
 
@@ -265,7 +293,14 @@ static void build_request(char *req, int *rn, const struct url *u, uint64_t now)
         for (int i = 0; i < clen; i++) req[(*rn)++] = cookie_hdr[i];
         app(req, rn, "\r\n");
     }
+    if (body && bodylen > 0) {
+        app(req, rn, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ");
+        app_uint(req, rn, (unsigned)bodylen);
+        app(req, rn, "\r\n");
+    }
     app(req, rn, "\r\n");
+    if (body && bodylen > 0)
+        for (int i = 0; i < bodylen; i++) req[(*rn)++] = (char)body[i];
 }
 
 typedef struct {
@@ -450,25 +485,27 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
     return 0;
 }
 
-/* Send one GET for u->path over `slot`'s ALREADY-OPEN session (caller
- * guarantees same_origin(&slot->origin, u)) and read the response into
- * g_resp / *out. Returns FETCH_OK if a response was obtained (status may be
- * anything, including non-2xx), FETCH_STALE if the write itself failed -- the reused connection
+/* Send one request (`method`, optionally with a body -- Phase 16.1) for
+ * u->path over `slot`'s ALREADY-OPEN session (caller guarantees
+ * same_origin(&slot->origin, u)) and read the response into g_resp / *out.
+ * Returns FETCH_OK if a response was obtained (status may be anything,
+ * including non-2xx), FETCH_STALE if the write itself failed -- the reused connection
  * was already dead; not a bug, Aurora has no non-blocking way to check that
  * up front, see the header comment -- or -1 on any other transport failure
  * (diagnostic already printed, unrecoverable). */
-static int fetch_request(session_slot *slot, const struct url *u, uint64_t now, fetch_result_t *out)
+static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
+                         const char *method, const uint8_t *body, int bodylen, fetch_result_t *out)
 {
     resp_reset();
-    char req[1536]; int rn;
-    build_request(req, &rn, u, now);
+    char req[REQ_BUF_MAX]; int rn;
+    build_request(req, &rn, u, now, method, body, bodylen);
 
     int closed = 0;
     if (slot->origin.https) {
         int sl = tls_conn_send_app(&slot->conn, (const uint8_t*)req, (size_t)rn, g_scratch, sizeof g_scratch);
         if (sl < 0) return FETCH_STALE;
         if (write_all(slot->fd, g_scratch, sl) != 0) return FETCH_STALE;
-        printf("[httpsget] GET %s HTTP/1.1 sent\n", u->path);
+        printf("[httpsget] %s %s HTTP/1.1 sent\n", method, u->path);
 
         for (;;) {
             const uint8_t *rec; size_t rl; int cc;
@@ -499,7 +536,7 @@ static int fetch_request(session_slot *slot, const struct url *u, uint64_t now, 
         https_done: ;
     } else {
         if (write_all(slot->fd, (const uint8_t*)req, rn) != 0) return FETCH_STALE;
-        printf("[httpsget] GET %s HTTP/1.1 sent (plain HTTP)\n", u->path);
+        printf("[httpsget] %s %s HTTP/1.1 sent (plain HTTP)\n", method, u->path);
 
         for (;;) {
             if (resp_done()) break;
@@ -539,22 +576,23 @@ static int fetch_request(session_slot *slot, const struct url *u, uint64_t now, 
 
 /* Find (or bind) `u`'s session-cache slot, reuse its open connection if it
  * has one, reconnect (offering its cached ticket, if any) otherwise, then
- * send one GET and read the response. Returns 0 on a response obtained (fr
- * is filled), -1 on an unrecoverable transport failure (diagnostic already
- * printed, caller should give up). */
-static int fetch(const struct url *u, uint64_t now, fetch_result_t *out)
+ * send one request and read the response. Returns 0 on a response obtained
+ * (fr is filled), -1 on an unrecoverable transport failure (diagnostic
+ * already printed, caller should give up). */
+static int fetch(const struct url *u, uint64_t now, const char *method,
+                 const uint8_t *body, int bodylen, fetch_result_t *out)
 {
     session_slot *slot = slot_find_or_alloc(u);
     if (slot->conn_open) {
         printf("[httpsget] reusing open connection to %s:%d (keep-alive)\n", u->host, u->port);
-        int rc = fetch_request(slot, u, now, out);
+        int rc = fetch_request(slot, u, now, method, body, bodylen, out);
         if (rc == FETCH_OK) return 0;
         if (rc != FETCH_STALE) return -1;
         printf("[httpsget] reused connection to %s:%d was already closed -- reconnecting\n", u->host, u->port);
         slot_close(slot);
     }
     if (fetch_begin(slot, u, now) != 0) return -1;
-    int rc = fetch_request(slot, u, now, out);
+    int rc = fetch_request(slot, u, now, method, body, bodylen, out);
     if (rc == FETCH_OK) return 0;
     if (rc == FETCH_STALE)
         fprintf(2, "[httpsget] connection to %s:%d closed before the request could be sent\n", u->host, u->port);
@@ -564,8 +602,15 @@ static int fetch(const struct url *u, uint64_t now, fetch_result_t *out)
 /* Fetch one top-level path (following redirects, Phase 15.2) and print its
  * result. Returns the final HTTP status (0 if no valid response was ever
  * obtained), or -1 on an unrecoverable transport failure. `label` is printed
- * as a header when there's more than one path in this run. */
-static int fetch_one(const char *host, const char *path, uint64_t now, const char *label)
+ * as a header when there's more than one path in this run.
+ *
+ * `method`/`post_body`/`post_bodylen` (Phase 16.1) apply ONLY to the first
+ * request (hop 0); any redirect downgrades to a bodyless GET on the next
+ * hop -- matching legacy browser behavior for 301/302/303, though not RFC
+ * 7231's method-and-body-preserving 307/308 (a deliberate first-cut
+ * simplification, not yet implemented). */
+static int fetch_one(const char *host, const char *path, uint64_t now, const char *label,
+                     const char *method, const uint8_t *post_body, int post_bodylen)
 {
     struct url u; memset(&u, 0, sizeof u);
     u.https = 1; u.port = 443;
@@ -595,7 +640,10 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
             printf("[httpsget] -- hop %d/%d: %s://%s:%d%s\n", hop, MAX_REDIRECTS,
                    u.https ? "https" : "http", u.host, u.port, u.path);
 
-        if (fetch(&u, now, &fr) != 0) return -1;    /* diagnostic already printed */
+        const char *cur_method = hop == 0 ? method : "GET";
+        const uint8_t *cur_body = hop == 0 ? post_body : 0;
+        int cur_bodylen = hop == 0 ? post_bodylen : 0;
+        if (fetch(&u, now, cur_method, cur_body, cur_bodylen, &fr) != 0) return -1;    /* diagnostic already printed */
         /* Only this response's own slot closes -- a redirect to a different
          * origin (Phase 15.8) leaves every other origin's slot exactly as it
          * was, so a later hop back to one of them can still reuse it. */
@@ -663,15 +711,39 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) { fprintf(2, "usage: httpsget <host> <path> [path...] [now_unix]\n"); return 1; }
-    const char *host = argv[1];
+    const char *usage = "usage: httpsget <host> <path> [path...] [now_unix]\n"
+                        "       httpsget --post <host> <path> <body> [now_unix]\n";
+    const char *method = "GET";
+    const uint8_t *post_body = 0;
+    int post_bodylen = 0;
+    int argi = 1;
+
+    if (argc >= 2 && strcmp(argv[1], "--post") == 0) { method = "POST"; argi = 2; }
+    if (argc < argi + 1) { fprintf(2, "%s", usage); return 1; }
+    const char *host = argv[argi++];
     const char *paths[MAX_PATHS]; int npaths = 0;
     uint64_t now = HTTPSGET_NOW;
-    for (int i = 2; i < argc; i++) {
-        if (argv[i][0] == '/') { if (npaths < MAX_PATHS) paths[npaths++] = argv[i]; }
-        else now = (uint64_t)parse_ul(argv[i]);
+
+    if (method[0] == 'P') {
+        /* --post: exactly one path and one body token -- Aurora's shell has
+         * no quoting (see build_request()'s doc comment), so the body is
+         * whatever single whitespace-free argument follows the path,
+         * typically an application/x-www-form-urlencoded string. */
+        if (argi >= argc || argv[argi][0] != '/') { fprintf(2, "%s", usage); return 1; }
+        paths[0] = argv[argi++]; npaths = 1;
+        if (argi >= argc) { fprintf(2, "%s", usage); return 1; }
+        post_body = (const uint8_t*)argv[argi];
+        post_bodylen = (int)strlen(argv[argi]);
+        if (post_bodylen > POST_BODY_MAX) { fprintf(2, "httpsget: body too large (max %d bytes)\n", POST_BODY_MAX); return 1; }
+        argi++;
+        if (argi < argc) now = (uint64_t)parse_ul(argv[argi]);
+    } else {
+        for (int i = argi; i < argc; i++) {
+            if (argv[i][0] == '/') { if (npaths < MAX_PATHS) paths[npaths++] = argv[i]; }
+            else now = (uint64_t)parse_ul(argv[i]);
+        }
+        if (npaths == 0) { paths[0] = "/"; npaths = 1; }
     }
-    if (npaths == 0) { paths[0] = "/"; npaths = 1; }
 
     cookie_jar_init(&g_cookies);
 
@@ -681,13 +753,15 @@ int main(int argc, char **argv)
         }
 
     if (npaths == 1)
-        printf("[httpsget] %s%s  (trust store: %u roots)\n", host, paths[0], (unsigned)CA_ROOTS_N);
+        printf("[httpsget] %s%s%s  (trust store: %u roots)\n", host, paths[0],
+               post_body ? " (POST)" : "", (unsigned)CA_ROOTS_N);
     else
         printf("[httpsget] %d paths from %s  (trust store: %u roots)\n", npaths, host, (unsigned)CA_ROOTS_N);
 
     int last_status = 0;
     for (int pi = 0; pi < npaths; pi++) {
-        int st = fetch_one(host, paths[pi], now, npaths > 1 ? paths[pi] : 0);
+        int st = fetch_one(host, paths[pi], now, npaths > 1 ? paths[pi] : 0,
+                           method, post_body, post_bodylen);
         if (st < 0) { close_all_slots(); return 1; }
         last_status = st;
     }
