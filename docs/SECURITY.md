@@ -76,6 +76,7 @@ Run the vectors: `make crypto-test`.
 | **15.2** | **HTTP redirects** — `user/url.c` (RFC 3986 §5.3 reference resolution) + a per-hop full pipeline restart in `httpsget` (301/302/303/307/308, ≤20 hops, loop guard, scheme/host/port changes) | `make url-test` (31 cases); `tools/redirects_qemu.py`: 3/3 PASS; 14.x.7 regression still 3/3 | ✅ |
 | **15.3** | **DHCP** — `net/dhcp.c` (DISCOVER→OFFER→REQUEST→ACK, T1/T2 renewal) + `net/netcfg.c` (`struct net_config` — the single live IP/mask/gateway/DNS, replacing the scattered `IP_LOCAL`/`IP_GATEWAY`/`IP_DNS` compile-time constants) | `make dhcp-test` (47 cases); `tools/dhcp_qemu.py`: 3/3 PASS (default subnet matches static fallback byte-for-byte, a different subnet is correctly adopted and ARP/ICMP-usable, `nodhcp` opts out); 14.x.7 + 15.2 regressions still 3/3 + 3/3 | ✅ |
 | **15.4** | **HTTP keep-alive** — `httpsget` reuses an open TCP+TLS session across same-origin requests (multi-path CLI + same-origin redirects) when the response says so and has a determinate, bounded length; optimistic reuse with a one-shot reconnect if the kept connection was already dead | `tools/keepalive_qemu.py`: 3/3 PASS (3-path reuse, `Connection: close` forces a fresh handshake, a stale reused connection recovers); 14.x.7 + 15.2 + 15.3 regressions still 3/3 + 3/3 + 3/3 | ✅ |
+| **15.5** | **Trust store: a first real approximation of a browser bundle** — 8 → 21 roots across 9 issuer organizations (Let's Encrypt, DigiCert, Sectigo, Google, GlobalSign, Amazon, Microsoft, Entrust), generated from `tools/trust_roots/*.pem` by `tools/gen_ca_roots.py` instead of hand-edited | `make ca-roots-test` (parse + coverage floor + a real GTS Root R1 → GTS CA 1C3 signature check on CA-published DER); QEMU: 21/21 parse with no failure; 14.x.7 + 15.2 + 15.3 + 15.4 regressions still 3/3 + 3/3 + 3/3 + 3/3 | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1633,6 +1634,75 @@ behind the certs' validity window, failing with "leaf not yet valid" — a
 timing artifact of the *harness*, not a regression. Both scripts now pass
 the live clock as httpsget's optional numeric override instead of relying
 on the default.)
+
+## Step 15.5 — trust store: toward a real browser-bundle approximation
+
+15.1 added 3 ECDSA roots for a total of 8. 15.5's target is different in kind,
+not just size: go from "a curated handful" to "a first real approximation of
+what a browser ships" — the ~20-40 root organizations that between them issue
+most of the certificates the web actually uses — while explicitly not chasing
+Mozilla's full multi-hundred-root bundle, CRL/OCSP revocation, or trust
+policies (constraints, not a browser). The store grew from 8 roots (5 issuer
+orgs: Let's Encrypt, DigiCert, Sectigo, Google) to **21 roots across 9 issuer
+orgs**, adding GlobalSign, Amazon Trust Services, Microsoft, and Entrust, plus
+more roots from the orgs already present (DigiCert Global Root G3/Trusted
+Root G4/High Assurance EV, GTS already had 4). Every new root was fetched
+directly from its issuer's own certificate repository (`cacerts.digicert.com`,
+`secure.globalsign.com`, `amazontrust.com`, `microsoft.com/pkiops`,
+`files.entrust.com`) — the same standard this project held itself to for the
+original 8, never a third-party bundle.
+
+Two new pieces:
+
+- **`tools/gen_ca_roots.py`** — the trust store stopped being a hand-edited
+  byte array. The generator reads every PEM in `tools/trust_roots/` (the 8
+  original roots are re-derived from the old `user/ca_roots.h`'s exact bytes,
+  now checked in as PEM instead of only existing as an opaque C array — see
+  the byte-identity proof below), rejects anything that isn't self-issued,
+  isn't `basicConstraints CA:TRUE`, or isn't RSA/ECDSA-P256/ECDSA-P384 (the
+  only public-key types Aurora's crypto stack implements — a P-521 or Ed25519
+  root would be silently useless as a trust anchor, so it's refused outright
+  rather than included), and writes `user/ca_roots.h` in the exact format the
+  file already used. Updating the store is now: drop a new cert's PEM into
+  `tools/trust_roots/`, re-run the script, commit the diff — the same
+  generated-source pattern `kernel/embedded_user.c` already established, not
+  a new idea.
+- **`tools/ca_roots_test.c`** (`make ca-roots-test`) — parses every root with
+  Aurora's own x509 parser, reports the RSA/EC P-256/EC P-384 breakdown, and
+  self-verifies each one with Aurora's own crypto against its own real
+  production DER (the 15.1 proof technique, now covering the whole store: 14
+  of 21 verify OK, 7 report `UNSUPPORTED` for a legacy SHA-1 or unimplemented
+  RSA-hash self-signature — pre-existing, irrelevant to trust, since
+  `x509_verify_chain` never checks a root's own signature). A coverage floor
+  (≥20 roots, ≥10 RSA, ≥1 EC P-256, ≥5 EC P-384) catches a future update that
+  silently drops a whole key-type family. It also checks one **real chain
+  link**: `GTS CA 1C3`, Google's actual production intermediate (fetched from
+  `https://pki.goog/repo/certs/gts1c3.pem`), genuinely signed by `GTS Root
+  R1` — verified with `x509_verify_signature` against the root's real public
+  key, not a synthetic vector. A live leaf certificate from a real site
+  (github.com, cloudflare.com, ...) turned out not to be capturable from this
+  sandbox: its outbound HTTPS is intercepted by a TLS-inspecting egress proxy
+  (the same one `tls-live-test`'s `AURORA_TRUST_PEM` already works around), so
+  `openssl s_client -showcerts` against a real site shows the *proxy's*
+  certificate, not the origin's. A CA's own published intermediate is the
+  closest available substitute: still real, CA-issued, independently-keyed
+  material, fetched the same trustworthy way the roots themselves were.
+
+Verified:
+- **Host (`make ca-roots-test`)**: all of the above — 21/21 parse, the
+  RSA/EC breakdown and coverage floor, self-signature checks, and the real
+  GTS Root R1 → GTS CA 1C3 link. All pass.
+- **Byte-identity for the original 8**: before committing, every one of the
+  8 pre-15.5 roots' DER was diffed byte-for-byte between the old hand-written
+  `user/ca_roots.h` and the newly generated one (PEM round-tripped through
+  `tools/trust_roots/`) — all 8 matched exactly, so 15.5 is additive: nothing
+  that worked before changes.
+- **QEMU**: booting Aurora and running `httpsget` prints
+  `(trust store: 21 roots)` with no parse failure inside the real
+  freestanding i686 environment. The 14.x.7, 15.2, 15.3 and 15.4 QEMU
+  regressions (RSA/P-256/P-384 chains, redirects, DHCP, keep-alive) all still
+  pass unchanged — 21 roots is a superset of the 8 those tests' own temporary
+  test-root substitution never even touches.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 
