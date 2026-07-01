@@ -70,11 +70,12 @@ TLS_U_SRC := crypto/sha256.c crypto/sha384.c crypto/hmac_sha256.c crypto/hkdf.c 
              crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c \
              tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c \
              tls/handshake.c tls/client.c tls/conn.c tls/cert.c tls/trace.c tls/driver.c \
-             x509/asn1.c x509/x509.c x509/verify_cert.c
+             x509/asn1.c x509/x509.c x509/verify_cert.c \
+             compress/crc32.c compress/inflate.c compress/gzip.c
 TLS_U_OBJ := $(TLS_U_SRC:.c=.tlsu.o)
 
 %.tlsu.o: %.c
-	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -c $< -o $@
+	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -Icompress -c $< -o $@
 
 user/crt0.o: user/crt0.S
 	$(CC) --target=$(TARGET) -m32 -ffreestanding -Iinclude -c user/crt0.S -o $@
@@ -132,7 +133,7 @@ user/url.o: user/url.c user/url.h
 	$(CC) $(UCFLAGS) -c user/url.c -o user/url.o
 
 user/httpsget.elf: user/httpsget.c user/url.o user/ca_roots.h user/libc.h user/crt0.o $(LIBC_OBJ) $(TLS_U_OBJ) user/user.ld
-	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -c user/httpsget.c -o user/httpsget.o
+	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -Icompress -c user/httpsget.c -o user/httpsget.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/httpsget.o user/url.o $(TLS_U_OBJ) $(LIBC_OBJ) -o $@
 
 $(EMBEDDED): user/init.elf tools/bin2c.py
@@ -228,6 +229,24 @@ tls-test:
 tls-trace-test:
 	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_trace_test.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/cert.c tls/client.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/x25519.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/bignum.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_tls_trace_test
 	/tmp/aurora_tls_trace_test
+
+# Host-side CRC-32 test (compress/ layer: gzip's trailer checksum).
+.PHONY: crc32-test
+crc32-test:
+	$(CC) -O2 -Icompress tools/crc32_test.c compress/crc32.c -o /tmp/aurora_crc32_test
+	/tmp/aurora_crc32_test
+
+# Host-side DEFLATE test (compress/ layer: RFC 1951 decompression).
+.PHONY: inflate-test
+inflate-test:
+	$(CC) -O2 -Icompress tools/inflate_test.c compress/inflate.c -o /tmp/aurora_inflate_test
+	/tmp/aurora_inflate_test
+
+# Host-side gzip container test (compress/ layer: RFC 1952 wrapping RFC 1951).
+.PHONY: gzip-test
+gzip-test:
+	$(CC) -O2 -Icompress tools/gzip_test.c compress/gzip.c compress/inflate.c compress/crc32.c -o /tmp/aurora_gzip_test
+	/tmp/aurora_gzip_test
 
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
 .PHONY: x509-test

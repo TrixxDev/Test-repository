@@ -79,6 +79,7 @@ Run the vectors: `make crypto-test`.
 | **15.5** | **Trust store: a first real approximation of a browser bundle** — 8 → 21 roots across 9 issuer organizations (Let's Encrypt, DigiCert, Sectigo, Google, GlobalSign, Amazon, Microsoft, Entrust), generated from `tools/trust_roots/*.pem` by `tools/gen_ca_roots.py` instead of hand-edited | `make ca-roots-test` (parse + coverage floor + a real GTS Root R1 → GTS CA 1C3 signature check on CA-published DER); QEMU: 21/21 parse with no failure; 14.x.7 + 15.2 + 15.3 + 15.4 regressions still 3/3 + 3/3 + 3/3 + 3/3 | ✅ |
 | **15.6** | **DNS cache** — positive (TTL-bounded, clamped) and negative (fixed 10 s) caching in `net/dns.c`, transparent to every existing caller (`tcpsock_connect`, `net_http_get`, `net_selftest`); a cached lookup returns immediately with no network round trip | `make dns-cache-test` (27 cases: name equality, TTL clamping, find/allocate/evict/expire); `tools/dns_cache_qemu.py`: 2/2 PASS against the real SLIRP-forwarded resolver (a repeat query hits the cache; an unresolvable name is negative-cached); 14.x.7 + 15.2 + 15.3 + 15.4 regressions still 3/3 each | ✅ |
 | **15.7** | **TLS 1.3 session resumption** (RFC 8446 §2.2/§4.2.11/§4.6.1) — a cached `NewSessionTicket` (PSK + lifetime, keyed by host:port in `httpsget`) offers `pre_shared_key`/`psk_key_exchange_modes` on the next connection to the same origin; a server-accepted PSK skips Certificate/CertificateVerify entirely, with a transparent fallback to a full handshake if the server doesn't select it | `make tls-trace-test` (RFC 8448 §4 PSK/binder/resumption-secret vectors byte-exact, plus a synthetic FSM-level abbreviated-handshake test); `tools/tls_resume_qemu.py` against a real OpenSSL-backed TLS 1.3 server: 1st connection full handshake + ticket cached, 2nd connection resumed — confirmed both client-side (trace) and server-side (`SSL_session_reused`); 14.x.7 + 15.2 + 15.3 + 15.4 regressions unaffected | ✅ |
+| **15.10** | **gzip / DEFLATE decompression** (RFC 1951 + RFC 1952) — a from-scratch, genuinely incremental inflate (`compress/inflate.c`: bit reader, stored/fixed/dynamic Huffman, 32 KiB sliding window) wrapped in a gzip container (`compress/gzip.c`: header/trailer, CRC32/ISIZE verification); `httpsget` sends `Accept-Encoding: gzip` and decompresses a `Content-Encoding: gzip` response as wire bytes arrive, not after buffering the whole compressed body | `make crc32-test` + `make inflate-test` (real raw-deflate streams incl. a 32 KiB+ window wraparound, plus a tiny-chunk/tiny-output-buffer streaming test) + `make gzip-test` (real gzip streams incl. FLG.FNAME, CRC32/ISIZE tamper rejection); `tools/gzip_qemu.py` against a real TLS 1.3 server: the server sees the real `Accept-Encoding: gzip` request header and answers with genuine gzip-compressed bytes, which `httpsget` decompresses to the original readable text inside QEMU; 14.x.7 + 15.2 + 15.3 + 15.4 + 15.7 regressions unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1865,6 +1866,100 @@ Deliberately out of scope, matching what was asked for: 0-RTT early data (no
 meaningfully harder problem than 1-RTT PSK resumption and wasn't part of the
 goal here), a connection pool, a cookie jar, and HTTP compression — later,
 separate features.
+
+## Step 15.10 — gzip / DEFLATE decompression
+
+Every response so far arrived exactly as the server's HTML/JSON/whatever
+actually is, byte for byte — but virtually every real server on the modern
+web sends `Content-Encoding: gzip` by default, shrinking a typical page 3-10x.
+Without decoding it, `httpsget` would either show garbage (the raw compressed
+bytes) or have to ask servers not to compress at all, both worse than doing
+the decompression itself. Unlike 15.7, this needed no existing library to
+lean on — DEFLATE (RFC 1951) and its gzip container (RFC 1952) are built from
+scratch, at the same rigor as the hand-rolled crypto: real compressed streams
+as test vectors, not just self-consistency.
+
+The one requirement worth calling out on its own: decompression had to be
+**genuinely incremental** — a caller feeds compressed bytes as they arrive
+off the wire and pulls decompressed bytes into whatever output buffer it
+currently has room for, so neither the whole compressed input nor the whole
+decompressed output ever has to sit in memory at once. This ruled out the
+obvious shortcut (buffer the whole response, decompress it in one call) and
+meant the DEFLATE state machine has to be resumable at literally every step —
+mid-Huffman-code, mid-back-reference-copy, mid-header-field.
+
+Three new pieces, in `compress/` (a new top-level tree alongside `crypto/`,
+`tls/`, `x509/` — same freestanding discipline: only `<stdint.h>`/
+`<stddef.h>`, no allocation):
+
+- **`compress/crc32.c`** — the reflected CRC-32 gzip's trailer uses to catch
+  corruption, pinned against the standard check value (`CRC32("123456789")
+  == 0xCBF43926`).
+- **`compress/inflate.c`** — the DEFLATE decoder itself (RFC 1951). The
+  canonical-Huffman table construction and bit-at-a-time symbol decode follow
+  the well-known structure of Mark Adler's public-domain `puff.c` (the zlib
+  author's own minimal reference decoder) — but restructured throughout into
+  an explicit state machine (`inflate_mode`) so every step can pause on
+  "need more input" or "output buffer full" and resume exactly where it left
+  off, which a whole-buffer-at-once reference decoder like `puff.c` never
+  needs to do. Stored, fixed-Huffman, and dynamic-Huffman blocks are all
+  supported; LZ77 back-references are resolved through a 32 KiB sliding
+  window that also doubles as the record of everything already delivered to
+  the caller, since a back-reference can point at output produced in an
+  earlier `inflate_feed()` call.
+- **`compress/gzip.c`** — the gzip container format (RFC 1952) wrapping
+  `inflate.c`: the fixed 10-byte header, the optional FEXTRA/FNAME/FCOMMENT/
+  FHCRC fields (parsed and skipped correctly, not just assumed absent), the
+  compressed body, and the CRC32+ISIZE trailer, verified against what was
+  actually decompressed. Just as incremental as `inflate.c` itself — the
+  header, body, and trailer can each arrive split across arbitrarily many
+  `gzip_feed()` calls.
+
+**`httpsget`** sends `Accept-Encoding: gzip` on every request and, when a
+response says `Content-Encoding: gzip`, decompresses it as wire bytes arrive
+in `resp_feed()` — not after buffering the whole compressed body, and not
+only at display time. A response that's *both* chunked and gzip-encoded
+(legal, but rare) falls back to a one-shot dechunk-then-gunzip pass at
+display time instead, since `dechunk()` itself has never been incremental
+either — that narrower combination was never going to be truly streaming
+regardless of what gzip.c can do on its own.
+
+One real bug worth naming, caught immediately by the QEMU acceptance test
+below (a page fault, not a wrong answer, so impossible to miss): the first
+version of the chunked+gzip fallback declared its `gzip_ctx` as a plain
+local variable. `gzip_ctx` embeds `inflate_ctx`'s 32 KiB sliding window, and
+C reserves a function's entire stack frame at entry regardless of which
+branch actually runs — so merely *having* that declaration inside `fetch_
+one()`, even inside a rarely-taken `if`, blew straight through Aurora's
+16 KiB (`USTACK_PAGES = 4`) user stack on the very first call, before any
+networking even happened. Fixed by making it `static`, exactly like the
+sibling scratch buffers right next to it.
+
+Verified two ways:
+- **Host**: `make crc32-test` (the standard check value plus streaming/
+  one-shot equivalence); `make inflate-test` (six real raw-deflate streams
+  from Python's `zlib`, chosen to force every block type at least once,
+  including a 40 KB stream whose back-references force the 32 KiB window to
+  wrap and still resolve correctly, plus a corrupted-stream rejection check
+  and a dedicated streaming test feeding the same bytes through 1-3-byte
+  input chunks and a 7-byte output buffer — proving the incremental design
+  is real, not buffer-then-decompress in disguise); `make gzip-test` (four
+  real gzip streams from Python's `gzip` module, including one with
+  `FLG.FNAME` set, plus bad-magic/bad-CM/tampered-CRC32 rejection checks and
+  its own chunk-boundary streaming test). All constants in these three test
+  files were generated and written directly into place by a Python script —
+  a multi-hundred-byte array is exactly the kind of thing that's easy to
+  mistype by hand and see the resulting failure blamed on the decoder
+  instead, which happened twice while drafting these vectors before this
+  discipline was applied.
+- **QEMU (`tools/gzip_qemu.py`)**, against a real TLS 1.3 server (Python's
+  `ssl` module): the server inspects the *actual* incoming request for
+  `Accept-Encoding: gzip` (proving `httpsget` really sent it) and answers
+  with genuinely gzip-compressed bytes; `httpsget` decompresses them to the
+  original readable text, reporting the *decompressed* byte count, not the
+  wire size. A second, uncompressed control response on the same run
+  confirms the plain path still works unchanged. All 6 checks pass, and the
+  14.x.7, 15.2, 15.3, 15.4 and 15.7 QEMU regressions are unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

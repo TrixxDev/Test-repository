@@ -123,6 +123,8 @@ int http_parse(const char *buf, int len, struct http_response *out)
                 if (ci_contains(buf + v, vlen, "keep-alive")) conn_keepalive = 1;
             } else if (ci_starts(buf + p, linelen, "transfer-encoding:")) {
                 if (ci_contains(buf + v, vlen, "chunked")) out->chunked = 1;
+            } else if (ci_starts(buf + p, linelen, "content-encoding:")) {
+                if (ci_contains(buf + v, vlen, "gzip")) out->gzip = 1;
             }
         }
         p = (e < len) ? e + 1 : len;

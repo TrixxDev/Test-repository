@@ -1,11 +1,20 @@
 /* httpsget — Aurora's userspace HTTPS client (14.0.3b / 14.0.4 in QEMU; 15.2
- * adds redirects; 15.4 adds HTTP keep-alive).
+ * adds redirects; 15.4 adds HTTP keep-alive; 15.10 adds gzip).
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
  * fetching a real web page. Deliberately dumb and diagnostic — no cookies, no
- * compression, no HTTP/2, no pipelining, no connection pool (one connection at
- * a time, requests always fully sequential).
+ * HTTP/2, no pipelining, no connection pool (one connection at a time,
+ * requests always fully sequential).
+ *
+ * gzip (Phase 15.10): every request asks for "Accept-Encoding: gzip". A
+ * "Content-Encoding: gzip" response (and not also chunked -- see below) is
+ * decompressed genuinely incrementally, in resp_feed(), as each new chunk of
+ * wire bytes arrives -- never the whole compressed body at once. A response
+ * that's BOTH chunked and gzip-encoded (legal, but rare in practice) falls
+ * back to the pre-existing non-streaming dechunk() pass followed by a single
+ * one-shot gzip_feed() over the result, at display time -- the same
+ * non-streaming shape dechunk() itself has always had.
  *
  *   usage: httpsget <host> <path> [path...] [now_unix]   (default path "/", port 443)
  *   e.g.   httpsget github.com /
@@ -56,6 +65,7 @@
 #include "ca_roots.h"
 #include "url.h"
 #include "http.h"
+#include "gzip.h"
 
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
@@ -199,7 +209,7 @@ static void build_request(char *req, int *rn, const struct url *u)
         req[(*rn)++] = ':';
         while (tn > 0) req[(*rn)++] = t[--tn];
     }
-    app(req, rn, "\r\nUser-Agent: Aurora-httpsget/0.3\r\nConnection: keep-alive\r\n\r\n");
+    app(req, rn, "\r\nUser-Agent: Aurora-httpsget/0.3\r\nConnection: keep-alive\r\nAccept-Encoding: gzip\r\n\r\n");
 }
 
 typedef struct {
@@ -217,15 +227,50 @@ typedef struct {
 static int  g_rlen, g_total, g_hdrs_done, g_target;
 static struct http_response g_hr;
 
+/* Decompressed body preview (Phase 15.10), filled incrementally by
+ * feed_gzip() as raw (compressed) body bytes arrive -- g_resp only ever
+ * holds the *wire* bytes (headers, and compressed body for a gzip
+ * response), so this is the only place the actual page content lands when
+ * Content-Encoding: gzip is in play. */
+#define GZIP_BODY_PREVIEW (4u * 1024u)
+static uint8_t  g_body[GZIP_BODY_PREVIEW];
+static int      g_body_len;
+static gzip_ctx g_gz;
+static int      g_gz_active;    /* a gzip decode is in progress for the current response */
+
 static void resp_reset(void)
 {
     g_rlen = 0; g_total = 0; g_hdrs_done = 0; g_target = -1;
     memset(&g_hr, 0, sizeof g_hr);
+    g_body_len = 0;
+    g_gz_active = 0;
+}
+
+/* Feed newly-arrived (compressed) body bytes through the incremental gzip
+ * decoder, appending whatever decompresses out of them into g_body up to
+ * its cap. A malformed stream, or reaching the cap, just stops decoding
+ * early (same "preview, not the whole thing" spirit as g_resp's own cap) --
+ * never fatal to the fetch itself. */
+static void feed_gzip(const uint8_t *data, int n)
+{
+    if (!g_gz_active || n <= 0) return;
+    size_t pos = 0;
+    while (pos < (size_t)n && g_body_len < (int)sizeof g_body) {
+        size_t in_used, out_len; int done;
+        int rc = gzip_feed(&g_gz, data + pos, (size_t)n - pos,
+                           g_body + g_body_len, sizeof g_body - (size_t)g_body_len,
+                           &in_used, &out_len, &done);
+        g_body_len += (int)out_len;
+        pos += in_used;
+        if (rc != 0 || done) { g_gz_active = 0; break; }
+        if (in_used == 0 && out_len == 0) break;   /* no progress possible right now */
+    }
 }
 
 static void resp_feed(const uint8_t *data, int n)
 {
     if (n <= 0) return;
+    int total_before = g_total;
     g_total += n;
     if (g_rlen < (int)sizeof g_resp) {
         int c = (g_rlen + n <= (int)sizeof g_resp) ? n : (int)sizeof g_resp - g_rlen;
@@ -239,7 +284,25 @@ static void resp_feed(const uint8_t *data, int n)
             http_parse((const char*)g_resp, g_rlen, &g_hr);
             if (reusable(&g_hr))
                 g_target = g_hr.header_len + g_hr.content_length;   /* drain exactly to the boundary */
+            if (g_hr.gzip && !g_hr.chunked) {
+                /* Genuinely incremental decoding only covers the common
+                 * gzip-without-chunking case; chunked+gzip together falls
+                 * back to a one-shot pass at display time (fetch_one()) --
+                 * dechunk() itself isn't incremental either, so that
+                 * combination was never going to be truly streaming. */
+                gzip_init(&g_gz);
+                g_gz_active = 1;
+                /* `he` is a position in the same byte numbering as
+                 * total_before: headers are always far under g_resp's cap,
+                 * so g_total cannot yet have outrun what's captured there. */
+                int hdr_bytes_here = he - total_before;
+                if (hdr_bytes_here < 0) hdr_bytes_here = 0;
+                if (hdr_bytes_here > n) hdr_bytes_here = n;
+                feed_gzip(data + hdr_bytes_here, n - hdr_bytes_here);
+            }
         }
+    } else if (g_gz_active) {
+        feed_gzip(data, n);
     }
 }
 
@@ -482,11 +545,28 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
             int e = 0; while (e < fr.rlen && g_resp[e] != '\r' && g_resp[e] != '\n') e++;
             g_resp[e < (int)sizeof g_resp ? e : (int)sizeof g_resp - 1] = 0;
             printf("%s\n", (char*)g_resp);
-            /* body preview */
+            /* body preview -- decompressed already (in g_body) if this was a
+             * plain gzip response; chunked+gzip together (rare) gets a one-
+             * shot dechunk-then-gunzip pass here instead, since dechunk()
+             * itself was never incremental either. */
             if (hbe > 0 && hbe <= fr.rlen) {
                 static uint8_t body[8192]; int blen;
-                if (fr.hr.chunked) blen = dechunk(g_resp + hbe, fr.rlen - hbe, body, (int)sizeof body);
-                else { blen = fr.rlen - hbe; if (blen > (int)sizeof body) blen = (int)sizeof body; memcpy(body, g_resp + hbe, blen); }
+                if (fr.hr.gzip && fr.hr.chunked) {
+                    static uint8_t dechunked[8192];
+                    int dlen = dechunk(g_resp + hbe, fr.rlen - hbe, dechunked, (int)sizeof dechunked);
+                    if (dlen < 0) dlen = 0;
+                    static gzip_ctx gz; gzip_init(&gz);
+                    size_t in_used, out_len; int done;
+                    gzip_feed(&gz, dechunked, (size_t)dlen, body, sizeof body, &in_used, &out_len, &done);
+                    blen = (int)out_len;
+                } else if (fr.hr.gzip) {
+                    blen = g_body_len;
+                    memcpy(body, g_body, (size_t)blen);
+                } else if (fr.hr.chunked) {
+                    blen = dechunk(g_resp + hbe, fr.rlen - hbe, body, (int)sizeof body);
+                } else {
+                    blen = fr.rlen - hbe; if (blen > (int)sizeof body) blen = (int)sizeof body; memcpy(body, g_resp + hbe, blen);
+                }
                 int show = blen < 512 ? blen : 512;
                 if (show > 0) { body[show < (int)sizeof body ? show : (int)sizeof body - 1] = 0;
                                 printf("[body %d bytes, first %d]:\n%s\n", blen, show, (char*)body); }

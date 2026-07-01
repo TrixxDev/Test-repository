@@ -13,6 +13,7 @@ struct http_response {
     int  header_len;        /* bytes of status line + headers + the blank line */
     int  http_minor;        /* 0 = HTTP/1.0, 1 = HTTP/1.1 (or unrecognized -> 0) */
     int  chunked;            /* Transfer-Encoding: chunked present              */
+    int  gzip;               /* Content-Encoding: gzip present (Phase 15.10)    */
     int  keep_alive;        /* connection may be reused for another request:
                               * wants keep-alive (HTTP/1.1 default, or an
                               * explicit "Connection: keep-alive"; never if
