@@ -80,6 +80,7 @@ Run the vectors: `make crypto-test`.
 | **15.6** | **DNS cache** — positive (TTL-bounded, clamped) and negative (fixed 10 s) caching in `net/dns.c`, transparent to every existing caller (`tcpsock_connect`, `net_http_get`, `net_selftest`); a cached lookup returns immediately with no network round trip | `make dns-cache-test` (27 cases: name equality, TTL clamping, find/allocate/evict/expire); `tools/dns_cache_qemu.py`: 2/2 PASS against the real SLIRP-forwarded resolver (a repeat query hits the cache; an unresolvable name is negative-cached); 14.x.7 + 15.2 + 15.3 + 15.4 regressions still 3/3 each | ✅ |
 | **15.7** | **TLS 1.3 session resumption** (RFC 8446 §2.2/§4.2.11/§4.6.1) — a cached `NewSessionTicket` (PSK + lifetime, keyed by host:port in `httpsget`) offers `pre_shared_key`/`psk_key_exchange_modes` on the next connection to the same origin; a server-accepted PSK skips Certificate/CertificateVerify entirely, with a transparent fallback to a full handshake if the server doesn't select it | `make tls-trace-test` (RFC 8448 §4 PSK/binder/resumption-secret vectors byte-exact, plus a synthetic FSM-level abbreviated-handshake test); `tools/tls_resume_qemu.py` against a real OpenSSL-backed TLS 1.3 server: 1st connection full handshake + ticket cached, 2nd connection resumed — confirmed both client-side (trace) and server-side (`SSL_session_reused`); 14.x.7 + 15.2 + 15.3 + 15.4 regressions unaffected | ✅ |
 | **15.10** | **gzip / DEFLATE decompression** (RFC 1951 + RFC 1952) — a from-scratch, genuinely incremental inflate (`compress/inflate.c`: bit reader, stored/fixed/dynamic Huffman, 32 KiB sliding window) wrapped in a gzip container (`compress/gzip.c`: header/trailer, CRC32/ISIZE verification); `httpsget` sends `Accept-Encoding: gzip` and decompresses a `Content-Encoding: gzip` response as wire bytes arrive, not after buffering the whole compressed body | `make crc32-test` + `make inflate-test` (real raw-deflate streams incl. a 32 KiB+ window wraparound, plus a tiny-chunk/tiny-output-buffer streaming test) + `make gzip-test` (real gzip streams incl. FLG.FNAME, CRC32/ISIZE tamper rejection); `tools/gzip_qemu.py` against a real TLS 1.3 server: the server sees the real `Accept-Encoding: gzip` request header and answers with genuine gzip-compressed bytes, which `httpsget` decompresses to the original readable text inside QEMU; 14.x.7 + 15.2 + 15.3 + 15.4 + 15.7 regressions unaffected | ✅ |
+| **15.9** | **Cookie jar** (RFC 6265) — a compact, fixed-size (`user/cookiejar.c`, 32 entries, LRU eviction) process-lifetime jar: Domain/Path scoping, Max-Age/Expires (Max-Age wins when both are present), Secure/HttpOnly, deletion via a past/zero expiry, and rejecting a Domain attribute for a host that doesn't control it. `httpsget` parses every `Set-Cookie` on a response and sends a scoped `Cookie:` header on every request | `make cookiejar-test` (30 cases: domain/path matching incl. the no-slash-boundary negative case, Max-Age-vs-Expires precedence, deletion, overwrite-on-same-identity, LRU eviction, Secure/host-only enforcement, unrelated-domain rejection); `tools/cookies_qemu.py` against a real TLS 1.3 server: a session cookie set on one request comes back correctly on later requests in the same run, and a `Path=/admin`-scoped cookie is confirmed both withheld outside its path and included inside it — real RFC 6265 scoping, not "send everything ever seen"; 14.x.7 + 15.2 + 15.3 + 15.4 + 15.7 + 15.10 regressions unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1960,6 +1961,83 @@ Verified two ways:
   wire size. A second, uncompressed control response on the same run
   confirms the plain path still works unchanged. All 6 checks pass, and the
   14.x.7, 15.2, 15.3, 15.4 and 15.7 QEMU regressions are unaffected.
+
+## Step 15.9 — cookie jar
+
+gzip made pages smaller; this makes them actually *work*. Without cookies,
+`httpsget` re-identifies itself as a brand-new visitor on every single
+request — no login can survive a redirect, no consent flow can complete, no
+session can persist across a second path in the same run. Every response's
+`Set-Cookie` headers were simply discarded until now.
+
+**`user/cookiejar.c`** is a compact RFC 6265 implementation — freestanding,
+no libc, no allocation, same discipline as `url.c` — built around a
+fixed-size array of 32 entries with LRU eviction, deliberately not the
+full spec: Domain, Path, Expires, Max-Age, Secure and HttpOnly are
+implemented; SameSite, Priority, Partitioned and the rest are parsed as
+"unknown attribute" and silently ignored, since none of them are load-
+bearing for a plain HTTPS client with no scripting layer to protect.
+
+A few pieces worth calling out:
+
+- **Domain/Path scoping is enforced in both directions.** Setting a cookie
+  with an explicit `Domain` attribute that the request host doesn't
+  domain-match (RFC 6265 §5.1.3) gets the *whole cookie* rejected — a
+  server can't plant a cookie for a domain it doesn't control. Sending one
+  back applies the same domain-match check plus `Path` prefix-matching
+  (§5.1.4, including the "default-path" derivation when `Path` is absent),
+  so a cookie scoped to `/admin` is never sent to `/profile` just because
+  the jar happens to hold it.
+- **Max-Age beats Expires when both are present** (§5.3), and either one
+  landing at or before the current time is treated as a deletion request,
+  not a zero-length lifetime — that's how a server actually asks a client
+  to forget a cookie. `Expires` itself is an HTTP-date, parsed with a
+  tolerant token scan (pull the first bare integer as the day, the first
+  3+ letter word as the month, the next bare integer as the year, HH:MM:SS
+  wherever it appears) rather than a fixed-format parser, so the RFC 1123
+  shape virtually every real server emits parses correctly without
+  demanding exact placement.
+- **LRU, not FIFO, eviction.** When the jar is full, the entry evicted is
+  whichever one hasn't been touched (set *or* sent) most recently — a
+  cookie a page keeps actually using survives even if 31 others were set
+  around the same time and never touched again.
+- **`httpsget` only reads `Set-Cookie` from the wire bytes it already had**
+  (`g_resp`), via a new `http_find_header()` (`user/http.c`) that
+  enumerates every occurrence of a repeatable header — `struct
+  http_response`'s existing single-value fields have no way to represent
+  "however many Set-Cookie headers this response happened to send," and
+  deliberately wasn't grown to try, for a reason the next paragraph makes
+  concrete.
+
+One near-repeat of 15.10's stack lesson, caught before it shipped rather
+than after: the natural-looking place to store parsed cookie data would
+have been inside `struct http_response` itself, alongside `location` and
+`content_type`. But `fetch_result_t` (which embeds a `struct
+http_response` by value) is a *stack-local* in `fetch_one()`, and 15.10 had
+just shown exactly how a plain-looking local variable can blow Aurora's
+16 KiB user stack. Keeping the cookie jar itself as a `static` global (like
+the session-ticket cache) and reading `Set-Cookie` straight out of the
+already-captured `g_resp` sidesteps the whole risk rather than budgeting
+around it.
+
+Verified two ways:
+- **Host (`make cookiejar-test`)**: 30 cases spanning domain-match (exact,
+  parent, sibling subdomain, leading-dot normalization, and rejecting an
+  unrelated host), path-match (prefix with a real slash boundary vs. a
+  bare shared-prefix false positive, and the default-path derivation from
+  several request paths), Max-Age/Expires precedence and deletion,
+  overwrite-on-same-(name,domain,path), Secure withholding over plain
+  HTTP, and LRU eviction (filling all 32 slots, touching one, and
+  confirming *that* one survives while the true least-recently-used one is
+  evicted to make room for a new cookie).
+- **QEMU (`tools/cookies_qemu.py`)**, against a real TLS 1.3 server:
+  `/login` sets a `Path=/` session cookie and a `Path=/admin` cookie; the
+  first request carries no cookies at all (the jar starts empty); a later
+  `/profile` request sends the session cookie back but *not* the
+  `/admin`-scoped one, and a later `/admin` request sends both — proving
+  real RFC 6265 scoping, not "resend everything the jar has ever seen." All
+  7 checks pass, and the 14.x.7, 15.2, 15.3, 15.4, 15.7 and 15.10 QEMU
+  regressions are unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

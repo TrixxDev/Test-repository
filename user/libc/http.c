@@ -66,6 +66,36 @@ static int ci_contains(const char *hay, int haylen, const char *needle)
     return 0;
 }
 
+int http_find_header(const char *buf, int len, const char *name, int occurrence,
+                     int *vstart, int *vlen)
+{
+    int p = 0;
+    while (p < len && buf[p] != '\n') p++;       /* skip the status line */
+    p++;
+    int seen = 0;
+    while (p < len) {
+        int e = p;
+        while (e < len && buf[e] != '\n') e++;
+        int end = e;
+        if (end > p && buf[end - 1] == '\r') end--;
+        if (end == p) break;                      /* blank line: headers done */
+
+        int linelen = end - p;
+        if (ci_starts(buf + p, linelen, name)) {
+            if (seen == occurrence) {
+                int name_len = 0; while (name[name_len]) name_len++;
+                int v = p + name_len;
+                while (v < end && buf[v] == ' ') v++;
+                *vstart = v; *vlen = end - v;
+                return 1;
+            }
+            seen++;
+        }
+        p = (e < len) ? e + 1 : len;
+    }
+    return 0;
+}
+
 int http_parse(const char *buf, int len, struct http_response *out)
 {
     memset(out, 0, sizeof(*out));

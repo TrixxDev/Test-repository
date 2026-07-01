@@ -31,6 +31,19 @@ struct http_response {
  * looked like HTTP and `status` is set), -1 otherwise. */
 int http_parse(const char *buf, int len, struct http_response *out);
 
+/* Find the `occurrence`-th (0-based) header line named `name` (case-
+ * insensitive; pass the trailing ':', e.g. "Set-Cookie:") within the
+ * status-line-prefixed header block buf[0..len) -- for headers that may
+ * legitimately repeat (Set-Cookie), which http_parse()'s single-value
+ * struct fields can't represent. On a match, sets the value's start offset
+ * and length (leading spaces trimmed, CRLF excluded) via vstart/vlen and
+ * returns 1;
+ * returns 0 once `occurrence` exceeds the number of matches (including
+ * zero matches) -- a caller enumerates every occurrence by counting up
+ * from 0 until this returns 0. */
+int http_find_header(const char *buf, int len, const char *name, int occurrence,
+                     int *vstart, int *vlen);
+
 /* Fetch "/" from host:80 over HTTP/1.0 into buf, using the INET socket API
  * (socket -> connect -> send -> recv -> close), entirely in user space. Returns
  * bytes received, or <0 (-1 socket, -2 DNS fail, -3 connect fail). */

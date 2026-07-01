@@ -1,11 +1,22 @@
 /* httpsget — Aurora's userspace HTTPS client (14.0.3b / 14.0.4 in QEMU; 15.2
- * adds redirects; 15.4 adds HTTP keep-alive; 15.10 adds gzip).
+ * adds redirects; 15.4 adds HTTP keep-alive; 15.9 adds cookies; 15.10 adds
+ * gzip).
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
- * fetching a real web page. Deliberately dumb and diagnostic — no cookies, no
- * HTTP/2, no pipelining, no connection pool (one connection at a time,
- * requests always fully sequential).
+ * fetching a real web page. Deliberately dumb and diagnostic — no HTTP/2, no
+ * pipelining, no connection pool (one connection at a time, requests always
+ * fully sequential).
+ *
+ * Cookies (Phase 15.9): a compact, process-lifetime jar (user/cookiejar.c,
+ * RFC 6265). Every Set-Cookie header on a response is parsed and stored;
+ * every request sends back whatever matches its host/path (and, for a
+ * Secure cookie, only over https) as a single "Cookie:" header. This is what
+ * lets a page keep a session across a redirect or a second path in the same
+ * run -- without it, a login/consent flow or anything session-based simply
+ * can't work. SameSite/Priority/Partitioned and other newer attributes are
+ * parsed as "unknown" and silently ignored, matching the jar's own stated
+ * scope (see cookiejar.h).
  *
  * gzip (Phase 15.10): every request asks for "Accept-Encoding: gzip". A
  * "Content-Encoding: gzip" response (and not also chunked -- see below) is
@@ -66,6 +77,7 @@
 #include "url.h"
 #include "http.h"
 #include "gzip.h"
+#include "cookiejar.h"
 
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
@@ -85,6 +97,8 @@ static struct url        g_visited[MAX_REDIRECTS + 1];
 
 static int        g_open;      /* is a TCP[+TLS] session currently open */
 static struct url g_session;   /* which host:port:scheme it's bound to, if g_open */
+
+static cookie_jar g_cookies;   /* process-lifetime (Phase 15.9) */
 
 static int xport_read(void *ctx, uint8_t *buf, size_t cap)  { (void)ctx; return read(g_fd, buf, (int)cap); }
 static int xport_write(void *ctx, const uint8_t *buf, size_t len) { (void)ctx; return write(g_fd, buf, (int)len); }
@@ -192,12 +206,15 @@ static const tls_session_ticket *ticket_lookup(const struct url *u, uint64_t now
 }
 
 /* "GET <path> HTTP/1.1\r\nHost: <host>[:<port>]\r\nUser-Agent: ...\r\nConnection:
- * keep-alive\r\n\r\n" -- the port is included only when it isn't the scheme
- * default. We always ask for keep-alive: it costs nothing (the caller closes
- * the connection itself once it decides not to reuse it -- see reusable()),
- * and asking only on "the requests that need it" would require knowing in
- * advance whether a redirect is coming, which we don't. */
-static void build_request(char *req, int *rn, const struct url *u)
+ * keep-alive\r\n[Cookie: ...\r\n]\r\n" -- the port is included only when it
+ * isn't the scheme default. We always ask for keep-alive: it costs nothing
+ * (the caller closes the connection itself once it decides not to reuse it
+ * -- see reusable()), and asking only on "the requests that need it" would
+ * require knowing in advance whether a redirect is coming, which we don't.
+ * The Cookie header (Phase 15.9) is built fresh per request from whatever's
+ * in the jar right now -- host/path/https-scoped, so a redirect to a
+ * different origin naturally sends a different (or no) cookie set. */
+static void build_request(char *req, int *rn, const struct url *u, uint64_t now)
 {
     *rn = 0;
     app(req, rn, "GET "); app(req, rn, u->path); app(req, rn, " HTTP/1.1\r\nHost: ");
@@ -209,7 +226,16 @@ static void build_request(char *req, int *rn, const struct url *u)
         req[(*rn)++] = ':';
         while (tn > 0) req[(*rn)++] = t[--tn];
     }
-    app(req, rn, "\r\nUser-Agent: Aurora-httpsget/0.3\r\nConnection: keep-alive\r\nAccept-Encoding: gzip\r\n\r\n");
+    app(req, rn, "\r\nUser-Agent: Aurora-httpsget/0.3\r\nConnection: keep-alive\r\nAccept-Encoding: gzip\r\n");
+
+    char cookie_hdr[512];
+    int clen = cookie_jar_build_header(&g_cookies, u->host, u->path, u->https, now, cookie_hdr, sizeof cookie_hdr);
+    if (clen > 0) {
+        app(req, rn, "Cookie: ");
+        for (int i = 0; i < clen; i++) req[(*rn)++] = cookie_hdr[i];
+        app(req, rn, "\r\n");
+    }
+    app(req, rn, "\r\n");
 }
 
 typedef struct {
@@ -411,8 +437,8 @@ static void fetch_end(void)
 static int fetch_request(const struct url *u, uint64_t now, fetch_result_t *out)
 {
     resp_reset();
-    char req[768]; int rn;
-    build_request(req, &rn, u);
+    char req[1536]; int rn;
+    build_request(req, &rn, u, now);
 
     int closed = 0;
     if (g_session.https) {
@@ -464,6 +490,17 @@ static int fetch_request(const struct url *u, uint64_t now, fetch_result_t *out)
      * "the server answered with nothing" -- treat it the same as a failed
      * write so the caller reconnects instead of reporting a bogus response. */
     if (closed && g_total == 0) return FETCH_STALE;
+
+    if (g_hdrs_done) {
+        for (int occ = 0; ; occ++) {
+            int vs, vl;
+            if (!http_find_header((const char*)g_resp, g_hr.header_len, "Set-Cookie:", occ, &vs, &vl)) break;
+            cookie_jar_set(&g_cookies, (const char*)g_resp + vs, vl, u->host, u->path, u->https, now);
+            char preview[80]; int pn = vl < (int)sizeof(preview) - 1 ? vl : (int)sizeof(preview) - 1;
+            memcpy(preview, g_resp + vs, (size_t)pn); preview[pn] = 0;
+            printf("[httpsget] cookie stored: %s\n", preview);
+        }
+    }
 
     out->hr    = g_hr;
     out->rlen  = g_rlen;
@@ -603,6 +640,8 @@ int main(int argc, char **argv)
         else now = (uint64_t)parse_ul(argv[i]);
     }
     if (npaths == 0) { paths[0] = "/"; npaths = 1; }
+
+    cookie_jar_init(&g_cookies);
 
     for (unsigned i = 0; i < CA_ROOTS_N; i++)
         if (x509_parse(ca_roots[i].der, ca_roots[i].len, &g_roots[i]) != 0) {
