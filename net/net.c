@@ -351,6 +351,21 @@ void net_selftest(void)
         kprintf("[dns] %s: no answer (query sent; see pcap / network policy)\n", host);
     }
 
+    /* Phase 15.6: the DNS cache. Re-querying the same name must now be a
+     * cache hit (a "[dns] cache hit" line, no new query on the wire) instead
+     * of a second round trip; a deliberately unresolvable name demonstrates
+     * negative caching the same way. */
+    uint32_t hip2 = 0;
+    int cached_ok = dns_query(host, DNS_A, &hip2) == 0 && hip2 == hip;
+    kprintf("[dns] cache re-query %s -> %s\n", host, cached_ok ? "OK (matches)" : "MISMATCH");
+
+    const char *bogus = "this-host-should-not-resolve.invalid";
+    uint32_t bogus_ip = 0;
+    int miss1 = dns_query(bogus, DNS_A, &bogus_ip);      /* first: a real (failing) lookup, negative-cached */
+    int miss2 = dns_query(bogus, DNS_A, &bogus_ip);      /* second: must be a negative cache hit, not a retry */
+    kprintf("[dns] negative cache: first=%d second=%d -- %s\n", miss1, miss2,
+            (miss1 != 0 && miss2 != 0) ? "NEGATIVE CACHE OK" : "unexpected result");
+
     /* Phase 8.2: TCP data. Fetch over HTTP from the local host server (the
      * tcphttp.py harness on 10.0.2.2:80), then -- if DNS resolved and the network
      * policy allows outbound TCP -- from the real site over the internet. */

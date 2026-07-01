@@ -77,6 +77,7 @@ Run the vectors: `make crypto-test`.
 | **15.3** | **DHCP** — `net/dhcp.c` (DISCOVER→OFFER→REQUEST→ACK, T1/T2 renewal) + `net/netcfg.c` (`struct net_config` — the single live IP/mask/gateway/DNS, replacing the scattered `IP_LOCAL`/`IP_GATEWAY`/`IP_DNS` compile-time constants) | `make dhcp-test` (47 cases); `tools/dhcp_qemu.py`: 3/3 PASS (default subnet matches static fallback byte-for-byte, a different subnet is correctly adopted and ARP/ICMP-usable, `nodhcp` opts out); 14.x.7 + 15.2 regressions still 3/3 + 3/3 | ✅ |
 | **15.4** | **HTTP keep-alive** — `httpsget` reuses an open TCP+TLS session across same-origin requests (multi-path CLI + same-origin redirects) when the response says so and has a determinate, bounded length; optimistic reuse with a one-shot reconnect if the kept connection was already dead | `tools/keepalive_qemu.py`: 3/3 PASS (3-path reuse, `Connection: close` forces a fresh handshake, a stale reused connection recovers); 14.x.7 + 15.2 + 15.3 regressions still 3/3 + 3/3 + 3/3 | ✅ |
 | **15.5** | **Trust store: a first real approximation of a browser bundle** — 8 → 21 roots across 9 issuer organizations (Let's Encrypt, DigiCert, Sectigo, Google, GlobalSign, Amazon, Microsoft, Entrust), generated from `tools/trust_roots/*.pem` by `tools/gen_ca_roots.py` instead of hand-edited | `make ca-roots-test` (parse + coverage floor + a real GTS Root R1 → GTS CA 1C3 signature check on CA-published DER); QEMU: 21/21 parse with no failure; 14.x.7 + 15.2 + 15.3 + 15.4 regressions still 3/3 + 3/3 + 3/3 + 3/3 | ✅ |
+| **15.6** | **DNS cache** — positive (TTL-bounded, clamped) and negative (fixed 10 s) caching in `net/dns.c`, transparent to every existing caller (`tcpsock_connect`, `net_http_get`, `net_selftest`); a cached lookup returns immediately with no network round trip | `make dns-cache-test` (27 cases: name equality, TTL clamping, find/allocate/evict/expire); `tools/dns_cache_qemu.py`: 2/2 PASS against the real SLIRP-forwarded resolver (a repeat query hits the cache; an unresolvable name is negative-cached); 14.x.7 + 15.2 + 15.3 + 15.4 regressions still 3/3 each | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1703,6 +1704,53 @@ Verified:
   regressions (RSA/P-256/P-384 chains, redirects, DHCP, keep-alive) all still
   pass unchanged — 21 roots is a superset of the 8 those tests' own temporary
   test-root substitution never even touches.
+
+## Step 15.6 — DNS cache
+
+Every DNS-driven connection re-resolved the name from scratch: a redirect to
+a different host, or simply running `httpsget` again a moment later, always
+paid for a fresh query + UDP round trip, even for a name just looked up.
+15.6 adds a cache to `net/dns.c` itself, so every existing caller
+(`tcpsock_connect`, `net_http_get`, `net_selftest`) benefits with no changes
+of its own — `dns_query()` checks the cache first and populates it after a
+real query, transparently.
+
+Two kinds of entry, matching what a real resolver does:
+- **Positive** — the resolved address, cached for the answer's own TTL
+  (parsed off the wire; `parse_response()` previously ignored it entirely),
+  clamped to [5 s, 1 h] so neither a near-zero TTL (query storms) nor a huge
+  one (an effectively-permanent stale answer) can happen. A TTL of exactly 0
+  means "do not cache this answer" (RFC 1035) and is honored as such.
+- **Negative** — a failed lookup (timeout, no matching record) is cached too,
+  for a fixed 10 s, so a redirect chain or retry loop touching an unreachable
+  or misspelled host doesn't re-pay the full query timeout on every attempt.
+
+The cache logic itself (`dns_cache_find`/`dns_cache_slot_for`/
+`dns_cache_put_positive`/`dns_cache_put_negative`, plus TTL clamping and
+case-insensitive name comparison per RFC 4343) is pure — parametrized on an
+explicit `now_ms` rather than reading the clock, the same idea 15.3's
+`dhcp_lease_due()` used — so it's host-testable without a network or time
+stub, and eviction is the same lazy-expiry-plus-soonest-to-expire-victim
+policy `net/arp.c`'s cache already established.
+
+Verified two ways:
+- **Host (`make dns-cache-test`)**: 27 cases — name equality, TTL clamping
+  at both bounds, a cache miss on an empty cache, a hit immediately after
+  storing (case-insensitive), lazy expiry exactly at the TTL boundary,
+  negative entries and their (shorter) expiry, and the slot-allocation
+  policy under a full cache: refreshing an existing name reuses its own
+  slot without disturbing others, and a genuinely new name evicts the
+  soonest-to-expire entry.
+- **QEMU (`tools/dns_cache_qemu.py`)**, against the real SLIRP-forwarded
+  resolver (no synthetic DNS server): `net_selftest()` now re-queries
+  "example.com" right after its existing first lookup — the second call
+  logs `[dns] cache hit: example.com -> ...` and returns the identical
+  address, not a second round trip — and queries a deliberately
+  unresolvable name twice, the second logging `[dns] cache hit (negative)`.
+  Both PASS, and the 14.x.7, 15.2, 15.3 and 15.4 QEMU regressions are
+  unaffected (none of them exercise hostname-based DNS resolution; they
+  all target `10.0.2.2` directly as an IP literal, which skips DNS
+  entirely — see `net/tcpsock.c`'s `parse_ipv4` fast path).
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

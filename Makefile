@@ -282,6 +282,14 @@ ca-roots-test:
 	$(CC) -O2 -Ix509 -Icrypto -Iuser tools/ca_roots_test.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/sha384.c crypto/bignum.c crypto/rsa.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_ca_roots_test
 	/tmp/aurora_ca_roots_test
 
+# Host-side DNS cache test (net/dns.c: pure slot find/allocate/populate logic
+# + TTL clamping, Phase 15.6). net/netcfg.c is linked for real (it's pure); the
+# handful of hardware-touching calls are stubbed, same idea as dhcp-test.
+.PHONY: dns-cache-test
+dns-cache-test:
+	$(CC) -O2 -Inet -Iinclude tools/dns_cache_test.c net/dns.c net/netcfg.c -o /tmp/aurora_dns_cache_test
+	/tmp/aurora_dns_cache_test
+
 # Host-side DHCP client test (net/dhcp.c: pure packet build/parse + lease-timer
 # logic, RFC 2131/2132, Phase 15.3). net/netcfg.c is linked for real (it's pure);
 # the handful of hardware-touching calls (udp_*/net_poll/net_now_ms/virtio_net_*/
