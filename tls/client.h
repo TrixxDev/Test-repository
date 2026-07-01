@@ -23,6 +23,7 @@
 #include "key_schedule.h"
 #include "cert.h"
 #include "trace.h"
+#include "session.h"
 
 /* Protocol state — what message we expect next (RFC 8446 §A.1, client view). */
 typedef enum {
@@ -82,9 +83,18 @@ typedef struct {
     uint8_t          leaf_spki[TLS_LEAF_SPKI_MAX];  /* leaf RSAPublicKey, kept for CV */
     size_t           leaf_spki_len;
 
-    int       peer_authenticated;        /* true only after CertificateVerify passes */
+    int       peer_authenticated;        /* true only after CertificateVerify (or a resumed Finished) passes */
     tls_error error;                     /* reason, when state == TLS_ST_ERROR        */
     int       cert_reason;               /* the specific TLS_CERT_* code, when error == TLS_ERR_CERT */
+
+    /* Session resumption (Phase 15.7, RFC 8446 §2.2/§4.2.11/§4.6.1). */
+    const tls_session_ticket *offered_resume;  /* set via tls_client_offer_psk(); NULL = full handshake only */
+    uint64_t offer_now_ms;
+    uint8_t  psk_early_secret[32];             /* valid only if offered_resume != NULL */
+    uint8_t  binder_key[32];                   /* valid only if offered_resume != NULL */
+    int      psk_accepted;                     /* set once the ServerHello is processed */
+    uint8_t  resumption_master_secret[32];     /* set once CONNECTED, for a future ticket's PSK */
+    int      has_resumption_secret;
 
     tls_trace_sink trace;                /* handshake trace sink (NULL = no tracing) */
     void          *trace_ctx;
@@ -104,6 +114,15 @@ void tls_client_set_trust(tls_client *c, const x509_cert *roots, size_t root_cou
 
 /* Install a handshake trace sink (NULL disables tracing). */
 void tls_client_set_trace(tls_client *c, tls_trace_sink fn, void *ctx);
+
+/* Offer a cached session ticket for resumption (Phase 15.7). Call after
+ * tls_client_init() and before tls_client_start(); `resume` must outlive the
+ * handshake. `now_ms` is used for the ticket's obfuscated_ticket_age. If the
+ * server doesn't select this PSK (no pre_shared_key in its ServerHello), the
+ * handshake transparently falls back to a full certificate-based one -- this
+ * is an offer, not a requirement. Pass `resume = NULL` for a full handshake
+ * only (the pre-15.7 behavior, unconditionally). */
+void tls_client_offer_psk(tls_client *c, const tls_session_ticket *resume, uint64_t now_ms);
 
 /* Emit the initial ClientHello (plaintext handshake message) into `out`.
  * Returns its length or -1. START -> WAIT_SH. */

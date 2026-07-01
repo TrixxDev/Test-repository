@@ -78,6 +78,7 @@ Run the vectors: `make crypto-test`.
 | **15.4** | **HTTP keep-alive** — `httpsget` reuses an open TCP+TLS session across same-origin requests (multi-path CLI + same-origin redirects) when the response says so and has a determinate, bounded length; optimistic reuse with a one-shot reconnect if the kept connection was already dead | `tools/keepalive_qemu.py`: 3/3 PASS (3-path reuse, `Connection: close` forces a fresh handshake, a stale reused connection recovers); 14.x.7 + 15.2 + 15.3 regressions still 3/3 + 3/3 + 3/3 | ✅ |
 | **15.5** | **Trust store: a first real approximation of a browser bundle** — 8 → 21 roots across 9 issuer organizations (Let's Encrypt, DigiCert, Sectigo, Google, GlobalSign, Amazon, Microsoft, Entrust), generated from `tools/trust_roots/*.pem` by `tools/gen_ca_roots.py` instead of hand-edited | `make ca-roots-test` (parse + coverage floor + a real GTS Root R1 → GTS CA 1C3 signature check on CA-published DER); QEMU: 21/21 parse with no failure; 14.x.7 + 15.2 + 15.3 + 15.4 regressions still 3/3 + 3/3 + 3/3 + 3/3 | ✅ |
 | **15.6** | **DNS cache** — positive (TTL-bounded, clamped) and negative (fixed 10 s) caching in `net/dns.c`, transparent to every existing caller (`tcpsock_connect`, `net_http_get`, `net_selftest`); a cached lookup returns immediately with no network round trip | `make dns-cache-test` (27 cases: name equality, TTL clamping, find/allocate/evict/expire); `tools/dns_cache_qemu.py`: 2/2 PASS against the real SLIRP-forwarded resolver (a repeat query hits the cache; an unresolvable name is negative-cached); 14.x.7 + 15.2 + 15.3 + 15.4 regressions still 3/3 each | ✅ |
+| **15.7** | **TLS 1.3 session resumption** (RFC 8446 §2.2/§4.2.11/§4.6.1) — a cached `NewSessionTicket` (PSK + lifetime, keyed by host:port in `httpsget`) offers `pre_shared_key`/`psk_key_exchange_modes` on the next connection to the same origin; a server-accepted PSK skips Certificate/CertificateVerify entirely, with a transparent fallback to a full handshake if the server doesn't select it | `make tls-trace-test` (RFC 8448 §4 PSK/binder/resumption-secret vectors byte-exact, plus a synthetic FSM-level abbreviated-handshake test); `tools/tls_resume_qemu.py` against a real OpenSSL-backed TLS 1.3 server: 1st connection full handshake + ticket cached, 2nd connection resumed — confirmed both client-side (trace) and server-side (`SSL_session_reused`); 14.x.7 + 15.2 + 15.3 + 15.4 regressions unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1408,8 +1409,8 @@ store) or a plain HTTP request, then a fresh GET. No TLS session, connection,
 or buffer is reused across hops. This is deliberately the simple option: full
 restart is easier to reason about and to get right than threading session
 state through a scheme/host/port change, and it doesn't foreclose keep-alive
-or session resumption later (15.4/15.5) — those are additive on top of this
-shape, not a rewrite of it.
+or session resumption later (delivered as 15.4 and 15.7 respectively) — those
+are additive on top of this shape, not a rewrite of it.
 
 Two new pieces:
 
@@ -1751,6 +1752,119 @@ Verified two ways:
   unaffected (none of them exercise hostname-based DNS resolution; they
   all target `10.0.2.2` directly as an IP literal, which skips DNS
   entirely — see `net/tcpsock.c`'s `parse_ipv4` fast path).
+
+## Step 15.7 — TLS 1.3 session resumption
+
+Even with 15.4's keep-alive and 15.6's DNS cache, a *new* connection to an
+origin Aurora had already talked to still paid for a full TLS 1.3 handshake:
+a fresh ECDHE exchange, a full certificate chain sent and verified, and a
+CertificateVerify signature checked — the most expensive part of the whole
+stack. 15.7 lets a second connection to the same origin skip all of that,
+the same way a browser does: cache the session ticket the server hands out
+after the first handshake, and offer it as a PSK on the next one.
+
+The key-schedule math (RFC 8446 §7.1) is structurally the same for a
+resumed handshake as a full one — Early Secret → Handshake Secret → Master
+Secret, via the same `Derive-Secret`/`HKDF-Expand-Label` chain — with one
+difference: Early Secret is `HKDF-Extract(0, PSK)` instead of
+`HKDF-Extract(0, 0)`. `tls_key_schedule_derive_from_early()` is the existing
+schedule taking that Early Secret as a parameter; the pre-15.7
+`tls_key_schedule_derive()` becomes a one-line wrapper around it for
+PSK = 0, so every one of its ~12 existing call sites is untouched.
+
+Four new pieces, `tls/session.h`'s `tls_session_ticket` (ticket bytes, PSK,
+lifetime, and when it was obtained) threading through all of them:
+
+- **`tls/key_schedule.c`** — `tls_derive_early_secret()` (PSK or all-zero),
+  `tls_derive_binder_key()`, `tls_derive_resumption_master_secret()` (from
+  `Transcript(ClientHello..client Finished)`, computed once a handshake
+  reaches CONNECTED — RFC 8446 §7.1), and `tls_derive_ticket_psk()` (a
+  ticket's actual PSK, `HKDF-Expand-Label(resumption_master_secret,
+  "resumption", ticket_nonce)` — RFC 8446 §4.6.1).
+- **`tls/handshake.c`** — `tls_build_client_hello()` now optionally appends
+  `psk_key_exchange_modes` (`psk_dhe_ke` only — a resumed connection still
+  does a fresh ECDHE exchange, keeping forward secrecy even under PSK) and
+  `pre_shared_key`, which per RFC 8446 §4.2.11 must be the last extension
+  and carries a **binder**: an HMAC over the entire ClientHello up to but
+  excluding the binders list itself, computed by writing every length field
+  as if the binder were already present, hashing that prefix, then patching
+  the real HMAC in afterward. Getting the exact byte boundary right is a
+  well-known place to go subtly wrong; it was derived here by diffing RFC
+  8448 §4's own 477-byte "prefix" against its 512-byte final ClientHello
+  (exactly 35 bytes apart — the whole binders-list structure, length prefix
+  included) before writing a line of production code.
+  `tls_parse_server_hello()` gained an optional `psk_selected` output (the
+  server's `pre_shared_key` extension carries only a `selected_identity`
+  index; since Aurora only ever offers one identity, its mere presence means
+  "accepted"). `tls_parse_new_session_ticket()` parses the post-handshake
+  `NewSessionTicket` message (RFC 8446 §4.6.1) Aurora previously discarded
+  outright.
+- **`tls/client.c`** (the FSM) — `tls_client_offer_psk()` (called after
+  `tls_client_init`, before `tls_client_start`) computes the PSK-based Early
+  Secret and binder key up front. At `WAIT_SH`, if the server's ServerHello
+  selected the PSK, the FSM sets `psk_accepted` and runs the key schedule
+  from the PSK-based Early Secret instead of the zero one — otherwise it's a
+  silently full handshake (RFC 8446 §4.1.4's fallback rule needs no explicit
+  code: the zero-Early-Secret path *is* the existing full-handshake
+  behavior). The one real branch: at `WAIT_EE`, a resumed handshake jumps
+  straight to `WAIT_FINISHED`, skipping `WAIT_CERT`/`WAIT_CV` — PSK
+  possession, proved by a valid Finished, is itself the authentication (RFC
+  8446 §2.2), so `peer_authenticated` is set there instead of after a
+  CertificateVerify. Once CONNECTED, the resumption master secret is
+  derived and cached on the FSM for whatever ticket arrives next.
+- **`tls/conn.c`** — the post-handshake `NewSessionTicket` case (previously
+  `return TLS_CONN_OK` and nothing else) now parses the ticket, derives its
+  PSK from the FSM's resumption master secret, and stashes it for
+  `tls_conn_take_ticket()` to collect. `tls/` has no clock, so
+  `obtained_ms` comes back 0 from `tls_conn_take_ticket()` — the caller
+  (`httpsget`) stamps its own current time before ever offering the ticket.
+
+**`user/httpsget.c`** ties it together with a small in-process cache (one
+slot per host:port, holding only the most recent ticket): `fetch_begin()`
+offers a cached, unexpired ticket via `tls_conn_offer_psk()` before the
+handshake; the read loop in `fetch_request()` captures any ticket that
+arrives via `tls_conn_take_ticket()`, on any connection. (The lifetime
+check compares in the millisecond domain via multiplication rather than
+dividing `uint64_t` values down to seconds — this is freestanding i686 code
+with no libgcc, and 64-bit division needs `__udivdi3`, which doesn't exist
+here; 64-bit multiplication needs no library call and is fine.) The cache
+lives only for one process's lifetime — there's no persistence across
+separate `httpsget` invocations — so it pays off within a single run that
+touches an origin more than once: a redirect back to an earlier host, or,
+as in the acceptance test below, a `Connection: close` response forcing a
+second connection to the same origin.
+
+Verified two ways:
+- **Host (`make tls-trace-test`)**: RFC 8448 §4's own published PSK, Early
+  Secret, binder key, finished key, binder, and resumption master secret
+  values, checked byte-exact against Aurora's derivation functions (the RFC
+  8448 §4 ClientHello itself is 0-RTT-capable and so can't be byte-replayed
+  against a client that deliberately doesn't implement 0-RTT — see below —
+  but the underlying key-schedule math is identical either way). A second,
+  synthetic FSM-level test then drives an actual resumed handshake through
+  `tls_client_offer_psk()`/`tls_client_start()`/`tls_client_recv_handshake()`
+  using that RFC-verified PSK: the produced ClientHello carries both PSK
+  extensions and a binder that independently re-verifies; a PSK-accepting
+  ServerHello is accepted, `WAIT_CERT`/`WAIT_CV` are skipped entirely, and
+  the handshake reaches CONNECTED with `peer_authenticated` set and a fresh
+  resumption master secret ready for the next ticket.
+- **QEMU (`tools/tls_resume_qemu.py`)**, against a real TLS 1.3 server
+  (Python's `ssl` module, i.e. OpenSSL — not a simulated PSK accept):
+  `httpsget 10.0.2.2 /a /b` forces two separate connections (`/a` answers
+  `Connection: close`), so the first is necessarily a full handshake and the
+  second gets to try resumption using the ticket cached from the first.
+  Confirmed genuinely accepted, not a silent fallback, by two independent
+  witnesses: the client-side trace shows "PSK accepted -- resuming" only on
+  the second connection, and — the authoritative check — the server's own
+  `SSL_session_reused()` (verified beforehand, locally, to read correctly
+  for TLS 1.3 server sockets) reports exactly `[False, True]`. All 8 checks
+  pass, and the 14.x.7, 15.2, 15.3 and 15.4 QEMU regressions are unaffected.
+
+Deliberately out of scope, matching what was asked for: 0-RTT early data (no
+`early_data` extension, no early traffic keys — replay-safety for 0-RTT is a
+meaningfully harder problem than 1-RTT PSK resumption and wasn't part of the
+goal here), a connection pool, a cookie jar, and HTTP compression — later,
+separate features.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

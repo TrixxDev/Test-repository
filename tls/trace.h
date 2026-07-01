@@ -13,7 +13,9 @@
 typedef enum {
     /* milestones, in handshake order */
     TLS_EV_CLIENT_HELLO_SENT = 0,
+    TLS_EV_PSK_OFFERED,          /* ClientHello carried a pre_shared_key extension (15.7) */
     TLS_EV_SERVER_HELLO,
+    TLS_EV_PSK_ACCEPTED,         /* ServerHello selected our PSK: abbreviated handshake (15.7) */
     TLS_EV_HANDSHAKE_KEYS,
     TLS_EV_ENCRYPTED_EXTENSIONS,
     TLS_EV_CERTIFICATE,
@@ -23,6 +25,7 @@ typedef enum {
     TLS_EV_FINISHED_OK,
     TLS_EV_APP_KEYS,
     TLS_EV_CONNECTED,
+    TLS_EV_TICKET_RECEIVED,      /* a post-handshake NewSessionTicket was parsed + cached (15.7) */
     /* failures */
     TLS_EV_FAIL_PROTOCOL,
     TLS_EV_FAIL_CERT,

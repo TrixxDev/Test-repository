@@ -226,7 +226,7 @@ tls-test:
 # tls/ engine and checks every derived value byte-for-byte against the RFC.
 .PHONY: tls-trace-test
 tls-trace-test:
-	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_trace_test.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/cert.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/x25519.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/bignum.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_tls_trace_test
+	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_trace_test.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/cert.c tls/client.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/x25519.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/bignum.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_tls_trace_test
 	/tmp/aurora_tls_trace_test
 
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).

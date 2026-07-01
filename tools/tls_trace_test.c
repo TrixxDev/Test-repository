@@ -24,6 +24,8 @@
 #include "cert.h"
 #include "x509.h"
 #include "x25519.h"
+#include "sha256.h"
+#include "client.h"
 
 /* ---- RFC 8448 §3 values (verbatim) ---- */
 #define RFC_CLIENT_PRIV       "49af42ba7f7994852d713ef2784bcbcaa7911de26adc5642cb634540e7ea5005"
@@ -55,6 +57,24 @@
 #define RFC_SERVER_AP_IV      "cf782b88dd83549aadf1e984"
 #define RFC_CLIENT_AP_KEY     "17422dda596ed5d9acd890e3c63f5051"
 #define RFC_CLIENT_AP_IV      "5b78923dee08579033e523d9"
+
+/* ---- RFC 8448 §4 "Resumed 0-RTT Handshake" values (verbatim) ----
+ * Aurora doesn't implement 0-RTT (no early_data extension, no early traffic
+ * keys -- see docs/SECURITY.md Step 15.7), so this section validates the
+ * PSK/binder/resumption-secret math against the RFC's own published values,
+ * not a byte-for-byte replay of its 0-RTT-capable ClientHello (which
+ * necessarily differs in shape from ours). §3's master secret and
+ * Transcript(CH..client Finished) feed the resumption_master_secret here,
+ * exactly as the RFC's own narrative continues from §3 into §4. */
+#define RFC_RES_PSK              "4ecd0eb6ec3b4d87f5d6028f922ca4c5851a277fd41311c9e62d2c9492e1c4f3"
+#define RFC_RES_EARLY_SECRET     "9b2188e9b2fc6d64d71dc329900e20bb41915000f678aa839cbb797cb7d8332c"
+#define RFC_RES_BINDER_KEY       "69fe131a3bbad5d63c64eebcc30e395b9d8107726a13d074e389dbc8a4e47256"
+#define RFC_RES_FINISHED_KEY     "5588673e72cb59c87d220caffe94f2dea9a3b1609f7d50e90a48227db9ed7eaa"
+#define RFC_RES_PARTIAL_CH_HASH  "63224b2e4573f2d3454ca84b9d009a04f6be9e05711a8396473aefa01e924a14"
+#define RFC_RES_BINDER           "3add4fb2d8fdf822a0ca3cf7678ef5e88dae990141c5924d57bb6fa31b9e5f9d"
+#define RFC_S3_MASTER_SECRET     "18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919"
+#define RFC_S3_THASH_CLIENTFIN   "209145a96ee8e2a122ff810047cc952684658d6049e86429426db87c54ad143d"
+#define RFC_RES_MASTER_SECRET    "7df235f2031d2a051287d02b0241b0bfdaf86cc856231f2d5aba46c434ec196c"
 
 static int failures;
 
@@ -97,6 +117,53 @@ static void check_ok(const char *name, int cond)
 /* declared length of a handshake message: 4-byte header + uint24 body */
 static int hs_msg_len(const uint8_t *m) { return 4 + ((m[1] << 16) | (m[2] << 8) | m[3]); }
 
+/* Does haystack contain needle? (for structural ClientHello checks) */
+static int contains(const uint8_t *hay, size_t hn, const uint8_t *need, size_t nn)
+{
+    if (nn > hn) return 0;
+    for (size_t i = 0; i + nn <= hn; i++) {
+        size_t j = 0; while (j < nn && hay[i+j] == need[j]) j++;
+        if (j == nn) return 1;
+    }
+    return 0;
+}
+
+/* Build a generic handshake message: type | uint24(len) | body. */
+static int build_hs(uint8_t *o, uint8_t type, const uint8_t *body, int blen)
+{
+    o[0] = type; o[1] = 0; o[2] = (uint8_t)(blen >> 8); o[3] = (uint8_t)blen;
+    for (int i = 0; i < blen; i++) o[4 + i] = body[i];
+    return 4 + blen;
+}
+
+/* Minimal PSK-accepting ServerHello: like a normal ServerHello but with an
+ * extra pre_shared_key extension selecting identity 0 -- the signal that
+ * tells the client (and this test) the abbreviated path was taken. */
+static int build_server_hello_psk(uint8_t *o, const uint8_t random[32],
+                                  uint16_t cipher, const uint8_t pub[32])
+{
+    int n = 0;
+    o[n++] = TLS_HS_SERVER_HELLO; o[n++] = 0;
+    int lenpos = n; n += 2;
+    o[n++] = 0x03; o[n++] = 0x03;
+    for (int i=0;i<32;i++) o[n++] = random[i];
+    o[n++] = 32; for (int i=0;i<32;i++) o[n++] = 0;
+    o[n++] = (uint8_t)(cipher>>8); o[n++] = (uint8_t)cipher;
+    o[n++] = 0;
+    int extpos = n; n += 2;
+    o[n++]=0;o[n++]=43; o[n++]=0;o[n++]=2; o[n++]=0x03;o[n++]=0x04;
+    o[n++]=0;o[n++]=51; o[n++]=0;o[n++]=36;
+    o[n++]=0x00;o[n++]=0x1d; o[n++]=0;o[n++]=32; for(int i=0;i<32;i++) o[n++]=pub[i];
+    /* pre_shared_key (41): selected_identity = 0 (uint16) -- presence alone
+     * is what tls_parse_server_hello treats as "our PSK was accepted". */
+    o[n++]=0;o[n++]=41; o[n++]=0;o[n++]=2; o[n++]=0;o[n++]=0;
+    int extlen = n - extpos - 2;
+    o[extpos] = (uint8_t)(extlen>>8); o[extpos+1] = (uint8_t)extlen;
+    int body = n - 4;
+    o[lenpos] = (uint8_t)(body>>8); o[lenpos+1] = (uint8_t)body;
+    return n;
+}
+
 int main(void)
 {
     uint8_t ch[256], sh[128], ee[64], cert[512], cv[160];
@@ -122,7 +189,7 @@ int main(void)
     /* --- ServerHello parsed from the real RFC bytes --- */
     uint16_t suite = 0; uint8_t parsed_pub[32];
     check_ok("ClientHello well-formed (type/length)", ch[0] == TLS_HS_CLIENT_HELLO && hs_msg_len(ch) == chlen);
-    check_ok("ServerHello parses (RFC bytes)", tls_parse_server_hello(sh, shlen, &suite, parsed_pub) == 0);
+    check_ok("ServerHello parses (RFC bytes)", tls_parse_server_hello(sh, shlen, &suite, parsed_pub, 0) == 0);
     check_ok("ServerHello cipher == TLS_AES_128_GCM_SHA256 (0x1301)", suite == 0x1301);
     check("ServerHello key_share == server public key", parsed_pub, 32, RFC_SERVER_PUB);
 
@@ -241,6 +308,127 @@ int main(void)
         check_ok("unimplemented scheme (ed25519) -> UNSUPPORTED",
                  tls_verify_certificate_verify(th, 0x0807, cvsig, cvsiglen,
                      chain.certs[0].spki_key.p, chain.certs[0].spki_key.len) == TLS_CV_UNSUPPORTED);
+    }
+
+    printf("TLS 1.3 RFC 8448 §4 — PSK / binder / resumption-secret math:\n");
+    {
+        /* --- pure key-schedule primitives, checked against the RFC's own §4
+         * published values (same vectors already confirmed in a standalone
+         * scratch harness before this test was wired in) --- */
+        uint8_t psk[32]; unhex(RFC_RES_PSK, psk);
+        uint8_t early[32]; tls_derive_early_secret(early, psk, sizeof psk);
+        check("resumption Early Secret", early, 32, RFC_RES_EARLY_SECRET);
+
+        uint8_t binder_key[32]; tls_derive_binder_key(binder_key, early);
+        check("resumption binder_key = Derive-Secret(Early, \"res binder\", \"\")",
+              binder_key, 32, RFC_RES_BINDER_KEY);
+
+        uint8_t fk[32]; tls_finished_key(fk, binder_key);
+        check("binder finished_key = HKDF-Expand-Label(binder_key, \"finished\")",
+              fk, 32, RFC_RES_FINISHED_KEY);
+
+        uint8_t prefix_hash[32]; unhex(RFC_RES_PARTIAL_CH_HASH, prefix_hash);
+        uint8_t binder[32]; tls_finished_verify_data(binder, fk, prefix_hash);
+        check("PSK binder = HMAC(finished_key, Transcript-Hash(truncated CH))",
+              binder, 32, RFC_RES_BINDER);
+
+        uint8_t ms[32]; unhex(RFC_S3_MASTER_SECRET, ms);
+        uint8_t thash_cf[32]; unhex(RFC_S3_THASH_CLIENTFIN, thash_cf);
+        uint8_t rms[32]; tls_derive_resumption_master_secret(rms, ms, thash_cf);
+        check("resumption_master_secret = Derive-Secret(Master, \"res master\", Transcript(CH..client Fin))",
+              rms, 32, RFC_RES_MASTER_SECRET);
+
+        /* round-trip: a ticket_nonce of {0,0} reproduces the same PSK the
+         * RFC started §4 from, closing the loop ticket -> PSK -> early secret */
+        uint8_t nonce[2] = {0, 0};
+        uint8_t ticket_psk[32]; tls_derive_ticket_psk(ticket_psk, rms, nonce, sizeof nonce);
+        check("ticket_psk = HKDF-Expand-Label(res_master, \"resumption\", nonce) round-trips to the §4 PSK",
+              ticket_psk, 32, RFC_RES_PSK);
+    }
+
+    printf("TLS 1.3 FSM — abbreviated (PSK-resumed) handshake (15.7):\n");
+    {
+        /* Synthetic, not an RFC-8448 byte replay: §4's own ClientHello is
+         * 0-RTT-capable (carries an early_data extension Aurora doesn't
+         * implement), so it cannot byte-match ours. This proves the FSM
+         * wiring instead -- offer, accept, skip Cert/CV, reach CONNECTED --
+         * using the RFC-verified PSK from the section above. */
+        tls_session_ticket resume;
+        unhex(RFC_RES_PSK, resume.psk);
+        resume.lifetime_secs = 7200;
+        resume.age_add = 0xfeedface;
+        resume.obtained_ms = 1000;
+        static const uint8_t tk[] = { 0xaa, 0xbb, 0xcc, 0xdd, 0xee };
+        for (size_t i = 0; i < sizeof tk; i++) resume.ticket[i] = tk[i];
+        resume.ticket_len = sizeof tk;
+
+        uint8_t cpriv[32], spriv[32], crand[32], srand[32];
+        for (int i=0;i<32;i++){ cpriv[i]=(uint8_t)(i+3); spriv[i]=(uint8_t)(0xA0+i);
+                                crand[i]=(uint8_t)(0x11+i); srand[i]=(uint8_t)(0x22+i); }
+        uint8_t spub[32], cpub[32]; x25519_base(spub, spriv); x25519_base(cpub, cpriv);
+
+        tls_client cl; tls_client_init(&cl, "example.com", cpriv, crand);
+        tls_client_offer_psk(&cl, &resume, 4000);
+        uint8_t chb[1024]; int chblen = tls_client_start(&cl, chb, sizeof chb);
+        check_ok("resumed ClientHello built", chblen > 0);
+
+        uint8_t ext45[] = { 0, 45 }, ext41[] = { 0, 41 };
+        check_ok("resumed ClientHello offers psk_key_exchange_modes (45)",
+                 contains(chb, (size_t)chblen, ext45, sizeof ext45));
+        check_ok("resumed ClientHello offers pre_shared_key (41)",
+                 contains(chb, (size_t)chblen, ext41, sizeof ext41));
+        check_ok("resumed ClientHello carries the cached ticket bytes",
+                 contains(chb, (size_t)chblen, tk, sizeof tk));
+
+        /* independently recompute the embedded binder and compare -- proves
+         * tls_build_client_hello's patched-in HMAC is self-consistent, since
+         * an RFC-literal byte match isn't reachable (0-RTT shape mismatch) */
+        uint8_t exp_early[32]; tls_derive_early_secret(exp_early, resume.psk, sizeof resume.psk);
+        uint8_t exp_binder_key[32]; tls_derive_binder_key(exp_binder_key, exp_early);
+        uint8_t exp_fk[32]; tls_finished_key(exp_fk, exp_binder_key);
+        uint8_t exp_prefix_hash[32]; sha256(chb, (size_t)(chblen - 35), exp_prefix_hash);
+        uint8_t exp_binder[32]; tls_finished_verify_data(exp_binder, exp_fk, exp_prefix_hash);
+        char exp_binder_hex[65]; tohex(exp_binder, 32, exp_binder_hex);
+        check("embedded PSK binder matches an independent recomputation",
+              chb + chblen - 32, 32, exp_binder_hex);
+
+        /* --- drive the abbreviated handshake to CONNECTED: a synthetic
+         * loopback "server" that accepts the PSK, mirroring the pattern the
+         * full-handshake FSM tests already use for their server side --- */
+        tls_transcript ts; tls_transcript_init(&ts);
+        tls_transcript_update(&ts, chb, (size_t)chblen);
+        uint8_t shb[256]; int shblen = build_server_hello_psk(shb, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
+        tls_transcript_update(&ts, shb, (size_t)shblen);
+
+        uint8_t hello_hash[32]; tls_transcript_hash(&ts, hello_hash);
+        uint8_t ecdhe[32]; x25519(ecdhe, spriv, cpub);
+        tls_key_schedule kss; tls_key_schedule_derive_from_early(&kss, exp_early, ecdhe, hello_hash);
+
+        uint8_t eeb[64]; int eeblen = build_hs(eeb, TLS_HS_ENCRYPTED_EXTENSIONS, (const uint8_t*)"\x00\x00", 2);
+        tls_transcript_update(&ts, eeb, (size_t)eeblen);
+
+        /* server Finished over Transcript(CH..EE) -- no Certificate/CV in a
+         * resumed handshake (RFC 8446 §2.2) */
+        uint8_t sfk[32], th_ee[32], svd[32], sfin[64];
+        tls_finished_key(sfk, kss.server_hs_traffic);
+        tls_transcript_hash(&ts, th_ee);
+        tls_finished_verify_data(svd, sfk, th_ee);
+        int sfinlen = build_hs(sfin, TLS_HS_FINISHED, svd, 32);
+
+        uint8_t out[64]; size_t outlen;
+        int rc_sh = tls_client_recv_handshake(&cl, shb, (size_t)shblen, out, sizeof out, &outlen);
+        check_ok("PSK ServerHello accepted", rc_sh == 0);
+        check_ok("client recognizes the PSK as accepted", cl.psk_accepted == 1);
+
+        int rc_ee = tls_client_recv_handshake(&cl, eeb, (size_t)eeblen, out, sizeof out, &outlen);
+        check_ok("resumed EncryptedExtensions -> WAIT_FINISHED directly (Cert/CV skipped)",
+                 rc_ee == 0 && cl.state == TLS_ST_WAIT_FINISHED);
+
+        int rc_fin = tls_client_recv_handshake(&cl, sfin, (size_t)sfinlen, out, sizeof out, &outlen);
+        check_ok("resumed Finished accepted -> CONNECTED", rc_fin == 0 && cl.state == TLS_ST_CONNECTED);
+        check_ok("resumed handshake authenticates the peer (PSK possession)", cl.peer_authenticated == 1);
+        check_ok("client emitted its own Finished", out[0] == TLS_HS_FINISHED && outlen == 36);
+        check_ok("a new resumption_master_secret is ready for a future ticket", cl.has_resumption_secret == 1);
     }
 
     printf(failures ? "\nTLS TRACE: %d FAILURE(S)\n" : "\nTLS TRACE: ALL PASS\n", failures);

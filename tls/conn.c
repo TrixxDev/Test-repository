@@ -1,6 +1,7 @@
 /* TLS 1.3 record binding — see conn.h. */
 #include "conn.h"
 #include "key_schedule.h"
+#include "handshake.h"     /* TLS_HS_NEW_SESSION_TICKET, tls_parse_new_session_ticket (15.7) */
 
 /* freestanding byte helpers (no libc, same as the rest of tls/) */
 static void cpy(uint8_t *d, const uint8_t *s, size_t n) { for (size_t i = 0; i < n; i++) d[i] = s[i]; }
@@ -37,6 +38,15 @@ void tls_conn_init(tls_conn *c, const char *server_name,
     c->rx_phase = TLS_PHASE_EARLY;
     c->tx_phase = TLS_PHASE_EARLY;
     c->hs_len = 0;
+    c->has_pending_ticket = 0;
+}
+
+int tls_conn_take_ticket(tls_conn *c, tls_session_ticket *out)
+{
+    if (!c->has_pending_ticket) return 0;
+    *out = c->pending_ticket;
+    c->has_pending_ticket = 0;
+    return 1;
 }
 
 /* Wrap a body in a plaintext TLS record: type | 0x0303 | uint16(len) | body. */
@@ -172,7 +182,28 @@ int tls_conn_recv_app(tls_conn *c, const uint8_t *record, size_t reclen,
     int n = tls_record_open(&c->rx, record, reclen, out, outcap, &inner_type);
     if (n < 0) return TLS_CONN_ERR_RECORD;
     if (inner_type == TLS_CONTENT_ALERT) return TLS_CONN_ERR_ALERT;
-    if (inner_type == TLS_CONTENT_HANDSHAKE) return TLS_CONN_OK;   /* NewSessionTicket: ignored (v1) */
+    if (inner_type == TLS_CONTENT_HANDSHAKE) {
+        /* A post-handshake handshake message: only NewSessionTicket exists in
+         * practice (15.7). Parse it if we can (need the resumption master
+         * secret, which only exists once CONNECTED -- always true here); any
+         * failure (malformed, oversized, not actually a ticket) is silently
+         * ignored, same as the pre-15.7 behavior, since a missed ticket just
+         * means the next connection does a full handshake instead. */
+        if ((size_t)n >= 4 && out[0] == TLS_HS_NEW_SESSION_TICKET && c->fsm.has_resumption_secret) {
+            uint8_t nonce[255]; size_t nonce_len = 0;
+            tls_session_ticket t;
+            t.obtained_ms = 0;   /* tls/ has no clock; the caller must set this
+                                  * after tls_conn_take_ticket() returns, before
+                                  * offering the ticket on a future connection */
+            if (tls_parse_new_session_ticket(out, (size_t)n, &t, nonce, sizeof nonce, &nonce_len) == 0) {
+                tls_derive_ticket_psk(t.psk, c->fsm.resumption_master_secret, nonce, nonce_len);
+                c->pending_ticket = t;
+                c->has_pending_ticket = 1;
+                tls_trace_emit(c->fsm.trace, c->fsm.trace_ctx, TLS_EV_TICKET_RECEIVED, 0);
+            }
+        }
+        return TLS_CONN_OK;
+    }
     if (inner_type != TLS_CONTENT_APPLICATION_DATA) return TLS_CONN_ERR_RECORD;
 
     *out_len = (size_t)n;

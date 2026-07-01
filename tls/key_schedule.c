@@ -36,9 +36,23 @@ void tls_derive_secret(uint8_t out[TLS_SECRET_LEN],
     tls_hkdf_expand_label(out, TLS_SECRET_LEN, secret, label, thash, TLS_SECRET_LEN);
 }
 
-void tls_key_schedule_derive(tls_key_schedule *ks,
-                             const uint8_t ecdhe[TLS_SECRET_LEN],
-                             const uint8_t hello_hash[TLS_SECRET_LEN])
+void tls_derive_early_secret(uint8_t early_secret[TLS_SECRET_LEN],
+                             const uint8_t *psk, size_t psk_len)
+{
+    uint8_t zeros[TLS_SECRET_LEN] = {0};
+    uint8_t ikm[TLS_SECRET_LEN];
+    if (psk && psk_len == TLS_SECRET_LEN) {
+        for (int i = 0; i < TLS_SECRET_LEN; i++) ikm[i] = psk[i];
+    } else {
+        for (int i = 0; i < TLS_SECRET_LEN; i++) ikm[i] = 0;
+    }
+    hkdf_extract(zeros, TLS_SECRET_LEN, ikm, TLS_SECRET_LEN, early_secret);
+}
+
+void tls_key_schedule_derive_from_early(tls_key_schedule *ks,
+                                        const uint8_t early_secret[TLS_SECRET_LEN],
+                                        const uint8_t ecdhe[TLS_SECRET_LEN],
+                                        const uint8_t hello_hash[TLS_SECRET_LEN])
 {
     uint8_t zeros[TLS_SECRET_LEN] = {0};
     uint8_t empty_hash[TLS_SECRET_LEN];
@@ -46,8 +60,7 @@ void tls_key_schedule_derive(tls_key_schedule *ks,
 
     sha256("", 0, empty_hash);                       /* Transcript-Hash("") */
 
-    /* Early Secret = HKDF-Extract(0, PSK=0) */
-    hkdf_extract(zeros, TLS_SECRET_LEN, zeros, TLS_SECRET_LEN, ks->early_secret);
+    for (int i = 0; i < TLS_SECRET_LEN; i++) ks->early_secret[i] = early_secret[i];
 
     /* Handshake Secret = HKDF-Extract(Derive-Secret(Early,"derived",""), ECDHE) */
     tls_derive_secret(derived, ks->early_secret, "derived", empty_hash);
@@ -60,6 +73,38 @@ void tls_key_schedule_derive(tls_key_schedule *ks,
     /* Master Secret = HKDF-Extract(Derive-Secret(Handshake,"derived",""), 0) */
     tls_derive_secret(derived, ks->handshake_secret, "derived", empty_hash);
     hkdf_extract(derived, TLS_SECRET_LEN, zeros, TLS_SECRET_LEN, ks->master_secret);
+}
+
+void tls_key_schedule_derive(tls_key_schedule *ks,
+                             const uint8_t ecdhe[TLS_SECRET_LEN],
+                             const uint8_t hello_hash[TLS_SECRET_LEN])
+{
+    uint8_t early_secret[TLS_SECRET_LEN];
+    tls_derive_early_secret(early_secret, 0, 0);      /* PSK=0: the full-handshake case */
+    tls_key_schedule_derive_from_early(ks, early_secret, ecdhe, hello_hash);
+}
+
+void tls_derive_binder_key(uint8_t binder_key[TLS_SECRET_LEN],
+                           const uint8_t early_secret[TLS_SECRET_LEN])
+{
+    uint8_t empty_hash[TLS_SECRET_LEN];
+    sha256("", 0, empty_hash);
+    tls_derive_secret(binder_key, early_secret, "res binder", empty_hash);
+}
+
+void tls_derive_resumption_master_secret(uint8_t out[TLS_SECRET_LEN],
+                                         const uint8_t master_secret[TLS_SECRET_LEN],
+                                         const uint8_t transcript_hash_cf[TLS_SECRET_LEN])
+{
+    tls_derive_secret(out, master_secret, "res master", transcript_hash_cf);
+}
+
+void tls_derive_ticket_psk(uint8_t psk_out[TLS_SECRET_LEN],
+                           const uint8_t resumption_master_secret[TLS_SECRET_LEN],
+                           const uint8_t *ticket_nonce, size_t nonce_len)
+{
+    tls_hkdf_expand_label(psk_out, TLS_SECRET_LEN, resumption_master_secret,
+                          "resumption", ticket_nonce, nonce_len);
 }
 
 void tls_traffic_keys(const uint8_t traffic_secret[TLS_SECRET_LEN],

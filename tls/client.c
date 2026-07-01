@@ -36,8 +36,24 @@ void tls_client_init(tls_client *c, const char *server_name,
     c->peer_authenticated = 0;
     c->error = TLS_ERR_NONE;
     c->cert_reason = 0;
+
+    c->offered_resume = 0;   /* full handshake until tls_client_offer_psk */
+    c->offer_now_ms = 0;
+    c->psk_accepted = 0;
+    c->has_resumption_secret = 0;
+
     c->trace = 0;
     c->trace_ctx = 0;
+}
+
+void tls_client_offer_psk(tls_client *c, const tls_session_ticket *resume, uint64_t now_ms)
+{
+    c->offered_resume = resume;
+    c->offer_now_ms = now_ms;
+    if (resume) {
+        tls_derive_early_secret(c->psk_early_secret, resume->psk, sizeof resume->psk);
+        tls_derive_binder_key(c->binder_key, c->psk_early_secret);
+    }
 }
 
 void tls_client_set_trust(tls_client *c, const x509_cert *roots, size_t root_count,
@@ -58,11 +74,13 @@ int tls_client_start(tls_client *c, uint8_t *out, size_t cap)
 {
     if (c->state != TLS_ST_START) return fail(c);
     const char *sni = c->server_name[0] ? c->server_name : 0;
-    int n = tls_build_client_hello(out, cap, c->client_random, c->pub, sni);
+    int n = tls_build_client_hello(out, cap, c->client_random, c->pub, sni,
+                                   c->offered_resume, c->offer_now_ms, c->binder_key);
     if (n < 0) return fail(c);
     tls_transcript_update(&c->transcript, out, (size_t)n);   /* CH enters transcript */
     c->state = TLS_ST_WAIT_SH;
     emit(c, TLS_EV_CLIENT_HELLO_SENT, 0);
+    if (c->offered_resume) emit(c, TLS_EV_PSK_OFFERED, 0);
     return n;
 }
 
@@ -85,17 +103,29 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
     switch (c->state) {
     case TLS_ST_WAIT_SH: {
         if (type != TLS_HS_SERVER_HELLO) return fail(c);
-        uint8_t spub[32];
-        if (tls_parse_server_hello(msg, len, &c->cipher_suite, spub) != 0) return fail(c);
+        uint8_t spub[32]; int psk_selected = 0;
+        if (tls_parse_server_hello(msg, len, &c->cipher_suite, spub, &psk_selected) != 0) return fail(c);
         if (c->cipher_suite != TLS_CIPHER_CHACHA20_POLY1305_SHA256) return fail(c);
 
         tls_transcript_update(&c->transcript, msg, len);     /* SH enters transcript */
         emit(c, TLS_EV_SERVER_HELLO, 0);
 
+        /* RFC 8446 §4.1.4: only use the PSK-derived early secret if the
+         * server actually selected it; otherwise this is silently a full
+         * handshake and the early secret reverts to PSK=0, same as always. */
+        c->psk_accepted = c->offered_resume && psk_selected;
+        uint8_t early_secret[32];
+        if (c->psk_accepted) {
+            for (int i = 0; i < 32; i++) early_secret[i] = c->psk_early_secret[i];
+            emit(c, TLS_EV_PSK_ACCEPTED, 0);
+        } else {
+            tls_derive_early_secret(early_secret, 0, 0);
+        }
+
         uint8_t ecdhe[32], hello_hash[32];
         x25519(ecdhe, c->priv, spub);                        /* ECDHE shared secret */
         tls_transcript_hash(&c->transcript, hello_hash);     /* Transcript(CH..SH) */
-        tls_key_schedule_derive(&c->ks, ecdhe, hello_hash);
+        tls_key_schedule_derive_from_early(&c->ks, early_secret, ecdhe, hello_hash);
         tls_finished_key(c->client_hs_finished_key, c->ks.client_hs_traffic);
         tls_finished_key(c->server_hs_finished_key, c->ks.server_hs_traffic);
 
@@ -107,7 +137,9 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
     case TLS_ST_WAIT_EE:
         if (type != TLS_HS_ENCRYPTED_EXTENSIONS) return fail(c);
         tls_transcript_update(&c->transcript, msg, len);     /* not interpreted (v1) */
-        c->state = TLS_ST_WAIT_CERT;
+        /* A resumed (PSK-accepted) handshake skips Certificate/CertificateVerify
+         * entirely -- PSK possession is the authentication (RFC 8446 §2.2). */
+        c->state = c->psk_accepted ? TLS_ST_WAIT_FINISHED : TLS_ST_WAIT_CERT;
         emit(c, TLS_EV_ENCRYPTED_EXTENSIONS, 0);
         return 0;
 
@@ -163,9 +195,15 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
 
         /* server Finished is verified over the transcript BEFORE it is added */
         uint8_t thash[32];
-        tls_transcript_hash(&c->transcript, thash);          /* Transcript(CH..CV) */
+        tls_transcript_hash(&c->transcript, thash);          /* Transcript(CH..CV, or CH..EE if resumed) */
         if (tls_check_finished(c->server_hs_finished_key, thash, msg + 4) != 0) return fail(c);
         emit(c, TLS_EV_FINISHED_OK, 0);
+        if (c->psk_accepted) {
+            /* No CertificateVerify in a resumed handshake (RFC 8446 §2.2) --
+             * a valid Finished IS the proof the server holds the PSK. */
+            c->peer_authenticated = 1;
+            emit(c, TLS_EV_PEER_AUTHENTICATED, 0);
+        }
 
         tls_transcript_update(&c->transcript, msg, len);     /* server Finished added */
 
@@ -183,6 +221,13 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
         if (n < 0) return fail(c);
         tls_transcript_update(&c->transcript, out, (size_t)n);   /* client Finished added */
         *out_len = (size_t)n;
+
+        /* resumption_master_secret, for a future NewSessionTicket's PSK
+         * (RFC 8446 §7.1: Transcript(CH..client Finished), i.e. now). */
+        uint8_t thash_cf[32];
+        tls_transcript_hash(&c->transcript, thash_cf);
+        tls_derive_resumption_master_secret(c->resumption_master_secret, c->ks.master_secret, thash_cf);
+        c->has_resumption_secret = 1;
 
         c->phase = TLS_PHASE_APPLICATION;                    /* key switch anchor */
         c->state = TLS_ST_CONNECTED;

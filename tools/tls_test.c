@@ -599,7 +599,7 @@ int main(void)
 
         /* ClientHello: structurally well-formed, carries our key_share + SNI */
         uint8_t ch[1024];
-        int chlen = tls_build_client_hello(ch, sizeof ch, crand, cpub, "example.com");
+        int chlen = tls_build_client_hello(ch, sizeof ch, crand, cpub, "example.com", 0, 0, 0);
         check_int("ClientHello builds", chlen > 0, 1);
         check_int("ClientHello type == client_hello", ch[0], TLS_HS_CLIENT_HELLO);
         check_int("ClientHello length field consistent",
@@ -612,7 +612,7 @@ int main(void)
         uint8_t sh[256];
         int shlen = build_server_hello(sh, srand, TLS_CIPHER_CHACHA20_POLY1305_SHA256, spub);
         uint16_t suite = 0; uint8_t got_spub[32];
-        check_int("ServerHello parses", tls_parse_server_hello(sh, shlen, &suite, got_spub), 0);
+        check_int("ServerHello parses", tls_parse_server_hello(sh, shlen, &suite, got_spub, 0), 0);
         check_int("negotiated ChaCha20-Poly1305", suite == TLS_CIPHER_CHACHA20_POLY1305_SHA256, 1);
         check_int("server key_share extracted", memcmp(got_spub, spub, 32) == 0, 1);
 

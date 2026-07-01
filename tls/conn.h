@@ -61,6 +61,9 @@ typedef struct {
 
     uint8_t hs_buf[TLS_CONN_HS_BUF];   /* handshake reassembly (coalesce / fragment) */
     size_t  hs_len;
+
+    tls_session_ticket pending_ticket;  /* filled when a NewSessionTicket arrives (15.7) */
+    int                has_pending_ticket;
 } tls_conn;
 
 /* Initialize. `ephemeral_priv` and `client_random` make the whole connection
@@ -69,6 +72,22 @@ typedef struct {
 void tls_conn_init(tls_conn *c, const char *server_name,
                    const uint8_t ephemeral_priv[32],
                    const uint8_t client_random[32]);
+
+/* Offer a cached session ticket for resumption (Phase 15.7) -- see
+ * tls_client_offer_psk(), which this just forwards to. Call after
+ * tls_conn_init() and before tls_conn_start(). */
+static inline void tls_conn_offer_psk(tls_conn *c, const tls_session_ticket *resume, uint64_t now_ms)
+{
+    tls_client_offer_psk(&c->fsm, resume, now_ms);
+}
+
+/* If a NewSessionTicket has arrived and not yet been consumed, fills *out and
+ * returns 1, clearing the pending flag. Returns 0 otherwise. Call this after
+ * tls_conn_recv_app() -- a ticket may ride along with (or instead of) app
+ * data on any read once CONNECTED. tls/ has no clock, so out->obtained_ms
+ * comes back 0 -- the caller must set it (its own current time) before ever
+ * offering this ticket via tls_conn_offer_psk() on a later connection. */
+int tls_conn_take_ticket(tls_conn *c, tls_session_ticket *out);
 
 /* Produce the initial flight: the ClientHello wrapped in a *plaintext* handshake
  * record, written to `out`. Returns the record length or a negative error. */
