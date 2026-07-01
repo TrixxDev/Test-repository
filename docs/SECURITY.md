@@ -83,6 +83,7 @@ Run the vectors: `make crypto-test`.
 | **15.9** | **Cookie jar** (RFC 6265) — a compact, fixed-size (`user/cookiejar.c`, 32 entries, LRU eviction) process-lifetime jar: Domain/Path scoping, Max-Age/Expires (Max-Age wins when both are present), Secure/HttpOnly, deletion via a past/zero expiry, and rejecting a Domain attribute for a host that doesn't control it. `httpsget` parses every `Set-Cookie` on a response and sends a scoped `Cookie:` header on every request | `make cookiejar-test` (30 cases: domain/path matching incl. the no-slash-boundary negative case, Max-Age-vs-Expires precedence, deletion, overwrite-on-same-identity, LRU eviction, Secure/host-only enforcement, unrelated-domain rejection); `tools/cookies_qemu.py` against a real TLS 1.3 server: a session cookie set on one request comes back correctly on later requests in the same run, and a `Path=/admin`-scoped cookie is confirmed both withheld outside its path and included inside it — real RFC 6265 scoping, not "send everything ever seen"; 14.x.7 + 15.2 + 15.3 + 15.4 + 15.7 + 15.10 regressions unaffected | ✅ |
 | **15.8** | **Multi-origin session cache** — the single global TLS connection/reader/ticket-cache is replaced by `TLS_SESSION_SLOTS` (4) origin-keyed slots, each able to hold a live, reusable connection *and* a session ticket independently and simultaneously; a redirect to a different origin no longer closes the origin it left, so a later hop back to it can reuse the still-open connection (zero handshake) or, failing that, its ticket (PSK resumption) — no threads, timers, or queues, exactly as synchronous as every phase before it | `tools/session_cache_qemu.py` against two real TLS 1.3 servers on different ports of the same host (two distinct origins): a redirect chain A → B → A shows exactly one TCP connection to each of A and B, and the return to A is served by reusing its still-open connection with zero further TLS activity; full existing host + QEMU regression suite (incl. 15.7 resumption, whose ticket now lives inside the same slot) unaffected | ✅ |
 | **16.1** | **HTTP POST** (opening the "Web Platform" series, `16.x`, distinct from the `15.x` HTTPS v2 milestone) — `httpsget --post <host> <path> <body>` sends `body` as `application/x-www-form-urlencoded` with an auto-computed `Content-Length`; a redirect after a POST downgrades to a bodyless GET on the next hop (legacy 301/302/303 behavior; RFC 7231's method-and-body-preserving 307/308 explicitly not yet implemented) | `tools/post_qemu.py` against a real TLS 1.3 server: the server inspects the *actual* incoming request (not just httpsget's own log) and confirms method, `Content-Type`, `Content-Length` and the exact body bytes, then confirms the following redirect hop arrives as a bodyless GET; full existing host + QEMU regression suite unaffected | ✅ |
+| **16.2** | **HTTP authentication (Basic + Bearer)** — `httpsget --auth-basic user:pass` / `--auth-bearer token` send `Authorization: Basic <base64>` / `Authorization: Bearer <token>` (`user/base64.c`, a new RFC 4648 encoder — nothing else in the codebase needed one yet); the header is re-scoped on every redirect hop to whichever origin it was given for, so it naturally follows a same-origin redirect and just as naturally stops the moment a redirect leaves that origin | `make base64-test` (RFC 4648 §10's own vectors + realistic `user:pass` strings + an undersized-buffer rejection check); `tools/auth_qemu.py` against real TLS 1.3 servers: the server decodes the Basic header itself (not trusting httpsget's encoder) and confirms the exact credentials, confirms the exact Bearer token, and confirms a Bearer token given for origin A is *not* sent to origin B after a cross-origin redirect; full existing host + QEMU regression suite unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2158,6 +2159,55 @@ Verified two ways:
   all, confirming the documented downgrade actually happens on the wire.
   All 9 checks pass, and the full existing host + QEMU regression suite is
   unaffected.
+
+## Step 16.2 — HTTP authentication (Basic + Bearer)
+
+POST unlocked writing to the web; this unlocks talking to it as *someone*
+-- the overwhelming majority of REST APIs (GitHub, GitLab, most SaaS and
+LLM APIs) gate every request behind `Authorization: Bearer <token>`, and
+plenty of older or internal services still use `Authorization: Basic
+<base64(user:pass)>`. `httpsget` gains `--auth-basic user:pass` and
+`--auth-bearer token` (mutually exclusive, combinable with `--post`), each
+a single whitespace-free CLI token for the same reason POST's body is:
+Aurora's shell has no argument quoting.
+
+**`user/base64.c`** is a new small freestanding module (RFC 4648, standard
+alphabet, encode-only -- httpsget never needs to decode base64) — nothing
+in the codebase needed a base64 encoder before Basic auth did. It follows
+the same discipline as `url.c` and `cookiejar.c`: only `<stddef.h>`/
+`<stdint.h>`, no libc, no allocation, so it's host-testable standalone.
+
+The one design point worth calling out: **the Authorization header is
+re-evaluated on every redirect hop, not fixed at hop 0 like POST's body
+is.** It's scoped to whichever origin (`https`/host/port) it was given
+for (`g_auth_origin`, set once from the CLI's `<host>` argument) and
+`fetch_one()` checks `same_origin()` against the *current* hop's URL on
+every iteration -- so a same-origin redirect keeps sending it (useful:
+plenty of APIs redirect `/v1/resource` to `/v1/resource/` and still expect
+credentials), while a redirect to a *different* origin drops it
+automatically. This is deliberately stricter than what some real HTTP
+clients do by default (curl, for one, will follow a cross-host redirect
+and keep sending `Authorization` unless told not to) — for a from-scratch
+client with no prior behavior to stay compatible with, not leaking
+credentials to an origin the caller never named is the safer default, not
+a compatibility risk.
+
+Verified two ways:
+- **Host (`make base64-test`)**: RFC 4648 §10's own published test
+  vectors (`""`, `"f"`, `"fo"`, ..., `"foobar"`, exercising all three
+  padding cases) plus two realistic `"user:pass"` strings, plus a check
+  that an undersized output buffer is rejected outright rather than
+  silently truncated.
+- **QEMU (`tools/auth_qemu.py`)**, against real TLS 1.3 servers, three
+  scenarios: `--auth-basic alice:s3cr3t` is checked by having the server
+  decode the base64 *itself* (Python's own `base64` module, not trusting
+  httpsget's encoder) and confirming it decodes to exactly
+  `"alice:s3cr3t"`; `--auth-bearer mytoken123` is checked against the
+  exact header value `"Bearer mytoken123"`; and a third scenario proves
+  the origin-scoping directly -- a Bearer token given for origin A arrives
+  there intact, but origin B (reached via a redirect from A) receives no
+  `Authorization` header at all. All 9 checks pass, and the full existing
+  host + QEMU regression suite is unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

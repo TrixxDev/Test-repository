@@ -108,10 +108,13 @@
 #include "http.h"
 #include "gzip.h"
 #include "cookiejar.h"
+#include "base64.h"
 
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
 #define MAX_PATHS     16
+#define AUTH_TOKEN_MAX  512          /* raw bearer token or "user:pass" length cap (Phase 16.2) */
+#define AUTH_HEADER_MAX (8 + 4 * ((AUTH_TOKEN_MAX + 2) / 3))  /* "Basic "/"Bearer " + base64 worst case */
 #define FETCH_REUSE_MAX_BODY (64u * 1024u)  /* don't bother draining a response this big just to reuse the connection */
 #define POST_BODY_MAX 4096           /* a diagnostic CLI, not a general uploader (Phase 16.1) */
 #define REQ_BUF_MAX   (2048 + POST_BODY_MAX)  /* headers (incl. a full Cookie: line) + body */
@@ -130,6 +133,17 @@ static uint8_t           g_resp[8192];      /* captured response prefix: status 
 static struct url        g_visited[MAX_REDIRECTS + 1];
 
 static cookie_jar g_cookies;   /* process-lifetime (Phase 15.9) */
+
+/* HTTP authentication (Phase 16.2): a single Authorization header value,
+ * fixed for the whole run, scoped to the origin it was given for --
+ * fetch_one() only actually sends it on a request whose scheme/host/port
+ * matches g_auth_origin (same_origin()), so a redirect to a different
+ * origin never leaks credentials to it (this is stricter than what most
+ * real HTTP clients do by default, deliberately). */
+static char       g_auth_header[AUTH_HEADER_MAX];
+static int        g_auth_len;
+static int        g_has_auth;
+static struct url g_auth_origin;
 
 /* Multi-origin session cache (Phase 15.8): one slot per origin, holding
  * whatever a real client would want to remember about it between requests --
@@ -272,9 +286,15 @@ static void app_uint(char *d, int *n, unsigned v)
  * `body`/`bodylen` (Phase 16.1) are optional (NULL/0 for a bodyless
  * request); when present they're sent as application/x-www-form-urlencoded
  * -- the one body shape this client's CLI can actually construct (a single
- * whitespace-free token; Aurora's shell has no quoting, see main()). */
+ * whitespace-free token; Aurora's shell has no quoting, see main()).
+ *
+ * `auth_header`/`auth_len` (Phase 16.2) are an optional pre-built
+ * Authorization value ("Basic <base64>" or "Bearer <token>"; NULL/0 for
+ * none) -- the caller (fetch_one()) decides per-hop whether this request's
+ * origin still matches the one credentials were given for. */
 static void build_request(char *req, int *rn, const struct url *u, uint64_t now,
-                          const char *method, const uint8_t *body, int bodylen)
+                          const char *method, const uint8_t *body, int bodylen,
+                          const char *auth_header, int auth_len)
 {
     *rn = 0;
     app(req, rn, method); req[(*rn)++] = ' '; app(req, rn, u->path); app(req, rn, " HTTP/1.1\r\nHost: ");
@@ -291,6 +311,11 @@ static void build_request(char *req, int *rn, const struct url *u, uint64_t now,
     if (clen > 0) {
         app(req, rn, "Cookie: ");
         for (int i = 0; i < clen; i++) req[(*rn)++] = cookie_hdr[i];
+        app(req, rn, "\r\n");
+    }
+    if (auth_header && auth_len > 0) {
+        app(req, rn, "Authorization: ");
+        for (int i = 0; i < auth_len; i++) req[(*rn)++] = auth_header[i];
         app(req, rn, "\r\n");
     }
     if (body && bodylen > 0) {
@@ -494,11 +519,12 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
  * up front, see the header comment -- or -1 on any other transport failure
  * (diagnostic already printed, unrecoverable). */
 static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
-                         const char *method, const uint8_t *body, int bodylen, fetch_result_t *out)
+                         const char *method, const uint8_t *body, int bodylen,
+                         const char *auth_header, int auth_len, fetch_result_t *out)
 {
     resp_reset();
     char req[REQ_BUF_MAX]; int rn;
-    build_request(req, &rn, u, now, method, body, bodylen);
+    build_request(req, &rn, u, now, method, body, bodylen, auth_header, auth_len);
 
     int closed = 0;
     if (slot->origin.https) {
@@ -580,19 +606,20 @@ static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
  * (fr is filled), -1 on an unrecoverable transport failure (diagnostic
  * already printed, caller should give up). */
 static int fetch(const struct url *u, uint64_t now, const char *method,
-                 const uint8_t *body, int bodylen, fetch_result_t *out)
+                 const uint8_t *body, int bodylen,
+                 const char *auth_header, int auth_len, fetch_result_t *out)
 {
     session_slot *slot = slot_find_or_alloc(u);
     if (slot->conn_open) {
         printf("[httpsget] reusing open connection to %s:%d (keep-alive)\n", u->host, u->port);
-        int rc = fetch_request(slot, u, now, method, body, bodylen, out);
+        int rc = fetch_request(slot, u, now, method, body, bodylen, auth_header, auth_len, out);
         if (rc == FETCH_OK) return 0;
         if (rc != FETCH_STALE) return -1;
         printf("[httpsget] reused connection to %s:%d was already closed -- reconnecting\n", u->host, u->port);
         slot_close(slot);
     }
     if (fetch_begin(slot, u, now) != 0) return -1;
-    int rc = fetch_request(slot, u, now, method, body, bodylen, out);
+    int rc = fetch_request(slot, u, now, method, body, bodylen, auth_header, auth_len, out);
     if (rc == FETCH_OK) return 0;
     if (rc == FETCH_STALE)
         fprintf(2, "[httpsget] connection to %s:%d closed before the request could be sent\n", u->host, u->port);
@@ -643,7 +670,14 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
         const char *cur_method = hop == 0 ? method : "GET";
         const uint8_t *cur_body = hop == 0 ? post_body : 0;
         int cur_bodylen = hop == 0 ? post_bodylen : 0;
-        if (fetch(&u, now, cur_method, cur_body, cur_bodylen, &fr) != 0) return -1;    /* diagnostic already printed */
+        /* Authorization (Phase 16.2) is re-checked on every hop, not just
+         * hop 0: it's scoped to whichever origin it was given for, so it
+         * naturally keeps following same-origin redirects and just as
+         * naturally stops the moment a redirect leaves that origin. */
+        const char *cur_auth = (g_has_auth && same_origin(&g_auth_origin, &u)) ? g_auth_header : 0;
+        int cur_auth_len = cur_auth ? g_auth_len : 0;
+        if (fetch(&u, now, cur_method, cur_body, cur_bodylen, cur_auth, cur_auth_len, &fr) != 0)
+            return -1;    /* diagnostic already printed */
         /* Only this response's own slot closes -- a redirect to a different
          * origin (Phase 15.8) leaves every other origin's slot exactly as it
          * was, so a later hop back to one of them can still reuse it. */
@@ -711,18 +745,59 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
 
 int main(int argc, char **argv)
 {
-    const char *usage = "usage: httpsget <host> <path> [path...] [now_unix]\n"
-                        "       httpsget --post <host> <path> <body> [now_unix]\n";
+    const char *usage =
+        "usage: httpsget [--post] [--auth-basic user:pass | --auth-bearer token] <host> <path> [path...] [now_unix]\n"
+        "       httpsget [--auth-basic user:pass | --auth-bearer token] --post <host> <path> <body> [now_unix]\n";
     const char *method = "GET";
     const uint8_t *post_body = 0;
     int post_bodylen = 0;
     int argi = 1;
 
-    if (argc >= 2 && strcmp(argv[1], "--post") == 0) { method = "POST"; argi = 2; }
+    /* Leading flags, any order: --post, and at most one of --auth-basic /
+     * --auth-bearer (Phase 16.2). Each credential value is a single
+     * whitespace-free CLI token -- Aurora's shell has no quoting. */
+    for (;;) {
+        if (argi < argc && strcmp(argv[argi], "--post") == 0) {
+            method = "POST"; argi++; continue;
+        }
+        if (argi < argc && strcmp(argv[argi], "--auth-basic") == 0) {
+            argi++;
+            if (argi >= argc) { fprintf(2, "%s", usage); return 1; }
+            int n = (int)strlen(argv[argi]);
+            if (n > AUTH_TOKEN_MAX) { fprintf(2, "httpsget: --auth-basic value too long (max %d bytes)\n", AUTH_TOKEN_MAX); return 1; }
+            g_auth_len = 0;
+            app(g_auth_header, &g_auth_len, "Basic ");
+            int bn = base64_encode((const uint8_t*)argv[argi], n, g_auth_header + g_auth_len, (int)sizeof(g_auth_header) - g_auth_len);
+            if (bn < 0) { fprintf(2, "httpsget: --auth-basic value too long\n"); return 1; }
+            g_auth_len += bn;
+            g_has_auth = 1;
+            argi++; continue;
+        }
+        if (argi < argc && strcmp(argv[argi], "--auth-bearer") == 0) {
+            argi++;
+            if (argi >= argc) { fprintf(2, "%s", usage); return 1; }
+            int n = (int)strlen(argv[argi]);
+            if (n > AUTH_TOKEN_MAX) { fprintf(2, "httpsget: --auth-bearer value too long (max %d bytes)\n", AUTH_TOKEN_MAX); return 1; }
+            g_auth_len = 0;
+            app(g_auth_header, &g_auth_len, "Bearer ");
+            for (int i = 0; i < n; i++) g_auth_header[g_auth_len++] = argv[argi][i];
+            g_has_auth = 1;
+            argi++; continue;
+        }
+        break;
+    }
+
     if (argc < argi + 1) { fprintf(2, "%s", usage); return 1; }
     const char *host = argv[argi++];
     const char *paths[MAX_PATHS]; int npaths = 0;
     uint64_t now = HTTPSGET_NOW;
+
+    if (g_has_auth) {
+        memset(&g_auth_origin, 0, sizeof g_auth_origin);
+        g_auth_origin.https = 1; g_auth_origin.port = 443;
+        int i = 0; for (; host[i] && i < (int)sizeof(g_auth_origin.host) - 1; i++) g_auth_origin.host[i] = host[i];
+        g_auth_origin.host[i] = 0;
+    }
 
     if (method[0] == 'P') {
         /* --post: exactly one path and one body token -- Aurora's shell has
@@ -753,8 +828,8 @@ int main(int argc, char **argv)
         }
 
     if (npaths == 1)
-        printf("[httpsget] %s%s%s  (trust store: %u roots)\n", host, paths[0],
-               post_body ? " (POST)" : "", (unsigned)CA_ROOTS_N);
+        printf("[httpsget] %s%s%s%s  (trust store: %u roots)\n", host, paths[0],
+               post_body ? " (POST)" : "", g_has_auth ? " (auth)" : "", (unsigned)CA_ROOTS_N);
     else
         printf("[httpsget] %d paths from %s  (trust store: %u roots)\n", npaths, host, (unsigned)CA_ROOTS_N);
 
