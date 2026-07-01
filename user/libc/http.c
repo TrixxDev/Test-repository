@@ -55,6 +55,17 @@ static void copy_field(char *dst, int cap, const char *src, int len)
     dst[n] = '\0';
 }
 
+/* Case-insensitive: does `hay[0..haylen)` contain `needle` anywhere? Good
+ * enough for header values like "keep-alive" or "close" (possibly alongside
+ * other tokens, e.g. "close, Upgrade") without full RFC 7230 tokenizing. */
+static int ci_contains(const char *hay, int haylen, const char *needle)
+{
+    int nlen = 0; while (needle[nlen]) nlen++;
+    for (int j = 0; j + nlen <= haylen; j++)
+        if (ci_starts(hay + j, haylen - j, needle)) return 1;
+    return 0;
+}
+
 int http_parse(const char *buf, int len, struct http_response *out)
 {
     memset(out, 0, sizeof(*out));
@@ -63,6 +74,7 @@ int http_parse(const char *buf, int len, struct http_response *out)
 
     if (len < 12 || !ci_starts(buf, len, "http/1."))
         return -1;
+    out->http_minor = (buf[7] == '1') ? 1 : 0;    /* "HTTP/1.0" vs "HTTP/1.1" */
 
     /* Status code: after "HTTP/1.x " comes a 3-digit code. */
     int i = 0;
@@ -73,6 +85,7 @@ int http_parse(const char *buf, int len, struct http_response *out)
     out->status = code;
 
     /* Walk the header lines until the blank line that ends the header block. */
+    int conn_close = 0, conn_keepalive = 0;
     int p = 0;
     while (p < len && buf[p] != '\n') p++;       /* skip the status line */
     p++;
@@ -105,9 +118,24 @@ int http_parse(const char *buf, int len, struct http_response *out)
                 copy_field(out->server, sizeof(out->server), buf + v, vlen);
             } else if (ci_starts(buf + p, linelen, "location:")) {
                 copy_field(out->location, sizeof(out->location), buf + v, vlen);
+            } else if (ci_starts(buf + p, linelen, "connection:")) {
+                if (ci_contains(buf + v, vlen, "close")) conn_close = 1;
+                if (ci_contains(buf + v, vlen, "keep-alive")) conn_keepalive = 1;
+            } else if (ci_starts(buf + p, linelen, "transfer-encoding:")) {
+                if (ci_contains(buf + v, vlen, "chunked")) out->chunked = 1;
             }
         }
         p = (e < len) ? e + 1 : len;
     }
+
+    /* Phase 15.4: may this connection be reused for another request? HTTP/1.1
+     * defaults to keep-alive unless "Connection: close" says otherwise;
+     * HTTP/1.0 defaults to close unless "Connection: keep-alive" opts in. A
+     * chunked or length-less body has no way to know where it ends short of
+     * the connection closing, so it can never be reused regardless of what
+     * Connection: says. */
+    int wants_keepalive = conn_close ? 0 : (conn_keepalive || out->http_minor == 1);
+    out->keep_alive = wants_keepalive && out->content_length >= 0 && !out->chunked;
+
     return 0;
 }

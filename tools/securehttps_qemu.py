@@ -67,7 +67,15 @@ def write_trust_header(path, root_ders):
 
 
 def run_qemu(serial_path):
-    """Boot Aurora text-mode, type `httpsget 10.0.2.2 /`, capture serial."""
+    """Boot Aurora text-mode, type `httpsget 10.0.2.2 / <now>`, capture serial.
+
+    The trailing `<now>` is the actual current unix time: httpsget's built-in
+    HTTPSGET_NOW default is a fixed compile-time constant, and this harness's
+    certs are generated with notBefore = whenever openssl actually runs, so a
+    long-running session (or a rebuild days later) can otherwise drift past
+    the default and spuriously fail with "leaf not yet valid" -- a test-harness
+    timing artifact, not a real validation bug. Passing the live clock removes
+    the drift entirely; httpsget itself never gains a wall clock from this."""
     tmp = tempfile.mkdtemp(); mon = os.path.join(tmp, "m.sock")
     if os.path.exists(serial_path): os.remove(serial_path)
     q = ["qemu-system-i386", "-kernel", "aurora.elf", "-m", "64M",
@@ -84,7 +92,8 @@ def run_qemu(serial_path):
             except OSError: time.sleep(0.1)
         time.sleep(7)
         km = {" ": "spc", ".": "dot", "/": "slash"}
-        for ch in "httpsget 10.0.2.2 /":
+        cmd = "httpsget 10.0.2.2 / %d" % int(time.time())
+        for ch in cmd:
             s.sendall(("sendkey " + km.get(ch, ch) + "\n").encode()); time.sleep(0.12)
         s.sendall(b"sendkey ret\n"); time.sleep(25)
         s.sendall(b"quit\n"); time.sleep(0.3); s.close()

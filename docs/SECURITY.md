@@ -75,6 +75,7 @@ Run the vectors: `make crypto-test`.
 | **15.1** | **Trust store expansion** — 3 ECDSA P-384 roots (ISRG Root X2, GTS Root R3/R4) alongside the 5 RSA roots | host: parse + self-signature verify; QEMU: 8-root smoke + 14.x.7 regression | ✅ |
 | **15.2** | **HTTP redirects** — `user/url.c` (RFC 3986 §5.3 reference resolution) + a per-hop full pipeline restart in `httpsget` (301/302/303/307/308, ≤20 hops, loop guard, scheme/host/port changes) | `make url-test` (31 cases); `tools/redirects_qemu.py`: 3/3 PASS; 14.x.7 regression still 3/3 | ✅ |
 | **15.3** | **DHCP** — `net/dhcp.c` (DISCOVER→OFFER→REQUEST→ACK, T1/T2 renewal) + `net/netcfg.c` (`struct net_config` — the single live IP/mask/gateway/DNS, replacing the scattered `IP_LOCAL`/`IP_GATEWAY`/`IP_DNS` compile-time constants) | `make dhcp-test` (47 cases); `tools/dhcp_qemu.py`: 3/3 PASS (default subnet matches static fallback byte-for-byte, a different subnet is correctly adopted and ARP/ICMP-usable, `nodhcp` opts out); 14.x.7 + 15.2 regressions still 3/3 + 3/3 | ✅ |
+| **15.4** | **HTTP keep-alive** — `httpsget` reuses an open TCP+TLS session across same-origin requests (multi-path CLI + same-origin redirects) when the response says so and has a determinate, bounded length; optimistic reuse with a one-shot reconnect if the kept connection was already dead | `tools/keepalive_qemu.py`: 3/3 PASS (3-path reuse, `Connection: close` forces a fresh handshake, a stale reused connection recovers); 14.x.7 + 15.2 + 15.3 regressions still 3/3 + 3/3 + 3/3 | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -1542,6 +1543,96 @@ Verified two ways:
 
   All 3/3 PASS, and both the 14.x.7 (RSA/P-256/P-384) and 15.2 (redirects)
   QEMU regressions still pass 3/3 + 3/3 unchanged.
+
+## Step 15.4 — HTTP keep-alive
+
+Every request so far — the original single fetch, and every redirect hop —
+paid for a fresh DNS lookup, TCP handshake and TLS 1.3 handshake. 15.4's goal
+is narrow on purpose: skip that cost when the server says we don't need it,
+nothing more. Not pipelining, not concurrent requests, not a connection pool,
+not a persistent DNS cache — those are a different, later kind of feature.
+
+Three pieces:
+
+- **The HTTP parser** (`user/libc/http.c`, shared with Aurora Fetch) now
+  determines `http_minor` (HTTP/1.0 vs 1.1), `chunked`, and a derived
+  `keep_alive` verdict: HTTP/1.1 defaults to keep-alive unless the server
+  says `Connection: close`; HTTP/1.0 defaults to close unless it says
+  `Connection: keep-alive`. Either way, a body without a determinate length
+  (no `Content-Length`, or chunked) can only be known to have ended when the
+  connection closes — which defeats reuse regardless of what `Connection:`
+  says — so `keep_alive` is false whenever that's the case.
+- **`httpsget`'s session API** — `fetch_begin()`/`fetch_request()`/
+  `fetch_end()`, replacing the old one-shot `do_fetch()`: `fetch_begin()`
+  opens a connection (and does the TLS handshake, if any); `fetch_request()`
+  sends one GET and reads the response on whatever's already open;
+  `fetch_end()` closes it. `httpsget` always asks for keep-alive on its own
+  requests (there's no cost to asking, and — following redirects — it can't
+  know in advance whether the next hop will even be the same origin); a
+  `reusable()` check on each *response* (keep-alive, determinate length, and
+  no bigger than 64 KiB — not worth draining a huge body just to save one
+  handshake) decides whether the caller keeps the session open. The CLI grew
+  multiple paths (`httpsget host /a /b /c`) precisely to give this something
+  to reuse across; the same reuse logic also fires when a redirect (15.2)
+  lands on the same scheme/host/port as the response it came from.
+- **Reading a response now has to know where it ends, not just when the
+  peer stops talking.** Every phase before this one read until the g_resp
+  preview buffer filled or the peer closed — safe, because `httpsget` always
+  sent `Connection: close` itself, so the peer always closed. With
+  keep-alive that assumption is gone: a response has to be drained to
+  *exactly* `header_len + Content-Length` before the connection is safe to
+  reuse (chunked bodies are simply never treated as reuse-eligible, so no
+  incremental chunk-boundary tracking is needed at all). `resp_feed()`/
+  `resp_done()` track this across however many read/decrypt calls it takes,
+  and copy only up to the preview cap into `g_resp` regardless of how far
+  past it the real body goes — the preview stays small, but the socket
+  position always lands exactly on the next response's first byte.
+
+  Reuse is optimistic, not verified in advance: Aurora has no non-blocking
+  way to check a socket's liveness (`poll()` isn't wired to TCP sockets, and
+  `read()` has no non-blocking mode — either would be needed to peek without
+  risking a real wait). So the next request is just sent on the kept-open
+  socket; if that write fails, or the read that follows it returns nothing
+  at all, the connection is assumed dead and dropped, and *one* fresh
+  reconnect is tried — no attempt to resurrect it, matching the "не
+  пытаться реанимировать" scope from the outset.
+
+  One bug worth naming because it's an easy one to reintroduce: the reuse
+  decision must compare only scheme/host/port (`same_origin()`), not the
+  full URL. Reusing `url_eq()` (built for redirect-loop detection, which
+  correctly does care about the whole URL) here at first meant every
+  request looked like "a different origin" purely because its *path*
+  differed, forcing a fresh handshake every time — the opposite of the
+  feature. The QEMU test below caught it immediately (zero "reusing" lines
+  where there should have been two).
+
+Verified with `tools/keepalive_qemu.py`, against a small persistent-
+connection TLS server written for this test (`openssl s_server -HTTP`/`-WWW`
+was checked by hand first and always closes after exactly one request
+regardless of `Connection:`, so it can't serve this scenario; a plain Python
+`ssl`-based server works with no special cipher/group setup, because
+Aurora's ClientHello offers exactly one cipher suite and one group, so any
+compliant TLS 1.3 server converges on them regardless of its own preference
+order):
+1. three paths, every response `Connection: keep-alive` — exactly one
+   handshake serves all three ("reusing open connection" appears twice).
+2. the first response says `Connection: close` — the next path gets a
+   second, fresh handshake, no reuse attempted.
+3. the first response says `keep-alive` but the server drops the connection
+   anyway (a realistic short-idle-timeout race) — the optimistic reuse's
+   write/read fails, `httpsget` logs "already closed -- reconnecting", and
+   completes the second request over a fresh connection.
+
+All 3/3 PASS, and the 14.x.7, 15.2 and 15.3 QEMU regressions all still pass
+unchanged. (Incidentally, running the full suite this far into a long
+session also caught a latent, unrelated test-harness bug: `HTTPSGET_NOW` is
+a fixed compile-time constant, and `securehttps_qemu.py`/`redirects_qemu.py`
+generate certs with `notBefore` = whenever openssl actually runs, so enough
+elapsed real time within the same calendar day made the constant drift
+behind the certs' validity window, failing with "leaf not yet valid" — a
+timing artifact of the *harness*, not a regression. Both scripts now pass
+the live clock as httpsget's optional numeric override instead of relying
+on the default.)
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

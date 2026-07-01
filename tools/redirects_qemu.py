@@ -164,7 +164,11 @@ def main():
              lambda log: "redirect loop detected" in log),
         ]
         for name, cmd, ok_fn in cases:
-            log = run_qemu(serial, cmd)
+            # append the live unix time: httpsget's compiled-in HTTPSGET_NOW default
+            # can drift past these freshly-generated certs' notBefore over a long
+            # session, spuriously failing with "leaf not yet valid" -- a harness
+            # timing artifact, not a real validation bug (see securehttps_qemu.py).
+            log = run_qemu(serial, cmd + " %d" % int(time.time()))
             ok = ok_fn(log)
             line = next((l for l in log.splitlines() if "redirect" in l or "status=" in l), "(no result)")
             print(f"{name:24}: {'PASS' if ok else 'FAIL'}  {line.strip()}")
