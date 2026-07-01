@@ -81,6 +81,7 @@ Run the vectors: `make crypto-test`.
 | **15.7** | **TLS 1.3 session resumption** (RFC 8446 §2.2/§4.2.11/§4.6.1) — a cached `NewSessionTicket` (PSK + lifetime, keyed by host:port in `httpsget`) offers `pre_shared_key`/`psk_key_exchange_modes` on the next connection to the same origin; a server-accepted PSK skips Certificate/CertificateVerify entirely, with a transparent fallback to a full handshake if the server doesn't select it | `make tls-trace-test` (RFC 8448 §4 PSK/binder/resumption-secret vectors byte-exact, plus a synthetic FSM-level abbreviated-handshake test); `tools/tls_resume_qemu.py` against a real OpenSSL-backed TLS 1.3 server: 1st connection full handshake + ticket cached, 2nd connection resumed — confirmed both client-side (trace) and server-side (`SSL_session_reused`); 14.x.7 + 15.2 + 15.3 + 15.4 regressions unaffected | ✅ |
 | **15.10** | **gzip / DEFLATE decompression** (RFC 1951 + RFC 1952) — a from-scratch, genuinely incremental inflate (`compress/inflate.c`: bit reader, stored/fixed/dynamic Huffman, 32 KiB sliding window) wrapped in a gzip container (`compress/gzip.c`: header/trailer, CRC32/ISIZE verification); `httpsget` sends `Accept-Encoding: gzip` and decompresses a `Content-Encoding: gzip` response as wire bytes arrive, not after buffering the whole compressed body | `make crc32-test` + `make inflate-test` (real raw-deflate streams incl. a 32 KiB+ window wraparound, plus a tiny-chunk/tiny-output-buffer streaming test) + `make gzip-test` (real gzip streams incl. FLG.FNAME, CRC32/ISIZE tamper rejection); `tools/gzip_qemu.py` against a real TLS 1.3 server: the server sees the real `Accept-Encoding: gzip` request header and answers with genuine gzip-compressed bytes, which `httpsget` decompresses to the original readable text inside QEMU; 14.x.7 + 15.2 + 15.3 + 15.4 + 15.7 regressions unaffected | ✅ |
 | **15.9** | **Cookie jar** (RFC 6265) — a compact, fixed-size (`user/cookiejar.c`, 32 entries, LRU eviction) process-lifetime jar: Domain/Path scoping, Max-Age/Expires (Max-Age wins when both are present), Secure/HttpOnly, deletion via a past/zero expiry, and rejecting a Domain attribute for a host that doesn't control it. `httpsget` parses every `Set-Cookie` on a response and sends a scoped `Cookie:` header on every request | `make cookiejar-test` (30 cases: domain/path matching incl. the no-slash-boundary negative case, Max-Age-vs-Expires precedence, deletion, overwrite-on-same-identity, LRU eviction, Secure/host-only enforcement, unrelated-domain rejection); `tools/cookies_qemu.py` against a real TLS 1.3 server: a session cookie set on one request comes back correctly on later requests in the same run, and a `Path=/admin`-scoped cookie is confirmed both withheld outside its path and included inside it — real RFC 6265 scoping, not "send everything ever seen"; 14.x.7 + 15.2 + 15.3 + 15.4 + 15.7 + 15.10 regressions unaffected | ✅ |
+| **15.8** | **Multi-origin session cache** — the single global TLS connection/reader/ticket-cache is replaced by `TLS_SESSION_SLOTS` (4) origin-keyed slots, each able to hold a live, reusable connection *and* a session ticket independently and simultaneously; a redirect to a different origin no longer closes the origin it left, so a later hop back to it can reuse the still-open connection (zero handshake) or, failing that, its ticket (PSK resumption) — no threads, timers, or queues, exactly as synchronous as every phase before it | `tools/session_cache_qemu.py` against two real TLS 1.3 servers on different ports of the same host (two distinct origins): a redirect chain A → B → A shows exactly one TCP connection to each of A and B, and the return to A is served by reusing its still-open connection with zero further TLS activity; full existing host + QEMU regression suite (incl. 15.7 resumption, whose ticket now lives inside the same slot) unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2038,6 +2039,68 @@ Verified two ways:
   real RFC 6265 scoping, not "resend everything the jar has ever seen." All
   7 checks pass, and the 14.x.7, 15.2, 15.3, 15.4, 15.7 and 15.10 QEMU
   regressions are unaffected.
+
+## Step 15.8 — multi-origin session cache
+
+15.4 already kept one connection alive across several requests to the same
+origin, and 15.7 already let a *new* connection to a previously-seen origin
+skip a full handshake. What neither one covered: `fetch()`'s own reconnect
+logic closed whatever was open the instant a request targeted a *different*
+origin — so a redirect chain that bounced A → B → A paid for two full
+round-trip costs to A even though the first connection to A might still
+have been perfectly healthy. This step is explicitly named "multi-origin
+session cache," not "connection pool": there is no concurrency here to pool
+for, and no background thread, timer, or cleanup daemon — the whole client
+remains exactly as synchronous as every phase before it.
+
+**`user/httpsget.c`** replaces the single global `tls_conn`/
+`tls_record_reader`/session-ticket-cache with `TLS_SESSION_SLOTS` (4)
+`session_slot` entries, each independently able to hold a live, reusable
+connection *and* a session ticket at the same time — the two survive on
+different schedules now: a slot's connection closes the moment a response
+on it isn't `reusable()` (exactly 15.4's existing rule), but its ticket
+keeps living in the slot regardless, exactly as it did in 15.7's separate
+cache. `slot_find_or_alloc()` looks a slot up by host+port, or binds a free
+one, or — when every slot is already bound to a different origin — evicts
+whichever origin's slot has gone longest untouched (closing its live
+connection, forgetting its ticket). `fetch()` now reuses a found slot's
+open connection first; only when there isn't one does it reconnect,
+offering that slot's ticket if it has one.
+
+One sizing note carried over directly from 15.10's postmortem, applied
+proactively rather than rediscovered the hard way: `tls_conn` and
+`tls_record_reader` are large (~37 KiB and ~33 KiB, mostly reassembly
+buffers), so 4 of each is a genuinely sizeable chunk of memory (~280 KiB) —
+entirely fine as a `static` global array, and never even considered as
+anything else, precisely because 15.10 already demonstrated what a
+plain-looking large *local* does to Aurora's 16 KiB user stack.
+
+Verified against two real TLS 1.3 servers (Python's `ssl` module) on
+different ports of the same host -- two distinct origins by definition,
+with no DNS or multi-host setup needed:
+
+- **`tools/session_cache_qemu.py`**: `httpsget 10.0.2.2 /starta` redirects
+  to origin B's `:8443/hop` (a `Connection: keep-alive` response, so
+  origin A's slot connection is deliberately left open), which redirects
+  back to origin A's `:443/finish`. The log shows exactly one `TCP
+  connected to 10.0.2.2:443` line and exactly one `TCP connected to
+  10.0.2.2:8443` line — origin A is *never* reconnected — and the return
+  to A is served via "reusing open connection," with no ClientHello, no
+  handshake trace at all, between the reuse line and the response. All 6
+  checks pass, and the full existing host + QEMU regression suite —
+  including 15.7's own resumption test, whose ticket now lives inside a
+  session slot instead of a separate cache — is unaffected.
+
+This closes out the run of phases from 15.3 through 15.10: DHCP, DNS
+caching, keep-alive, an expanded trust store, TLS session resumption,
+gzip, a cookie jar, and now a multi-origin session cache, all layered onto
+the 14.x HTTPS foundation without changing its shape. Taken together this
+is worth calling **"Aurora HTTPS v2"** — a clear step up from the original
+`docs/RELEASE-https-v1.md` milestone, still with no HTTP/2, no concurrency,
+and no dependency beyond the freestanding TLS/X.509/crypto stack this
+project has built from scratch throughout. HTTP/2, IPv6, WebSockets and
+request bodies (POST/PUT) are deliberately not part of this milestone —
+each is its own separate, later project.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

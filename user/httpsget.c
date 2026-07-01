@@ -1,12 +1,30 @@
 /* httpsget — Aurora's userspace HTTPS client (14.0.3b / 14.0.4 in QEMU; 15.2
- * adds redirects; 15.4 adds HTTP keep-alive; 15.9 adds cookies; 15.10 adds
- * gzip).
+ * adds redirects; 15.4 adds HTTP keep-alive; 15.8 adds a multi-origin
+ * session cache; 15.9 adds cookies; 15.10 adds gzip).
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
  * fetching a real web page. Deliberately dumb and diagnostic — no HTTP/2, no
- * pipelining, no connection pool (one connection at a time, requests always
- * fully sequential).
+ * pipelining, no concurrency of any kind (requests are always fully
+ * sequential; the session cache below holds multiple *idle* connections, it
+ * never uses more than one at a time).
+ *
+ * Multi-origin session cache (Phase 15.8): a small fixed array of
+ * TLS_SESSION_SLOTS (4) slots, each bound to one origin (scheme/host/port).
+ * Deliberately NOT a general "connection pool" -- there is no concurrency to
+ * pool for, and no background thread, timer, or cleanup daemon; it is
+ * exactly as synchronous as every phase before it. What it actually buys:
+ * a redirect chain that bounces between origins (A -> B -> A) no longer pays
+ * for a fresh TCP+TLS handshake back to A just because a hop to B came in
+ * between -- A's slot may still hold a live, open connection (reused for
+ * free) or, failing that, still hold A's session ticket from the earlier
+ * visit (Phase 15.7 resumption instead of a full handshake). A slot's
+ * connection closes (its ticket does not) the moment a response on it isn't
+ * reusable(); the whole cache is walked and closed once at the very end of
+ * the process. When all 4 slots are bound to *different* origins and a 5th
+ * is needed, the least-recently-used origin is evicted (its live connection
+ * closed, its ticket forgotten) -- this is a size limit on distinct origins
+ * touched, not a request queue or a connection-reuse policy change.
  *
  * Cookies (Phase 15.9): a compact, process-lifetime jar (user/cookiejar.c,
  * RFC 6265). Every Set-Cookie header on a response is parsed and stored;
@@ -34,7 +52,8 @@
  * Keep-alive (Phase 15.4): the goal is narrow -- skip a redundant TCP+TLS
  * handshake when the server said we don't need one, nothing more. Each of
  * several paths (given on the command line, or reached via a same-origin
- * redirect) reuses the open connection when the previous response said
+ * redirect, or -- since 15.8 -- a redirect back to a previously-visited
+ * origin) reuses the open connection when the previous response said
  * "Connection: keep-alive" (or defaulted to it under HTTP/1.1) AND had a
  * determinate, bounded length (Content-Length, not chunked, not huge) --
  * otherwise a fresh connection is opened, exactly like every phase before
@@ -43,22 +62,24 @@
  * has no non-blocking way to check liveness up front, see docs/SECURITY.md
  * Step 15.4), the connection is dropped and one fresh reconnect is tried, no
  * attempt to resurrect it. Deliberately NOT here: pipelining, concurrent
- * requests, a connection pool, or a persistent DNS cache -- those are a
- * different, later kind of feature.
+ * requests, or a persistent DNS cache -- those are a different, later kind
+ * of feature.
  *
  * Redirects (301/302/303/307/308, Phase 15.2) still restart DNS on a host
  * change and the TLS handshake on a scheme change; a same-origin redirect
  * whose predecessor allowed keep-alive reuses the connection instead.
  *
- * Session resumption (Phase 15.7): a small in-process cache, keyed by
- * host:port, remembers the most recent NewSessionTicket per origin. A fresh
- * connection to a cached, unexpired origin offers the ticket's PSK
- * (tls_conn_offer_psk) instead of doing a full certificate-based handshake;
- * if the server doesn't select it, RFC 8446 §4.1.4 has the FSM fall back to a
- * full handshake transparently -- no special-casing needed here. The cache
- * only lives for this process's lifetime (no persistence across invocations),
- * so it pays off within one run touching the same origin more than once
- * (several non-keep-alive-reusable fetches, or a forced reconnect).
+ * Session resumption (Phase 15.7): each session-cache slot remembers the
+ * most recent NewSessionTicket for its origin. A fresh connection to a
+ * slot with an unexpired ticket offers its PSK (tls_conn_offer_psk) instead
+ * of doing a full certificate-based handshake; if the server doesn't select
+ * it, RFC 8446 §4.1.4 has the FSM fall back to a full handshake
+ * transparently -- no special-casing needed here. Tickets only live for
+ * this process's lifetime (no persistence across invocations) and only for
+ * as long as their origin's slot isn't evicted, so this pays off within one
+ * run touching the same origin more than once (several non-keep-alive-
+ * reusable fetches, a forced reconnect, or -- since 15.8 -- a redirect back
+ * to an origin whose slot survived).
  *
  * Trust store: a curated set of public CA roots (user/ca_roots.h). A site whose
  * whole chain is RSA-PKCS1-SHA256, ECDSA-P256-SHA256 or ECDSA-P384-SHA384
@@ -84,26 +105,44 @@
 #define MAX_PATHS     16
 #define FETCH_REUSE_MAX_BODY (64u * 1024u)  /* don't bother draining a response this big just to reuse the connection */
 
-static tls_conn          g_conn;
-static tls_record_reader g_reader;
 static x509_cert         g_roots[CA_ROOTS_N];
 static uint8_t           g_scratch[4096];
 static uint8_t           g_plain[17000];
 static uint8_t           g_resp[8192];      /* captured response prefix: status + headers + a
                                              * body preview (only ~512 B of body is shown), so a
                                              * few KiB suffices -- not the whole transfer (15.0.4). */
-static int               g_fd;
 static struct url        g_visited[MAX_REDIRECTS + 1];
-
-static int        g_open;      /* is a TCP[+TLS] session currently open */
-static struct url g_session;   /* which host:port:scheme it's bound to, if g_open */
 
 static cookie_jar g_cookies;   /* process-lifetime (Phase 15.9) */
 
-static int xport_read(void *ctx, uint8_t *buf, size_t cap)  { (void)ctx; return read(g_fd, buf, (int)cap); }
-static int xport_write(void *ctx, const uint8_t *buf, size_t len) { (void)ctx; return write(g_fd, buf, (int)len); }
-static int write_all(const uint8_t *b, int n)
-{ int s = 0; while (s < n) { int w = write(g_fd, b + s, n - s); if (w <= 0) return -1; s += w; } return 0; }
+/* Multi-origin session cache (Phase 15.8): one slot per origin, holding
+ * whatever a real client would want to remember about it between requests --
+ * a still-open connection (conn_open), and/or a session ticket (has_ticket)
+ * that survives even after the connection closes. tls_conn/tls_record_reader
+ * are large (~37 KiB / ~33 KiB, mostly reassembly buffers), so this array
+ * MUST stay a global (see the 15.10 stack-overflow postmortem in
+ * docs/SECURITY.md) -- never a local, not even conditionally. */
+#define TLS_SESSION_SLOTS 4
+typedef struct {
+    int         in_use;       /* bound to some origin (may or may not have a live connection) */
+    struct url  origin;       /* https/host/port identify it; .path is unused */
+    int         conn_open;    /* fd/conn/reader below are a live, reusable TCP+TLS session */
+    int         fd;
+    tls_conn    conn;
+    tls_record_reader reader;
+    int         has_ticket;
+    tls_session_ticket ticket;
+    uint64_t    last_used;    /* LRU clock value (see g_slot_clock), not wall time */
+} session_slot;
+static session_slot g_slots[TLS_SESSION_SLOTS];
+static uint64_t     g_slot_clock;
+
+static int xport_read(void *ctx, uint8_t *buf, size_t cap)
+{ session_slot *s = ctx; return read(s->fd, buf, (int)cap); }
+static int xport_write(void *ctx, const uint8_t *buf, size_t len)
+{ session_slot *s = ctx; return write(s->fd, buf, (int)len); }
+static int write_all(int fd, const uint8_t *b, int n)
+{ int s = 0; while (s < n) { int w = write(fd, b + s, n - s); if (w <= 0) return -1; s += w; } return 0; }
 static void trace_sink(void *ctx, tls_event ev, uint32_t detail)
 { (void)ctx; (void)detail; printf("[TLS] %s\n", tls_event_name(ev)); }
 
@@ -157,52 +196,43 @@ static int reusable(const struct http_response *hr)
     return hr->keep_alive && (unsigned)hr->content_length <= FETCH_REUSE_MAX_BODY;
 }
 
-/* Session ticket cache (Phase 15.7): one slot per origin (host:port), holding
- * only the most recently received ticket -- a new one always supersedes
- * whatever was cached, same as a real client would do. */
-#define TICKET_CACHE_N 4
-typedef struct {
-    int  valid;
-    char host[64];
-    int  port;
-    tls_session_ticket ticket;
-} ticket_cache_entry;
-static ticket_cache_entry g_tickets[TICKET_CACHE_N];
-
-static ticket_cache_entry *ticket_slot(const struct url *u, int create)
+/* Find the slot already bound to `u`'s origin, or bind a fresh one: an
+ * unused slot if one exists, else the least-recently-used bound slot
+ * (evicting it -- closing its live connection if any, forgetting its
+ * ticket). Every returned slot has its LRU clock refreshed, so a slot found
+ * this way is never immediately re-evicted by the very next lookup. */
+static session_slot *slot_find_or_alloc(const struct url *u)
 {
-    ticket_cache_entry *free_slot = 0;
-    for (int i = 0; i < TICKET_CACHE_N; i++) {
-        if (g_tickets[i].valid && g_tickets[i].port == u->port && strcmp(g_tickets[i].host, u->host) == 0)
-            return &g_tickets[i];
-        if (!g_tickets[i].valid && !free_slot) free_slot = &g_tickets[i];
+    session_slot *free_slot = 0, *lru_slot = &g_slots[0];
+    for (int i = 0; i < TLS_SESSION_SLOTS; i++) {
+        session_slot *s = &g_slots[i];
+        if (s->in_use && same_origin(&s->origin, u)) { s->last_used = ++g_slot_clock; return s; }
+        if (!s->in_use && !free_slot) free_slot = s;
+        if (s->in_use && s->last_used < lru_slot->last_used) lru_slot = s;
     }
-    if (!create) return 0;
-    return free_slot ? free_slot : &g_tickets[0];   /* cache full: evict the first slot */
+    session_slot *s = free_slot ? free_slot : lru_slot;
+    if (s->in_use) {
+        if (s->conn_open) close(s->fd);
+        printf("[httpsget] session cache: evicting %s:%d for %s:%d\n",
+               s->origin.host, s->origin.port, u->host, u->port);
+    }
+    s->in_use = 1;
+    s->origin = *u;
+    s->conn_open = 0;
+    s->has_ticket = 0;
+    s->last_used = ++g_slot_clock;
+    return s;
 }
 
-static void ticket_store(const struct url *u, const tls_session_ticket *t)
+static void slot_close(session_slot *s)
 {
-    ticket_cache_entry *e = ticket_slot(u, 1);
-    e->valid = 1;
-    { int i = 0; for (; u->host[i] && i < (int)sizeof(e->host) - 1; i++) e->host[i] = u->host[i]; e->host[i] = 0; }
-    e->port = u->port;
-    e->ticket = *t;
-    printf("[httpsget] session ticket cached for %s:%d (lifetime=%us)\n", u->host, u->port, t->lifetime_secs);
+    if (s->conn_open) close(s->fd);
+    s->conn_open = 0;
 }
 
-/* An unexpired cached ticket for `u`, or NULL (none cached, or its lifetime
- * has elapsed since it was obtained). `now` is Unix seconds; compared in the
- * millisecond domain (multiply, never divide -- this is freestanding i686
- * code with no libgcc, and uint64_t division needs __udivdi3). */
-static const tls_session_ticket *ticket_lookup(const struct url *u, uint64_t now)
+static void close_all_slots(void)
 {
-    ticket_cache_entry *e = ticket_slot(u, 0);
-    if (!e) return 0;
-    uint64_t now_ms = now * 1000u;
-    uint64_t expires_ms = e->ticket.obtained_ms + (uint64_t)e->ticket.lifetime_secs * 1000u;
-    if (now_ms >= expires_ms) { e->valid = 0; return 0; }
-    return &e->ticket;
+    for (int i = 0; i < TLS_SESSION_SLOTS; i++) slot_close(&g_slots[i]);
 }
 
 /* "GET <path> HTTP/1.1\r\nHost: <host>[:<port>]\r\nUser-Agent: ...\r\nConnection:
@@ -340,18 +370,19 @@ static int resp_done(void) { return g_target >= 0 && g_total >= g_target; }
 #define FETCH_OK    0
 #define FETCH_STALE (-2)   /* the write failed: a reused connection was already dead */
 
-/* Open a fresh TCP connection to `u` (a DNS lookup if `u->host` isn't a
- * literal), doing a TLS 1.3 handshake first if `u->https`. On success, g_open
- * = 1 and g_session = *u. On failure, a diagnostic has already been printed
- * and g_open is left however it was (0, since fetch_end() must be called by
- * the caller first when switching targets -- see fetch()). */
-static int fetch_begin(const struct url *u, uint64_t now)
+/* Open a fresh TCP connection to `u` into `slot` (a DNS lookup if `u->host`
+ * isn't a literal), doing a TLS 1.3 handshake first if `u->https` -- offering
+ * `slot`'s cached ticket for resumption if it has one. On success,
+ * slot->conn_open = 1. On failure, a diagnostic has already been printed and
+ * slot->conn_open is left however it was (0 -- the caller must have already
+ * closed any live connection this slot held, see fetch()). */
+static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
 {
-    g_fd = inet_socket();
-    if (g_fd < 0) { fprintf(2, "httpsget: inet_socket failed\n"); return -1; }
-    int rc = inet_connect(g_fd, u->host, u->port);
-    if (rc == -2) { fprintf(2, "httpsget: DNS resolution failed for %s\n", u->host); close(g_fd); return -1; }
-    if (rc != 0)  { fprintf(2, "httpsget: TCP connect failed (%d)\n", rc); close(g_fd); return -1; }
+    slot->fd = inet_socket();
+    if (slot->fd < 0) { fprintf(2, "httpsget: inet_socket failed\n"); return -1; }
+    int rc = inet_connect(slot->fd, u->host, u->port);
+    if (rc == -2) { fprintf(2, "httpsget: DNS resolution failed for %s\n", u->host); close(slot->fd); return -1; }
+    if (rc != 0)  { fprintf(2, "httpsget: TCP connect failed (%d)\n", rc); close(slot->fd); return -1; }
     printf("[httpsget] TCP connected to %s:%d\n", u->host, u->port);
 
     if (u->https) {
@@ -360,24 +391,23 @@ static int fetch_begin(const struct url *u, uint64_t now)
         for (int i = 0; i < 32; i++) { seed = seed*1103515245u + 12345u;
             priv[i] = (uint8_t)(i*7+1) ^ (uint8_t)(seed>>16); crand[i] = (uint8_t)(i*3+9) ^ (uint8_t)(seed>>8); }
 
-        tls_conn_init(&g_conn, u->host, priv, crand);
-        tls_client_set_trust(&g_conn.fsm, g_roots, CA_ROOTS_N, now);
-        tls_conn_set_trace(&g_conn, trace_sink, 0);
+        tls_conn_init(&slot->conn, u->host, priv, crand);
+        tls_client_set_trust(&slot->conn.fsm, g_roots, CA_ROOTS_N, now);
+        tls_conn_set_trace(&slot->conn, trace_sink, 0);
 
-        const tls_session_ticket *resume = ticket_lookup(u, now);
-        if (resume) {
-            tls_conn_offer_psk(&g_conn, resume, now * 1000);
+        if (slot->has_ticket) {
+            tls_conn_offer_psk(&slot->conn, &slot->ticket, now * 1000);
             printf("[httpsget] offering cached session ticket for %s:%d\n", u->host, u->port);
         }
 
-        tls_reader_init(&g_reader);
+        tls_reader_init(&slot->reader);
 
-        tls_transport t = { xport_read, xport_write, 0 };
-        int r = tls_driver_handshake(&g_conn, &g_reader, &t, g_scratch, sizeof g_scratch);
+        tls_transport t = { xport_read, xport_write, slot };
+        int r = tls_driver_handshake(&slot->conn, &slot->reader, &t, g_scratch, sizeof g_scratch);
         if (r != TLS_DRIVE_OK) {
             const char *why = "?";
-            if (g_conn.fsm.error == TLS_ERR_CERT) {
-                switch (g_conn.fsm.cert_reason) {
+            if (slot->conn.fsm.error == TLS_ERR_CERT) {
+                switch (slot->conn.fsm.cert_reason) {
                     case TLS_CERT_UNTRUSTED:    why = "chain does not build to a trusted root"; break;
                     case TLS_CERT_EXPIRED:      why = "leaf expired (vs the build-time clock)"; break;
                     case TLS_CERT_NOT_YET:      why = "leaf not yet valid (vs the build-time clock)"; break;
@@ -388,94 +418,93 @@ static int fetch_begin(const struct url *u, uint64_t now)
                 fprintf(2, "[httpsget] TLS FAILED (%s): certificate validation -- %s\n"
                            "           (driver=%d cert_reason=%d). The handshake itself succeeded;\n"
                            "           the chain is not verifiable against the %u-root trust store.\n",
-                        u->host, why, r, g_conn.fsm.cert_reason, (unsigned)CA_ROOTS_N);
+                        u->host, why, r, slot->conn.fsm.cert_reason, (unsigned)CA_ROOTS_N);
             } else {
-                const char *e = g_conn.fsm.error == TLS_ERR_AUTH ? "CertificateVerify (key ownership)"
-                              : g_conn.fsm.error == TLS_ERR_PROTOCOL ? "protocol/record" : "transport";
+                const char *e = slot->conn.fsm.error == TLS_ERR_AUTH ? "CertificateVerify (key ownership)"
+                              : slot->conn.fsm.error == TLS_ERR_PROTOCOL ? "protocol/record" : "transport";
                 fprintf(2, "[httpsget] TLS FAILED (%s): %s (driver=%d tls_error=%d)\n",
-                        u->host, e, r, (int)g_conn.fsm.error);
+                        u->host, e, r, (int)slot->conn.fsm.error);
             }
-            close(g_fd); return -1;
+            close(slot->fd); return -1;
         }
-        if (g_conn.fsm.psk_accepted) {
+        if (slot->conn.fsm.psk_accepted) {
             /* Resumed handshake: WAIT_CERT/WAIT_CV are skipped entirely (RFC
              * 8446 §2.2), so certs/cv_scheme are stale leftovers from
-             * whatever full handshake this reused g_conn last did -- printing
-             * them here would be misleading, not just uninteresting. */
+             * whatever full handshake this slot's connection last did --
+             * printing them here would be misleading, not just uninteresting. */
             printf("[TLS] Session resumed (PSK accepted) -- no certificate exchanged\n");
         } else {
-            int lk = g_conn.fsm.certs.count ? g_conn.fsm.certs.certs[0].pubkey_algo : 0;
+            int lk = slot->conn.fsm.certs.count ? slot->conn.fsm.certs.certs[0].pubkey_algo : 0;
             const char *kt = lk == X509_PK_EC ? "EC P-256" : lk == X509_PK_EC384 ? "EC P-384" : "RSA";
-            uint16_t cv = g_conn.fsm.cv_scheme;
+            uint16_t cv = slot->conn.fsm.cv_scheme;
             const char *cvn = cv == TLS_SIG_ECDSA_SECP384R1_SHA384 ? "ecdsa_secp384r1_sha384"
                             : cv == TLS_SIG_ECDSA_SECP256R1_SHA256 ? "ecdsa_secp256r1_sha256"
                             : cv == TLS_SIG_RSA_PSS_RSAE_SHA256     ? "rsa_pss_rsae_sha256"
                             : cv == TLS_SIG_RSA_PKCS1_SHA256        ? "rsa_pkcs1_sha256" : "?";
             printf("[TLS] Certificate depth=%d  Leaf key=%s  CV scheme=%s\n",
-                   (int)g_conn.fsm.certs.count, kt, cvn);
+                   (int)slot->conn.fsm.certs.count, kt, cvn);
         }
         printf("[TLS] CONNECTED\n");
     }
-    g_session = *u;
-    g_open = 1;
+    slot->conn_open = 1;
     return 0;
 }
 
-static void fetch_end(void)
-{
-    if (g_open) close(g_fd);
-    g_open = 0;
-}
-
-/* Send one GET for u->path over the ALREADY-OPEN session (caller guarantees
- * same_origin(&g_session,u)) and read the response into g_resp / *out. Returns
- * FETCH_OK if a response was obtained (status may be anything, including
- * non-2xx), FETCH_STALE if the write itself failed -- the reused connection
+/* Send one GET for u->path over `slot`'s ALREADY-OPEN session (caller
+ * guarantees same_origin(&slot->origin, u)) and read the response into
+ * g_resp / *out. Returns FETCH_OK if a response was obtained (status may be
+ * anything, including non-2xx), FETCH_STALE if the write itself failed -- the reused connection
  * was already dead; not a bug, Aurora has no non-blocking way to check that
  * up front, see the header comment -- or -1 on any other transport failure
  * (diagnostic already printed, unrecoverable). */
-static int fetch_request(const struct url *u, uint64_t now, fetch_result_t *out)
+static int fetch_request(session_slot *slot, const struct url *u, uint64_t now, fetch_result_t *out)
 {
     resp_reset();
     char req[1536]; int rn;
     build_request(req, &rn, u, now);
 
     int closed = 0;
-    if (g_session.https) {
-        int sl = tls_conn_send_app(&g_conn, (const uint8_t*)req, (size_t)rn, g_scratch, sizeof g_scratch);
+    if (slot->origin.https) {
+        int sl = tls_conn_send_app(&slot->conn, (const uint8_t*)req, (size_t)rn, g_scratch, sizeof g_scratch);
         if (sl < 0) return FETCH_STALE;
-        if (write_all(g_scratch, sl) != 0) return FETCH_STALE;
+        if (write_all(slot->fd, g_scratch, sl) != 0) return FETCH_STALE;
         printf("[httpsget] GET %s HTTP/1.1 sent\n", u->path);
 
         for (;;) {
             const uint8_t *rec; size_t rl; int cc;
-            while ((cc = tls_reader_next(&g_reader, &rec, &rl)) == 1) {
+            while ((cc = tls_reader_next(&slot->reader, &rec, &rl)) == 1) {
                 size_t pl = 0;
-                int rr = tls_conn_recv_app(&g_conn, rec, rl, g_plain, sizeof g_plain, &pl);
+                int rr = tls_conn_recv_app(&slot->conn, rec, rl, g_plain, sizeof g_plain, &pl);
                 if (rr == TLS_CONN_ERR_ALERT) { closed = 1; goto https_done; }
                 if (rr < 0) { fprintf(2, "[httpsget] recv_app error %d\n", rr); goto https_done; }
                 resp_feed(g_plain, (int)pl);
                 /* A NewSessionTicket may ride along with (or instead of) app
-                 * data on any read once CONNECTED (Phase 15.7). */
+                 * data on any read once CONNECTED (Phase 15.7); it's stored
+                 * on the slot itself, so it outlives this one connection. */
                 { tls_session_ticket t;
-                  if (tls_conn_take_ticket(&g_conn, &t)) { t.obtained_ms = now * 1000; ticket_store(u, &t); } }
+                  if (tls_conn_take_ticket(&slot->conn, &t)) {
+                      t.obtained_ms = now * 1000;
+                      slot->ticket = t; slot->has_ticket = 1;
+                      printf("[httpsget] session ticket cached for %s:%d (lifetime=%us)\n",
+                             u->host, u->port, t.lifetime_secs);
+                  } }
                 if (resp_done()) goto https_done;
             }
             if (cc < 0) { fprintf(2, "[httpsget] malformed record\n"); break; }
             if (g_target < 0 && g_rlen >= (int)sizeof g_resp) break;   /* not reusable: preview cap reached */
-            int n = read(g_fd, g_scratch, sizeof g_scratch);
+            int n = read(slot->fd, g_scratch, sizeof g_scratch);
             if (n <= 0) { closed = 1; break; }
-            tls_reader_feed(&g_reader, g_scratch, (size_t)n);
+            tls_reader_feed(&slot->reader, g_scratch, (size_t)n);
         }
         https_done: ;
     } else {
-        if (write_all((const uint8_t*)req, rn) != 0) return FETCH_STALE;
+        if (write_all(slot->fd, (const uint8_t*)req, rn) != 0) return FETCH_STALE;
         printf("[httpsget] GET %s HTTP/1.1 sent (plain HTTP)\n", u->path);
 
         for (;;) {
             if (resp_done()) break;
             if (g_target < 0 && g_rlen >= (int)sizeof g_resp) break;
-            int n = read(g_fd, g_scratch, sizeof g_scratch);
+            int n = read(slot->fd, g_scratch, sizeof g_scratch);
             if (n <= 0) { closed = 1; break; }
             resp_feed(g_scratch, n);
         }
@@ -508,24 +537,24 @@ static int fetch_request(const struct url *u, uint64_t now, fetch_result_t *out)
     return FETCH_OK;
 }
 
-/* Ensure a session is open and matches `u` (reusing, reconnecting, or opening
- * fresh as needed), then send one GET and read the response. Returns 0 on a
- * response obtained (fr is filled), -1 on an unrecoverable transport failure
- * (diagnostic already printed, caller should give up). */
+/* Find (or bind) `u`'s session-cache slot, reuse its open connection if it
+ * has one, reconnect (offering its cached ticket, if any) otherwise, then
+ * send one GET and read the response. Returns 0 on a response obtained (fr
+ * is filled), -1 on an unrecoverable transport failure (diagnostic already
+ * printed, caller should give up). */
 static int fetch(const struct url *u, uint64_t now, fetch_result_t *out)
 {
-    if (g_open && same_origin(&g_session, u)) {
+    session_slot *slot = slot_find_or_alloc(u);
+    if (slot->conn_open) {
         printf("[httpsget] reusing open connection to %s:%d (keep-alive)\n", u->host, u->port);
-        int rc = fetch_request(u, now, out);
+        int rc = fetch_request(slot, u, now, out);
         if (rc == FETCH_OK) return 0;
         if (rc != FETCH_STALE) return -1;
         printf("[httpsget] reused connection to %s:%d was already closed -- reconnecting\n", u->host, u->port);
-        fetch_end();
-    } else {
-        fetch_end();     /* close whatever's open; it isn't this target */
+        slot_close(slot);
     }
-    if (fetch_begin(u, now) != 0) return -1;
-    int rc = fetch_request(u, now, out);
+    if (fetch_begin(slot, u, now) != 0) return -1;
+    int rc = fetch_request(slot, u, now, out);
     if (rc == FETCH_OK) return 0;
     if (rc == FETCH_STALE)
         fprintf(2, "[httpsget] connection to %s:%d closed before the request could be sent\n", u->host, u->port);
@@ -567,7 +596,10 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
                    u.https ? "https" : "http", u.host, u.port, u.path);
 
         if (fetch(&u, now, &fr) != 0) return -1;    /* diagnostic already printed */
-        if (!reusable(&fr.hr)) fetch_end();
+        /* Only this response's own slot closes -- a redirect to a different
+         * origin (Phase 15.8) leaves every other origin's slot exactly as it
+         * was, so a later hop back to one of them can still reuse it. */
+        if (!reusable(&fr.hr)) slot_close(slot_find_or_alloc(&u));
 
         int st = fr.hr.status;
         int is_redirect = st == 301 || st == 302 || st == 303 || st == 307 || st == 308;
@@ -656,10 +688,10 @@ int main(int argc, char **argv)
     int last_status = 0;
     for (int pi = 0; pi < npaths; pi++) {
         int st = fetch_one(host, paths[pi], now, npaths > 1 ? paths[pi] : 0);
-        if (st < 0) { fetch_end(); return 1; }
+        if (st < 0) { close_all_slots(); return 1; }
         last_status = st;
     }
-    fetch_end();
+    close_all_slots();
 
     if (last_status == 200) return 0;
     return last_status ? 0 : 2;
