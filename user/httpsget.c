@@ -1,15 +1,18 @@
 /* httpsget — Aurora's userspace HTTPS client (14.0.3b / 14.0.4 in QEMU; 15.2
  * adds redirects; 15.4 adds HTTP keep-alive; 15.8 adds a multi-origin
- * session cache; 15.9 adds cookies; 15.10 adds gzip; 16.1 adds HTTP POST).
+ * session cache; 15.9 adds cookies; 15.10 adds gzip; 16.1 adds HTTP POST;
+ * 16.2 adds HTTP authentication; 16.3 makes redirects RFC-correct for a
+ * request with a body).
  *
  * HTTP POST (Phase 16.1, opening the "Web Platform" series that follows
  * HTTPS v2): `httpsget --post <host> <path> <body> [now_unix]` sends `body`
  * (a single whitespace-free CLI argument -- Aurora's shell has no quoting)
  * as application/x-www-form-urlencoded, with an auto-computed
- * Content-Length. The method/body apply only to the very first request; a
- * redirect downgrades to a bodyless GET on the next hop, matching legacy
- * browser behavior for 301/302/303 (RFC 7231's method-and-body-preserving
- * 307/308 are not yet implemented -- a deliberate first-cut simplification).
+ * Content-Length. What happens to the method/body across a redirect (Phase
+ * 16.3) follows RFC 7231/7238 by status code: 307 and 308 resend the exact
+ * same method and body on the next hop, while 301/302/303 downgrade to a
+ * bodyless GET -- matching what browsers have done since long before it
+ * was standardized.
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -631,11 +634,12 @@ static int fetch(const struct url *u, uint64_t now, const char *method,
  * obtained), or -1 on an unrecoverable transport failure. `label` is printed
  * as a header when there's more than one path in this run.
  *
- * `method`/`post_body`/`post_bodylen` (Phase 16.1) apply ONLY to the first
- * request (hop 0); any redirect downgrades to a bodyless GET on the next
- * hop -- matching legacy browser behavior for 301/302/303, though not RFC
- * 7231's method-and-body-preserving 307/308 (a deliberate first-cut
- * simplification, not yet implemented). */
+ * `method`/`post_body`/`post_bodylen` (Phase 16.1) start as given for the
+ * first request (hop 0) and are then re-decided after every redirect
+ * response, per RFC 7231/7238 (Phase 16.3): 307 and 308 preserve the
+ * current method and body unchanged onto the next hop, while every other
+ * redirect status (301/302/303) downgrades to a bodyless GET, matching
+ * what browsers have done since long before it was standardized. */
 static int fetch_one(const char *host, const char *path, uint64_t now, const char *label,
                      const char *method, const uint8_t *post_body, int post_bodylen)
 {
@@ -649,6 +653,9 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
 
     int nvisited = 0, hop = 0;
     fetch_result_t fr;
+    const char *req_method = method;
+    const uint8_t *req_body = post_body;
+    int req_bodylen = post_bodylen;
 
     for (;;) {
         for (int i = 0; i < nvisited; i++)
@@ -664,19 +671,16 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
         g_visited[nvisited++] = u;
 
         if (hop > 0)
-            printf("[httpsget] -- hop %d/%d: %s://%s:%d%s\n", hop, MAX_REDIRECTS,
+            printf("[httpsget] -- hop %d/%d: %s %s://%s:%d%s\n", hop, MAX_REDIRECTS, req_method,
                    u.https ? "https" : "http", u.host, u.port, u.path);
 
-        const char *cur_method = hop == 0 ? method : "GET";
-        const uint8_t *cur_body = hop == 0 ? post_body : 0;
-        int cur_bodylen = hop == 0 ? post_bodylen : 0;
         /* Authorization (Phase 16.2) is re-checked on every hop, not just
          * hop 0: it's scoped to whichever origin it was given for, so it
          * naturally keeps following same-origin redirects and just as
          * naturally stops the moment a redirect leaves that origin. */
         const char *cur_auth = (g_has_auth && same_origin(&g_auth_origin, &u)) ? g_auth_header : 0;
         int cur_auth_len = cur_auth ? g_auth_len : 0;
-        if (fetch(&u, now, cur_method, cur_body, cur_bodylen, cur_auth, cur_auth_len, &fr) != 0)
+        if (fetch(&u, now, req_method, req_body, req_bodylen, cur_auth, cur_auth_len, &fr) != 0)
             return -1;    /* diagnostic already printed */
         /* Only this response's own slot closes -- a redirect to a different
          * origin (Phase 15.8) leaves every other origin's slot exactly as it
@@ -738,6 +742,7 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
             return st;
         }
         printf("[httpsget] %d redirect -> %s\n", st, fr.hr.location);
+        if (st != 307 && st != 308) { req_method = "GET"; req_body = 0; req_bodylen = 0; }
         u = next;
         hop++;
     }
