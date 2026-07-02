@@ -26,6 +26,8 @@ typedef enum {
     TLS_EV_APP_KEYS,
     TLS_EV_CONNECTED,
     TLS_EV_TICKET_RECEIVED,      /* a post-handshake NewSessionTicket was parsed + cached (15.7) */
+    TLS_EV_ALPN_OFFERED,         /* ClientHello carried an ALPN extension (17.0) */
+    TLS_EV_ALPN_NEGOTIATED,      /* EncryptedExtensions carried the server's ALPN selection (17.0) */
     /* failures */
     TLS_EV_FAIL_PROTOCOL,
     TLS_EV_FAIL_CERT,

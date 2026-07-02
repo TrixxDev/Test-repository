@@ -23,6 +23,8 @@ const char *tls_event_name(tls_event ev)
     case TLS_EV_APP_KEYS:             return "Application keys installed";
     case TLS_EV_CONNECTED:            return "CONNECTED";
     case TLS_EV_TICKET_RECEIVED:      return "NewSessionTicket received (cached)";
+    case TLS_EV_ALPN_OFFERED:         return "ALPN offered";
+    case TLS_EV_ALPN_NEGOTIATED:      return "ALPN negotiated";
     case TLS_EV_FAIL_PROTOCOL:        return "Protocol error";
     case TLS_EV_FAIL_CERT:            return "Certificate validation FAILED";
     case TLS_EV_FAIL_AUTH:            return "CertificateVerify FAILED";

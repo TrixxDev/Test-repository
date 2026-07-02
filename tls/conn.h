@@ -81,6 +81,15 @@ static inline void tls_conn_offer_psk(tls_conn *c, const tls_session_ticket *res
     tls_client_offer_psk(&c->fsm, resume, now_ms);
 }
 
+/* Offer ALPN protocols (Phase 17.0) -- see tls_client_offer_alpn(), which
+ * this just forwards to. Call after tls_conn_init() and before
+ * tls_conn_start(). The negotiated protocol (if any) ends up in
+ * c->fsm.alpn_selected/alpn_negotiated once EncryptedExtensions is processed. */
+static inline void tls_conn_offer_alpn(tls_conn *c, const char **protocols, size_t count)
+{
+    tls_client_offer_alpn(&c->fsm, protocols, count);
+}
+
 /* If a NewSessionTicket has arrived and not yet been consumed, fills *out and
  * returns 1, clearing the pending flag. Returns 0 otherwise. Call this after
  * tls_conn_recv_app() -- a ticket may ride along with (or instead of) app

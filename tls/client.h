@@ -96,6 +96,12 @@ typedef struct {
     uint8_t  resumption_master_secret[32];     /* set once CONNECTED, for a future ticket's PSK */
     int      has_resumption_secret;
 
+    /* ALPN (Phase 17.0, RFC 7301). */
+    const char **alpn_protocols;  /* set via tls_client_offer_alpn(); NULL = extension omitted */
+    size_t       alpn_count;
+    char alpn_selected[32];       /* the server's chosen protocol, if any (set at WAIT_EE) */
+    int  alpn_negotiated;         /* 1 if the server's EncryptedExtensions carried ALPN at all */
+
     tls_trace_sink trace;                /* handshake trace sink (NULL = no tracing) */
     void          *trace_ctx;
 } tls_client;
@@ -123,6 +129,17 @@ void tls_client_set_trace(tls_client *c, tls_trace_sink fn, void *ctx);
  * is an offer, not a requirement. Pass `resume = NULL` for a full handshake
  * only (the pre-15.7 behavior, unconditionally). */
 void tls_client_offer_psk(tls_client *c, const tls_session_ticket *resume, uint64_t now_ms);
+
+/* Offer ALPN protocols (Phase 17.0, RFC 7301) in preference order. Call
+ * after tls_client_init() and before tls_client_start(); `protocols` must
+ * outlive the handshake. `count == 0` (the default) omits the extension
+ * entirely -- a full pre-17.0 ClientHello, unconditionally. RFC 7301 has no
+ * negotiation fallback of its own: if the server doesn't support ALPN, or
+ * none of our offered protocols match any of its own, it just omits the
+ * extension from its response and the handshake proceeds without a
+ * negotiated protocol -- c->alpn_negotiated stays 0 and it's the caller's
+ * job to decide what that means (e.g. assume HTTP/1.1). */
+void tls_client_offer_alpn(tls_client *c, const char **protocols, size_t count);
 
 /* Emit the initial ClientHello (plaintext handshake message) into `out`.
  * Returns its length or -1. START -> WAIT_SH. */

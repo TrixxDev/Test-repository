@@ -39,6 +39,7 @@ int tls_build_client_hello(uint8_t *out, size_t cap,
                            const uint8_t random[32],
                            const uint8_t x25519_pub[32],
                            const char *server_name,
+                           const char **alpn_protocols, size_t alpn_count,
                            const tls_session_ticket *resume,
                            uint64_t now_ms,
                            const uint8_t binder_key[32])
@@ -90,6 +91,22 @@ int tls_build_client_hello(uint8_t *out, size_t cap,
           w_u8(&b, 0);                            /* name_type = host_name */
           w_u16(&b, (uint16_t)hlen);
           w_bytes(&b, (const uint8_t *)server_name, hlen);
+          w_close16(&b, l); w_close16(&b, e); }
+    }
+
+    /* application_layer_protocol_negotiation (16, RFC 7301, Phase 17.0):
+     * ProtocolNameList of uint8-length-prefixed names, in preference order.
+     * Optional -- omitted entirely (byte-identical to the pre-17.0 shape)
+     * unless the caller offered at least one protocol. Must come before the
+     * pre_shared_key block below, which has to stay last. */
+    if (alpn_protocols && alpn_count > 0) {
+        w_u16(&b, 16);
+        { size_t e = w_open16(&b); size_t l = w_open16(&b);
+          for (size_t ai = 0; ai < alpn_count; ai++) {
+              size_t plen = 0; while (alpn_protocols[ai][plen]) plen++;
+              w_u8(&b, (uint8_t)plen);
+              w_bytes(&b, (const uint8_t *)alpn_protocols[ai], plen);
+          }
           w_close16(&b, l); w_close16(&b, e); }
     }
 
@@ -203,6 +220,57 @@ int tls_parse_server_hello(const uint8_t *msg, size_t len,
     }
     #undef NEED
     return have_key_share ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* EncryptedExtensions parser (bounds-checked; ALPN -- Phase 17.0)    */
+/* ------------------------------------------------------------------ */
+int tls_parse_encrypted_extensions(const uint8_t *msg, size_t len,
+                                   char *alpn_out, size_t alpn_out_cap,
+                                   int *alpn_negotiated)
+{
+    size_t i = 0;
+    #define NEED(n) do { if (i + (n) > len) return -1; } while (0)
+    if (alpn_negotiated) *alpn_negotiated = 0;
+    if (alpn_out && alpn_out_cap > 0) alpn_out[0] = 0;
+
+    NEED(4);
+    if (msg[0] != TLS_HS_ENCRYPTED_EXTENSIONS) return -1;
+    size_t body = ((size_t)msg[1] << 16) | ((size_t)msg[2] << 8) | msg[3];
+    i = 4;
+    if (i + body != len) return -1;
+
+    NEED(2); size_t extlen = ((size_t)msg[i] << 8) | msg[i+1]; i += 2;
+    NEED(extlen);
+    size_t end = i + extlen;
+
+    while (i + 4 <= end) {
+        uint16_t etype = (uint16_t)((msg[i] << 8) | msg[i+1]);
+        size_t elen = ((size_t)msg[i+2] << 8) | msg[i+3];
+        i += 4;
+        if (i + elen > end) return -1;
+
+        if (etype == 16) {                        /* ALPN: ProtocolNameList */
+            /* RFC 7301 §3.2: the server's response carries exactly one
+             * protocol name (its selection); a uint16 list length followed
+             * by one uint8-length-prefixed name. */
+            if (elen < 3) return -1;
+            size_t list_len = ((size_t)msg[i] << 8) | msg[i+1];
+            if (2 + list_len > elen || list_len < 1) return -1;
+            size_t p = i + 2;
+            size_t plen = msg[p];
+            if (1 + plen > list_len) return -1;
+            if (alpn_out && alpn_out_cap > 0) {
+                size_t n = plen < alpn_out_cap - 1 ? plen : alpn_out_cap - 1;
+                for (size_t k = 0; k < n; k++) alpn_out[k] = (char)msg[p + 1 + k];
+                alpn_out[n] = 0;
+            }
+            if (alpn_negotiated) *alpn_negotiated = 1;
+        }
+        i += elen;
+    }
+    #undef NEED
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

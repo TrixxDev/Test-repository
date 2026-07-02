@@ -87,6 +87,7 @@ Run the vectors: `make crypto-test`.
 | **16.3** | **RFC-correct redirects for a request with a body** — 16.1's per-hop method/body decision is now made fresh after every redirect response instead of being fixed at the first hop: `307`/`308` resend the exact method and body (RFC 7231 §6.4.7 / RFC 7238), while `301`/`302`/`303` still downgrade to a bodyless `GET` | `tools/redirect_preserve_qemu.py` against a real TLS 1.3 server: a real 4-hop chain (`POST` →307→ `POST` →308→ `POST` →302→ `GET`) confirms both preserving hops resend the identical body bytes and the final `302` hop downgrades to a bodyless `GET` even though the request had been carried as `POST` through the two hops before it — proving the decision is made per-redirect, not "sticky" for the rest of the chain; full existing host + QEMU regression suite (incl. 16.1's own 302-downgrade test) unaffected | ✅ |
 | **16.4** | **multipart/form-data** — `httpsget --post-multipart <host> <path> <field=value \| field=@localfile> [...]` encodes each field as its own MIME part behind a generated boundary; `build_request()`'s Content-Type is now caller-supplied (`content_type`, threaded alongside `body`/`bodylen` through `fetch_request()`/`fetch()`/`fetch_one()`, and preserved or dropped on a redirect by the same 307/308-vs-everything-else rule 16.3 already applies to the body) instead of a hardcoded url-encoded string; a `field=@localfile` value is read off Aurora's own FAT32 disk (`open()`/`read()` in a loop — there's no `stat`/`lseek` to size a file up front) and sent as a file part with a fixed `application/octet-stream` Content-Type | `tools/multipart_qemu.py` against a real TLS 1.3 server: the server extracts the boundary from the *actual* Content-Type header and parses the *actual* body itself into parts (not trusting httpsget's own log), confirming a text field's exact value, a file field's filename/Content-Type, and that the file part's bytes match a real on-disk file byte-for-byte; a same-origin 307 hop then confirms the Content-Type (boundary included) and raw body are byte-identical on the retry, proving 16.3's preservation rule now correctly covers a multipart Content-Type too; full existing host + QEMU regression suite unaffected | ✅ |
 | **16.5** | **General `--method`** — `httpsget --method <GET\|HEAD\|OPTIONS\|DELETE\|POST\|PUT\|PATCH> ...` replaces the old hardcoded GET-or-POST choice with a validated table (`--post` is now just `--method POST`'s older, still-supported spelling); PUT/PATCH reuse `--post`'s body-shaped argument parsing, HEAD/OPTIONS/DELETE reuse GET's multi-path bodyless parsing — `build_request()`/`fetch_request()`/`fetch()`/`fetch_one()` needed no changes at all, since they already took `method` as a plain string. Fixes a real hang risk surfaced by adding HEAD: RFC 7230 §3.3.3 says a HEAD response body is *always* empty regardless of its `Content-Length` (which, if present, describes what a GET would have returned) — without a fix, a keep-alive HEAD response advertising a nonzero `Content-Length` would make the read loop wait forever for body bytes the server will never send; `resp_feed()`/`reusable()` now both special-case a HEAD request's response framing | `tools/method_qemu.py` against a real TLS 1.3 server: confirms `--method PUT`'s real method and exact body bytes, `--method DELETE`'s real method and bodyless request, and — the critical case — that `--method HEAD` against a server advertising `Content-Length: 999999` on a keep-alive connection that sends *zero* actual body bytes still reaches `status=200` within the ordinary wait budget instead of hanging; full existing host + QEMU regression suite (incl. 16.1/16.2/16.3/16.4's own POST/PUT-adjacent paths) unaffected | ✅ |
+| **17.0** | **ALPN** (RFC 7301, opening the "modern transport" series, `17.x`, that follows the now-closed `16.x` Web Platform series) — `httpsget --alpn` offers `["h2", "http/1.1"]` in the TLS ClientHello (opt-in: omitted entirely, byte-identical to every pre-17.0 ClientHello, unless the flag is given) and a new `tls_parse_encrypted_extensions()` extracts the server's selection (best-effort/non-fatal on a parse quirk — unlike Certificate/CertificateVerify, nothing here is security-critical enough to abort a handshake over). This phase is deliberately *just* the negotiation: there is no HTTP/2 framing yet, so if the server actually selects `h2`, `fetch_begin()` refuses to continue that connection rather than sending an HTTP/1.1 request line a peer now expecting HTTP/2 framing would never understand | `make tls-test` (21 new cases: a no-ALPN ClientHello is unaffected, an ALPN ClientHello carries both offered names and is exactly the expected 18 bytes longer, ALPN correctly precedes `pre_shared_key` when both are offered together, and `tls_parse_encrypted_extensions()` extracts `h2`/`http/1.1` selections, tolerates an unrelated extension alongside ALPN, and rejects (without over-reading) a malformed message); `tools/alpn_qemu.py` against a real TLS 1.3 server with an independent OpenSSL-backed ALPN implementation: a server that can only pick `http/1.1` does, and Aurora proceeds normally; a server that prefers `h2` gets it, and Aurora's own log shows the refusal while the server independently confirms *no bytes at all* arrive after the handshake; `--alpn` omitted against a server supporting both proves no extension was sent. Full existing host suite and a 12-script QEMU regression sweep (incl. 15.7 PSK resumption, since `EncryptedExtensions` parsing is now always-on for every connection, ALPN or not) all pass unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2396,6 +2397,105 @@ Verified two ways:
   existing host + QEMU regression suite — including 16.1's `--post` path,
   now proven to still work as `--method POST`'s validation makes it
   through unchanged — is unaffected.
+
+## Step 17.0 — ALPN
+
+With 16.x closed out, Aurora has a genuinely complete HTTP/1.1 client:
+GET/HEAD/OPTIONS/DELETE/POST/PUT/PATCH, redirects, keep-alive, session
+resumption, cookies, gzip, authentication, multipart. The next layer up —
+whether that ends up being HTTP/2 or eventually a browser stack — needs
+ALPN first: without it, a server has no way to know during the TLS
+handshake itself that this client can speak anything beyond plain HTTP/1.1,
+and most modern servers won't offer HTTP/2 to a connection that never asked
+for it. This phase is deliberately *just* that negotiation, RFC 7301, with
+no HTTP/2 framing behind it yet — a small, self-contained TLS-layer
+addition ahead of a much larger one.
+
+**Opt-in, to protect the RFC 8448 byte-exact vectors.** `tls_build_client_
+hello()` gains `alpn_protocols`/`alpn_count` parameters, written as extension
+type 16 exactly like `psk_key_exchange_modes`/`pre_shared_key` before it —
+same `w_open16`/`w_close16` pattern, same placement rule (it has to come
+*before* `pre_shared_key`, which RFC 8446 §4.2.11 requires to stay the very
+last extension). When `alpn_protocols` is NULL (the default, set in `tls_
+client_init()` and only changed by the new `tls_client_offer_alpn()`, called
+by `httpsget`'s `fetch_begin()` only when `--alpn` was given), the extension
+is omitted entirely — every ClientHello built without asking for ALPN is
+byte-identical to every ClientHello before this phase existed. This mattered
+enough to check directly: investigating this phase turned up that this
+codebase's RFC 8448 §3/§4 vectors don't actually do an exact byte comparison
+against `tls_build_client_hello()`'s live output (the byte-exact ones are
+pre-baked hex fed straight into the transcript, bypassing the builder;
+the ones that *do* call the builder check structurally, e.g. "does the
+output contain the ticket bytes," not "is it identical to this string") —
+so an unconditional extension wouldn't actually have broken anything
+measurable. The opt-in design was kept anyway: it's the same shape 15.7's
+PSK offering already established, it's a one-line difference, and "adding a
+feature changes wire bytes only when a caller asks for the feature" is
+worth having as an explicit property rather than an accident of what the
+test suite happens to check.
+
+**EncryptedExtensions gets parsed for the first time.** Every phase through
+16.5 transcripted EncryptedExtensions blindly, never interpreting it — there
+was nothing in it any earlier phase needed. `tls_parse_encrypted_extensions()`
+adds a bounds-checked walk (mirroring `tls_parse_server_hello()`'s existing
+extension loop) that extracts the ALPN selection, if present, and otherwise
+skips whatever it doesn't recognize. Its result is treated as **best-effort**:
+a parse failure does not abort the handshake, unlike ServerHello or
+Certificate. Everything in this message is optional metadata a real server
+sends alongside authentication that happens in later messages — refusing an
+otherwise-valid connection over a parsing quirk here would be a worse
+failure mode than simply not detecting ALPN, and there was a concrete reason
+for caution: this parser now runs on *every* connection, resumed or not,
+ALPN requested or not, so a bug in it could regress ordinary HTTPS fetches
+that have nothing to do with ALPN at all. (The bounds-checking itself is not
+relaxed by this leniency — only the decision to reject the connection on a
+structural violation is skipped; an out-of-bounds read is still prevented
+exactly as rigorously as everywhere else in this file.)
+
+**A selected `h2` is refused, not attempted.** If the server picks `h2`
+from the offered list, `fetch_begin()` prints the reason and closes the
+connection immediately rather than sending an ordinary HTTP/1.1 request
+line to a peer that now expects HTTP/2 framing — that would desync or hang,
+not degrade gracefully. `--alpn`'s offered list is `{"h2", "http/1.1"}`
+specifically so a real test server has a genuine choice to make (a
+one-option list would only prove the extension round-trips, not that
+Aurora reacts correctly to a server picking the option it can't use yet).
+
+Verified two ways:
+- **Host (`make tls-test`)**: 8 new ClientHello-construction checks (no-ALPN
+  unaffected, both offered names present, exactly +18 bytes for the
+  extension, and — combined with a PSK offer — ALPN's byte offset
+  confirmed to land before the ticket's, locking in the §4.2.11 ordering
+  rule) plus 13 new `tls_parse_encrypted_extensions()` checks (`h2` and
+  `http/1.1` selections extracted correctly, no-extensions-at-all leaves
+  the negotiated flag cleared and the output buffer un-stale, an unrelated
+  extension alongside ALPN doesn't confuse the skip-unknown loop, and two
+  malformed-input cases are rejected without over-reading). The full
+  existing host suite passes unchanged, and — the whole point of the
+  opt-in design — `make tls-trace-test`'s RFC 8448 §3/§4 vectors still
+  pass byte-exact.
+- **QEMU (`tools/alpn_qemu.py`)**, against a real TLS 1.3 server with its
+  own independent (OpenSSL-backed) ALPN implementation: a server that can
+  only offer `http/1.1` selects it and Aurora proceeds completely
+  normally; a server that prefers `h2` gets it, and Aurora's own log shows
+  the refusal while the server *independently* confirms zero bytes ever
+  arrive on that connection after the handshake completes — proving Aurora
+  really stopped, not just misreported success; `--alpn` omitted against a
+  server that supports both proves no extension was sent at all. All 13
+  checks pass. Because `EncryptedExtensions` parsing is now unconditional
+  for every connection, this phase's regression pass was widened beyond
+  the usual handful of scripts to a 12-script sweep covering every
+  existing QEMU acceptance test in the suite, including 15.7's PSK
+  resumption (a resumed handshake still processes EncryptedExtensions,
+  just skipping Certificate/CertificateVerify) — all pass unaffected.
+  (Writing this test also surfaced a test-harness-only limitation, not a
+  code bug: `httpsget`'s CLI has no way to target a non-443 port directly
+  — `fetch_one()` hardcodes `u.port = 443` for whatever `<host>` argument
+  it's given — so a first draft of this script tried to reach three
+  separate per-scenario servers on three different ports and silently hit
+  the wrong one twice. Fixed by using a single port-443 server whose
+  `SSLContext.set_alpn_protocols()` is reconfigured between the three
+  sequential QEMU boots instead.)
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

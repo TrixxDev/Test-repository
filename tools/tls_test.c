@@ -599,7 +599,7 @@ int main(void)
 
         /* ClientHello: structurally well-formed, carries our key_share + SNI */
         uint8_t ch[1024];
-        int chlen = tls_build_client_hello(ch, sizeof ch, crand, cpub, "example.com", 0, 0, 0);
+        int chlen = tls_build_client_hello(ch, sizeof ch, crand, cpub, "example.com", 0, 0, 0, 0, 0);
         check_int("ClientHello builds", chlen > 0, 1);
         check_int("ClientHello type == client_hello", ch[0], TLS_HS_CLIENT_HELLO);
         check_int("ClientHello length field consistent",
@@ -643,6 +643,186 @@ int main(void)
         check_int("peer Finished verifies", tls_check_finished(fk, thash, vd), 0);
         uint8_t bad[32]; memcpy(bad, vd, 32); bad[0] ^= 1;
         check_int("tampered Finished rejected", tls_check_finished(fk, thash, bad), -1);
+    }
+
+    printf("TLS 1.3 ALPN (RFC 7301, Phase 17.0):\n");
+    {
+        uint8_t cpriv[32], cpub[32], crand[32];
+        for (int i = 0; i < 32; i++) { cpriv[i] = (uint8_t)(i + 1); crand[i] = (uint8_t)(0xa0 + i); }
+        x25519_base(cpub, cpriv);
+
+        /* ClientHello without ALPN (alpn_protocols = NULL) must be exactly
+         * the pre-17.0 shape -- every existing ClientHello test above (and
+         * every RFC 8448 FSM test in tls_trace_test.c) already pins this
+         * implicitly by never passing ALPN and still passing; this makes it
+         * an explicit, named check for ALPN's own test section. */
+        uint8_t ch0[1024];
+        int ch0len = tls_build_client_hello(ch0, sizeof ch0, crand, cpub, "example.com", 0, 0, 0, 0, 0);
+        check_int("no-ALPN ClientHello still builds", ch0len > 0, 1);
+
+        /* ClientHello offering ALPN: carries both protocol names, and its
+         * length is exactly ch0len plus the ALPN extension's own bytes --
+         * 2 (type) + 2 (ext len) + 2 (list len) + (1+2) "h2" + (1+8) "http/1.1". */
+        static const char *protos[2] = { "h2", "http/1.1" };
+        uint8_t ch1[1024];
+        int ch1len = tls_build_client_hello(ch1, sizeof ch1, crand, cpub, "example.com", protos, 2, 0, 0, 0);
+        check_int("ALPN ClientHello builds", ch1len > 0, 1);
+        check_int("ALPN ClientHello carries \"h2\"",
+                  contains(ch1, ch1len, (const uint8_t*)"h2", 2), 1);
+        check_int("ALPN ClientHello carries \"http/1.1\"",
+                  contains(ch1, ch1len, (const uint8_t*)"http/1.1", 8), 1);
+        check_int("ALPN ClientHello is exactly 18 bytes longer (the extension itself)",
+                  ch1len - ch0len, 18);
+
+        /* ALPN + PSK together: pre_shared_key (RFC 8446 §4.2.11) must stay
+         * the LAST extension -- confirm the ALPN protocol name's byte offset
+         * comes before the (distinctively-patterned) ticket's own offset. */
+        tls_session_ticket tk; memset(&tk, 0, sizeof tk);
+        tk.ticket_len = 8;
+        for (int i = 0; i < 8; i++) tk.ticket[i] = 0xCC;      /* distinctive, unlikely elsewhere */
+        for (int i = 0; i < 32; i++) tk.psk[i] = (uint8_t)i;
+        uint8_t early[32], binder_key[32];
+        tls_derive_early_secret(early, tk.psk, sizeof tk.psk);
+        tls_derive_binder_key(binder_key, early);
+        uint8_t ch2[1024];
+        int ch2len = tls_build_client_hello(ch2, sizeof ch2, crand, cpub, "example.com",
+                                            protos, 2, &tk, 0, binder_key);
+        check_int("ALPN+PSK ClientHello builds", ch2len > 0, 1);
+        int alpn_at = -1, ticket_at = -1;
+        for (int i = 0; i + 8 <= ch2len; i++) {
+            int j = 0; while (j < 8 && ch2[i+j] == 0xCC) j++;
+            if (j == 8) { ticket_at = i; break; }
+        }
+        for (int i = 0; i + 2 <= ch2len; i++) {
+            if (ch2[i] == 'h' && ch2[i+1] == '2') { alpn_at = i; break; }
+        }
+        check_int("both ALPN and the ticket found in the combined ClientHello",
+                  alpn_at >= 0 && ticket_at >= 0, 1);
+        check_int("ALPN extension comes before pre_shared_key (RFC 8446 SS4.2.11 ordering)",
+                  alpn_at >= 0 && ticket_at >= 0 && alpn_at < ticket_at, 1);
+    }
+
+    printf("TLS 1.3 EncryptedExtensions / ALPN selection parsing (Phase 17.0):\n");
+    {
+        /* Minimal EncryptedExtensions builder carrying just an ALPN selection
+         * (or none, or an unrelated extension) -- for exercising
+         * tls_parse_encrypted_extensions() directly, independent of a full
+         * handshake. */
+        uint8_t ee[256];
+
+        /* 1. selects "h2" */
+        {
+            int n = 0;
+            ee[n++] = TLS_HS_ENCRYPTED_EXTENSIONS;
+            int hs_at = n; n += 3;
+            int exts_at = n; n += 2;
+            ee[n++] = 0x00; ee[n++] = 0x10;              /* ALPN */
+            int elen_at = n; n += 2;
+            int list_at = n; n += 2;
+            ee[n++] = 2; ee[n++] = 'h'; ee[n++] = '2';
+            int list_len = n - (list_at + 2);
+            ee[list_at] = (uint8_t)(list_len >> 8); ee[list_at+1] = (uint8_t)list_len;
+            int elen = n - (elen_at + 2);
+            ee[elen_at] = (uint8_t)(elen >> 8); ee[elen_at+1] = (uint8_t)elen;
+            int exts_len = n - (exts_at + 2);
+            ee[exts_at] = (uint8_t)(exts_len >> 8); ee[exts_at+1] = (uint8_t)exts_len;
+            int hs_len = n - (hs_at + 3);
+            ee[hs_at] = (uint8_t)(hs_len >> 16); ee[hs_at+1] = (uint8_t)(hs_len >> 8); ee[hs_at+2] = (uint8_t)hs_len;
+
+            char sel[32]; int neg = 0;
+            check_int("EE with ALPN=h2 parses", tls_parse_encrypted_extensions(ee, n, sel, sizeof sel, &neg), 0);
+            check_int("EE with ALPN=h2: negotiated flag set", neg, 1);
+            check_int("EE with ALPN=h2: selected protocol is exactly \"h2\"", strcmp(sel, "h2") == 0, 1);
+        }
+
+        /* 2. selects "http/1.1" (longer name, exercises the length path differently) */
+        {
+            int n = 0;
+            ee[n++] = TLS_HS_ENCRYPTED_EXTENSIONS;
+            int hs_at = n; n += 3;
+            int exts_at = n; n += 2;
+            ee[n++] = 0x00; ee[n++] = 0x10;
+            int elen_at = n; n += 2;
+            int list_at = n; n += 2;
+            const char *p = "http/1.1";
+            ee[n++] = (uint8_t)strlen(p);
+            memcpy(ee + n, p, strlen(p)); n += (int)strlen(p);
+            int list_len = n - (list_at + 2);
+            ee[list_at] = (uint8_t)(list_len >> 8); ee[list_at+1] = (uint8_t)list_len;
+            int elen = n - (elen_at + 2);
+            ee[elen_at] = (uint8_t)(elen >> 8); ee[elen_at+1] = (uint8_t)elen;
+            int exts_len = n - (exts_at + 2);
+            ee[exts_at] = (uint8_t)(exts_len >> 8); ee[exts_at+1] = (uint8_t)exts_len;
+            int hs_len = n - (hs_at + 3);
+            ee[hs_at] = (uint8_t)(hs_len >> 16); ee[hs_at+1] = (uint8_t)(hs_len >> 8); ee[hs_at+2] = (uint8_t)hs_len;
+
+            char sel[32]; int neg = 0;
+            check_int("EE with ALPN=http/1.1 parses", tls_parse_encrypted_extensions(ee, n, sel, sizeof sel, &neg), 0);
+            check_int("EE with ALPN=http/1.1: selected protocol matches", strcmp(sel, "http/1.1") == 0, 1);
+        }
+
+        /* 3. no extensions at all -- ALPN just wasn't offered/selected */
+        {
+            int n = 0;
+            ee[n++] = TLS_HS_ENCRYPTED_EXTENSIONS;
+            int hs_at = n; n += 3;
+            ee[n++] = 0; ee[n++] = 0;                    /* extensions length = 0 */
+            int hs_len = n - (hs_at + 3);
+            ee[hs_at] = (uint8_t)(hs_len >> 16); ee[hs_at+1] = (uint8_t)(hs_len >> 8); ee[hs_at+2] = (uint8_t)hs_len;
+
+            char sel[32] = "unset"; int neg = 1;
+            check_int("EE with no extensions parses", tls_parse_encrypted_extensions(ee, n, sel, sizeof sel, &neg), 0);
+            check_int("EE with no extensions: negotiated flag cleared", neg, 0);
+            check_int("EE with no extensions: selected buffer cleared, not left stale", sel[0], 0);
+        }
+
+        /* 4. an unrelated (unknown) extension present alongside ALPN -- the
+         * generic skip-unknown loop must not choke on it and must still find
+         * ALPN afterward. */
+        {
+            int n = 0;
+            ee[n++] = TLS_HS_ENCRYPTED_EXTENSIONS;
+            int hs_at = n; n += 3;
+            int exts_at = n; n += 2;
+            ee[n++] = 0x99; ee[n++] = 0x99;              /* unknown type */
+            ee[n++] = 0; ee[n++] = 3;                    /* 3 bytes of junk data */
+            ee[n++] = 1; ee[n++] = 2; ee[n++] = 3;
+            ee[n++] = 0x00; ee[n++] = 0x10;              /* ALPN, after the unknown one */
+            int elen_at = n; n += 2;
+            int list_at = n; n += 2;
+            ee[n++] = 2; ee[n++] = 'h'; ee[n++] = '2';
+            int list_len = n - (list_at + 2);
+            ee[list_at] = (uint8_t)(list_len >> 8); ee[list_at+1] = (uint8_t)list_len;
+            int elen = n - (elen_at + 2);
+            ee[elen_at] = (uint8_t)(elen >> 8); ee[elen_at+1] = (uint8_t)elen;
+            int exts_len = n - (exts_at + 2);
+            ee[exts_at] = (uint8_t)(exts_len >> 8); ee[exts_at+1] = (uint8_t)exts_len;
+            int hs_len = n - (hs_at + 3);
+            ee[hs_at] = (uint8_t)(hs_len >> 16); ee[hs_at+1] = (uint8_t)(hs_len >> 8); ee[hs_at+2] = (uint8_t)hs_len;
+
+            char sel[32]; int neg = 0;
+            check_int("EE with an unknown extension before ALPN still parses",
+                      tls_parse_encrypted_extensions(ee, n, sel, sizeof sel, &neg), 0);
+            check_int("EE with an unknown extension before ALPN: ALPN still found", neg, 1);
+            check_int("EE with an unknown extension before ALPN: selection correct", strcmp(sel, "h2") == 0, 1);
+        }
+
+        /* 5. malformed: claims a 10-byte body but only 4 bytes follow --
+         * must be rejected, not read out of bounds. */
+        {
+            uint8_t bad[8] = { TLS_HS_ENCRYPTED_EXTENSIONS, 0, 0, 10, 0, 0, 0, 0 };
+            char sel[32]; int neg = 0;
+            check_int("EE with an inconsistent length is rejected",
+                      tls_parse_encrypted_extensions(bad, sizeof bad, sel, sizeof sel, &neg), -1);
+        }
+
+        /* 6. wrong message type entirely -- rejected up front */
+        {
+            uint8_t bad[8] = { TLS_HS_CERTIFICATE, 0, 0, 4, 0, 0, 0, 0 };
+            char sel[32]; int neg = 0;
+            check_int("EE parser rejects a non-EncryptedExtensions message type",
+                      tls_parse_encrypted_extensions(bad, sizeof bad, sel, sizeof sel, &neg), -1);
+        }
     }
 
     printf("TLS 1.3 client FSM (deterministic loopback handshake):\n");

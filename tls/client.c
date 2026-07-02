@@ -42,6 +42,11 @@ void tls_client_init(tls_client *c, const char *server_name,
     c->psk_accepted = 0;
     c->has_resumption_secret = 0;
 
+    c->alpn_protocols = 0;   /* extension omitted until tls_client_offer_alpn */
+    c->alpn_count = 0;
+    c->alpn_selected[0] = 0;
+    c->alpn_negotiated = 0;
+
     c->trace = 0;
     c->trace_ctx = 0;
 }
@@ -54,6 +59,12 @@ void tls_client_offer_psk(tls_client *c, const tls_session_ticket *resume, uint6
         tls_derive_early_secret(c->psk_early_secret, resume->psk, sizeof resume->psk);
         tls_derive_binder_key(c->binder_key, c->psk_early_secret);
     }
+}
+
+void tls_client_offer_alpn(tls_client *c, const char **protocols, size_t count)
+{
+    c->alpn_protocols = protocols;
+    c->alpn_count = count;
 }
 
 void tls_client_set_trust(tls_client *c, const x509_cert *roots, size_t root_count,
@@ -75,12 +86,14 @@ int tls_client_start(tls_client *c, uint8_t *out, size_t cap)
     if (c->state != TLS_ST_START) return fail(c);
     const char *sni = c->server_name[0] ? c->server_name : 0;
     int n = tls_build_client_hello(out, cap, c->client_random, c->pub, sni,
+                                   c->alpn_protocols, c->alpn_count,
                                    c->offered_resume, c->offer_now_ms, c->binder_key);
     if (n < 0) return fail(c);
     tls_transcript_update(&c->transcript, out, (size_t)n);   /* CH enters transcript */
     c->state = TLS_ST_WAIT_SH;
     emit(c, TLS_EV_CLIENT_HELLO_SENT, 0);
     if (c->offered_resume) emit(c, TLS_EV_PSK_OFFERED, 0);
+    if (c->alpn_count > 0) emit(c, TLS_EV_ALPN_OFFERED, 0);
     return n;
 }
 
@@ -136,7 +149,16 @@ int tls_client_recv_handshake(tls_client *c, const uint8_t *msg, size_t len,
     }
     case TLS_ST_WAIT_EE:
         if (type != TLS_HS_ENCRYPTED_EXTENSIONS) return fail(c);
-        tls_transcript_update(&c->transcript, msg, len);     /* not interpreted (v1) */
+        /* Best-effort (Phase 17.0): unlike ServerHello/Certificate, nothing
+         * here is security-critical enough to abort the handshake over --
+         * it's optional metadata (ALPN's negotiated protocol, if any), and
+         * refusing to connect over a parsing quirk in it would be a worse
+         * failure mode than simply not detecting ALPN. The parser itself is
+         * still fully bounds-checked (no out-of-bounds read either way);
+         * only the *decision to reject the connection* is skipped. */
+        tls_parse_encrypted_extensions(msg, len, c->alpn_selected, sizeof c->alpn_selected, &c->alpn_negotiated);
+        tls_transcript_update(&c->transcript, msg, len);
+        if (c->alpn_negotiated) emit(c, TLS_EV_ALPN_NEGOTIATED, 0);
         /* A resumed (PSK-accepted) handshake skips Certificate/CertificateVerify
          * entirely -- PSK possession is the authentication (RFC 8446 §2.2). */
         c->state = c->psk_accepted ? TLS_ST_WAIT_FINISHED : TLS_ST_WAIT_CERT;

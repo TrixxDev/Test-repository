@@ -3,7 +3,7 @@
  * session cache; 15.9 adds cookies; 15.10 adds gzip; 16.1 adds HTTP POST;
  * 16.2 adds HTTP authentication; 16.3 makes redirects RFC-correct for a
  * request with a body; 16.4 adds multipart/form-data; 16.5 adds a general
- * --method for HEAD/OPTIONS/DELETE/PUT/PATCH).
+ * --method for HEAD/OPTIONS/DELETE/PUT/PATCH; 17.0 adds ALPN).
  *
  * HTTP POST (Phase 16.1, opening the "Web Platform" series that follows
  * HTTPS v2): `httpsget --post <host> <path> <body> [now_unix]` sends `body`
@@ -37,6 +37,16 @@
  * what a GET would have returned) -- getting this wrong would make a
  * keep-alive HEAD response hang the client forever waiting for body bytes
  * the server was never going to send.
+ *
+ * ALPN (Phase 17.0, RFC 7301, opening the "modern transport" series that
+ * follows the "Web Platform" series above): `--alpn` offers "h2" and
+ * "http/1.1" in the TLS ClientHello and prints whatever the server selects.
+ * This is deliberately JUST the negotiation -- there is no HTTP/2 framing
+ * yet (a later phase), so if the server actually picks h2, fetch_begin()
+ * refuses to continue that connection rather than pretending an HTTP/1.1
+ * request line means anything to a peer now expecting HTTP/2 framing.
+ * Without --alpn the extension is omitted entirely, byte-identical to every
+ * ClientHello before this phase.
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -151,6 +161,7 @@
                                        * little room for more anyway, see tokenize() in user/sh.c */
 #define BOUNDARY_MAX          40      /* "AuroraBoundary" + 16 hex digits + NUL, rounded up */
 #define MULTIPART_CTYPE_MAX  (32 + BOUNDARY_MAX)  /* "multipart/form-data; boundary=" + boundary */
+#define ALPN_PROTOCOL_COUNT 2         /* {"h2", "http/1.1"} -- see g_alpn_protocols (Phase 17.0) */
 
 static x509_cert         g_roots[CA_ROOTS_N];
 /* Outgoing-record scratch: sized for REQ_BUF_MAX plaintext plus TLS/AEAD
@@ -188,6 +199,16 @@ static struct url g_auth_origin;
 static uint8_t     g_multipart_body[POST_BODY_MAX];
 static char        g_boundary[BOUNDARY_MAX];
 static char        g_multipart_ctype[MULTIPART_CTYPE_MAX];
+
+/* ALPN (Phase 17.0, RFC 7301): opt-in via --alpn, offered fresh on every new
+ * TLS connection (fetch_begin()) for the whole run -- there's no per-request
+ * variability to it, unlike Authorization/Cookie. "h2" is listed first only
+ * because that's the point of demonstrating a real choice between two
+ * options; Aurora doesn't speak HTTP/2 yet, so fetch_begin() refuses to
+ * continue a connection where the server actually picked it (see its own
+ * comment) rather than pretending nothing happened. */
+static const char *g_alpn_protocols[ALPN_PROTOCOL_COUNT] = { "h2", "http/1.1" };
+static int         g_alpn_enabled;
 
 /* Multi-origin session cache (Phase 15.8): one slot per origin, holding
  * whatever a real client would want to remember about it between requests --
@@ -529,6 +550,8 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
             tls_conn_offer_psk(&slot->conn, &slot->ticket, now * 1000);
             printf("[httpsget] offering cached session ticket for %s:%d\n", u->host, u->port);
         }
+        if (g_alpn_enabled)
+            tls_conn_offer_alpn(&slot->conn, g_alpn_protocols, ALPN_PROTOCOL_COUNT);
 
         tls_reader_init(&slot->reader);
 
@@ -573,6 +596,23 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
                             : cv == TLS_SIG_RSA_PKCS1_SHA256        ? "rsa_pkcs1_sha256" : "?";
             printf("[TLS] Certificate depth=%d  Leaf key=%s  CV scheme=%s\n",
                    (int)slot->conn.fsm.certs.count, kt, cvn);
+        }
+        if (g_alpn_enabled) {
+            if (slot->conn.fsm.alpn_negotiated) {
+                printf("[TLS] ALPN negotiated: %s\n", slot->conn.fsm.alpn_selected);
+                if (strcmp(slot->conn.fsm.alpn_selected, "h2") == 0) {
+                    /* Phase 17.0 is ALPN only -- no HTTP/2 framing yet (a
+                     * later phase). Continuing to speak HTTP/1.1 over a
+                     * connection the server now expects to carry HTTP/2
+                     * would just hang or desync, not degrade gracefully, so
+                     * refuse outright with a clear reason instead. */
+                    fprintf(2, "[httpsget] server selected h2 via ALPN -- Aurora does not speak "
+                               "HTTP/2 yet (a later phase); refusing to continue this connection\n");
+                    close(slot->fd); return -1;
+                }
+            } else {
+                printf("[TLS] ALPN: no protocol selected by the server\n");
+            }
         }
         printf("[TLS] CONNECTED\n");
     }
@@ -958,13 +998,14 @@ static int method_body_bearing(const char *m)
 int main(int argc, char **argv)
 {
     const char *usage =
-        "usage: httpsget [--post] [--auth-basic user:pass | --auth-bearer token] <host> <path> [path...] [now_unix]\n"
-        "       httpsget [--auth-basic user:pass | --auth-bearer token] --post <host> <path> <body> [now_unix]\n"
-        "       httpsget [--auth-basic user:pass | --auth-bearer token] --post-multipart <host> <path>\n"
-        "                <field=value | field=@localfile> [...] [now_unix]\n"
-        "       httpsget [--auth-basic user:pass | --auth-bearer token] --method <GET|HEAD|OPTIONS|DELETE>\n"
+        "usage: httpsget [--alpn] [--post] [--auth-basic user:pass | --auth-bearer token]\n"
         "                <host> <path> [path...] [now_unix]\n"
-        "       httpsget [--auth-basic user:pass | --auth-bearer token] --method <POST|PUT|PATCH>\n"
+        "       httpsget [--alpn] [--auth-basic user:pass | --auth-bearer token] --post <host> <path> <body> [now_unix]\n"
+        "       httpsget [--alpn] [--auth-basic user:pass | --auth-bearer token] --post-multipart <host> <path>\n"
+        "                <field=value | field=@localfile> [...] [now_unix]\n"
+        "       httpsget [--alpn] [--auth-basic user:pass | --auth-bearer token] --method <GET|HEAD|OPTIONS|DELETE>\n"
+        "                <host> <path> [path...] [now_unix]\n"
+        "       httpsget [--alpn] [--auth-basic user:pass | --auth-bearer token] --method <POST|PUT|PATCH>\n"
         "                <host> <path> <body> [now_unix]\n";
     const char *method = "GET";
     const uint8_t *post_body = 0;
@@ -997,6 +1038,9 @@ int main(int argc, char **argv)
             }
             method = m;
             argi++; continue;
+        }
+        if (argi < argc && strcmp(argv[argi], "--alpn") == 0) {
+            g_alpn_enabled = 1; argi++; continue;
         }
         if (argi < argc && strcmp(argv[argi], "--auth-basic") == 0) {
             argi++;
