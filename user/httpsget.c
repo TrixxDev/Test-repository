@@ -2,7 +2,8 @@
  * adds redirects; 15.4 adds HTTP keep-alive; 15.8 adds a multi-origin
  * session cache; 15.9 adds cookies; 15.10 adds gzip; 16.1 adds HTTP POST;
  * 16.2 adds HTTP authentication; 16.3 makes redirects RFC-correct for a
- * request with a body; 16.4 adds multipart/form-data).
+ * request with a body; 16.4 adds multipart/form-data; 16.5 adds a general
+ * --method for HEAD/OPTIONS/DELETE/PUT/PATCH).
  *
  * HTTP POST (Phase 16.1, opening the "Web Platform" series that follows
  * HTTPS v2): `httpsget --post <host> <path> <body> [now_unix]` sends `body`
@@ -25,6 +26,17 @@
  * whitespace-free CLI token, so a field's name or value can't itself
  * contain a space. Follows the same 16.3 redirect rules as a plain POST,
  * just carrying its Content-Type (with the boundary) along for the ride.
+ *
+ * `--method <VERB>` (Phase 16.5) generalizes what used to be a hardcoded
+ * GET-or-POST choice to any of GET/HEAD/OPTIONS/DELETE (no body; `<host>
+ * <path> [path...] [now_unix]`, same shape as a plain GET) or POST/PUT/
+ * PATCH (one body token; same shape as --post, which is now just this
+ * client's older, still-supported spelling of `--method POST`). A HEAD
+ * response is handled per RFC 7230 SS3.3.3: its body is always empty no
+ * matter what Content-Length claims (that header, if present, describes
+ * what a GET would have returned) -- getting this wrong would make a
+ * keep-alive HEAD response hang the client forever waiting for body bytes
+ * the server was never going to send.
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -252,10 +264,18 @@ static int same_origin(const struct url *a, const struct url *b)
  * determinate length (no Content-Length, or chunked) can only be known to
  * have ended when the connection closes, which defeats reuse; and a body
  * that's merely very large isn't worth draining to the end just to save one
- * handshake. */
-static int reusable(const struct http_response *hr)
+ * handshake.
+ *
+ * `req_method` (Phase 16.5) matters because a HEAD response's Content-Length,
+ * if present, describes what a GET would have returned, not what actually
+ * came down the wire (RFC 7230 SS3.3.3) -- a real body of zero bytes always
+ * follows a HEAD response no matter how large that header claims, so it's
+ * always safe to reuse a keep-alive HEAD response's connection regardless of
+ * FETCH_REUSE_MAX_BODY. */
+static int reusable(const struct http_response *hr, const char *req_method)
 {
-    return hr->keep_alive && (unsigned)hr->content_length <= FETCH_REUSE_MAX_BODY;
+    unsigned effective_len = strcmp(req_method, "HEAD") == 0 ? 0 : (unsigned)hr->content_length;
+    return hr->keep_alive && effective_len <= FETCH_REUSE_MAX_BODY;
 }
 
 /* Find the slot already bound to `u`'s origin, or bind a fresh one: an
@@ -379,6 +399,14 @@ typedef struct {
  * just our g_resp preview), which is required before the connection can be
  * safely reused for a second request. */
 static int  g_rlen, g_total, g_hdrs_done, g_target;
+static int  g_no_body;            /* Phase 16.5: true for the response to a HEAD request -- RFC 7230
+                                   * SS3.3.3 rule 1 says a HEAD response body is ALWAYS empty regardless
+                                   * of what its Content-Length claims (that header, if present, describes
+                                   * what a GET to the same resource would have returned); without this,
+                                   * a keep-alive HEAD response advertising a nonzero Content-Length would
+                                   * make the read loop below wait forever for body bytes the server is
+                                   * never going to send. */
+static const char *g_cur_method;  /* this exchange's request method, for reusable()'s own HEAD check below */
 static struct http_response g_hr;
 
 /* Decompressed body preview (Phase 15.10), filled incrementally by
@@ -392,9 +420,11 @@ static int      g_body_len;
 static gzip_ctx g_gz;
 static int      g_gz_active;    /* a gzip decode is in progress for the current response */
 
-static void resp_reset(void)
+static void resp_reset(const char *req_method)
 {
     g_rlen = 0; g_total = 0; g_hdrs_done = 0; g_target = -1;
+    g_no_body = strcmp(req_method, "HEAD") == 0;
+    g_cur_method = req_method;
     memset(&g_hr, 0, sizeof g_hr);
     g_body_len = 0;
     g_gz_active = 0;
@@ -436,9 +466,11 @@ static void resp_feed(const uint8_t *data, int n)
         if (he > 0) {
             g_hdrs_done = 1;
             http_parse((const char*)g_resp, g_rlen, &g_hr);
-            if (reusable(&g_hr))
+            if (g_no_body)
+                g_target = g_hr.header_len;   /* HEAD: no body at all, whatever Content-Length says */
+            else if (reusable(&g_hr, g_cur_method))
                 g_target = g_hr.header_len + g_hr.content_length;   /* drain exactly to the boundary */
-            if (g_hr.gzip && !g_hr.chunked) {
+            if (g_hr.gzip && !g_hr.chunked && !g_no_body) {
                 /* Genuinely incremental decoding only covers the common
                  * gzip-without-chunking case; chunked+gzip together falls
                  * back to a one-shot pass at display time (fetch_one()) --
@@ -560,7 +592,7 @@ static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
                          const char *method, const uint8_t *body, int bodylen, const char *content_type,
                          const char *auth_header, int auth_len, fetch_result_t *out)
 {
-    resp_reset();
+    resp_reset(method);
     char req[REQ_BUF_MAX]; int rn;
     build_request(req, &rn, u, now, method, body, bodylen, content_type, auth_header, auth_len);
 
@@ -723,7 +755,7 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
         /* Only this response's own slot closes -- a redirect to a different
          * origin (Phase 15.8) leaves every other origin's slot exactly as it
          * was, so a later hop back to one of them can still reuse it. */
-        if (!reusable(&fr.hr)) slot_close(slot_find_or_alloc(&u));
+        if (!reusable(&fr.hr, req_method)) slot_close(slot_find_or_alloc(&u));
 
         int st = fr.hr.status;
         int is_redirect = st == 301 || st == 302 || st == 303 || st == 307 || st == 308;
@@ -882,13 +914,58 @@ static int build_multipart_body(char **fields, int nfields, const char *boundary
     return n;
 }
 
+/* Every method --method will accept (Phase 16.5), and whether it carries a
+ * request body -- GET/POST were the only two methods this client ever sent
+ * before this phase, hardcoded throughout; making that a table instead
+ * means the CLI, not the fetch pipeline, is what "knows" the method list.
+ * build_request()/fetch_request()/fetch()/fetch_one() already took `method`
+ * as a plain string with no special-casing beyond this table's callers, so
+ * none of them needed to change at all to gain PUT/PATCH/DELETE/HEAD/
+ * OPTIONS support. */
+typedef struct { const char *name; int body_bearing; } http_method_info_t;
+static const http_method_info_t KNOWN_METHODS[] = {
+    { "GET",     0 },
+    { "HEAD",    0 },
+    { "OPTIONS", 0 },
+    { "DELETE",  0 },
+    { "POST",    1 },
+    { "PUT",     1 },
+    { "PATCH",   1 },
+};
+#define KNOWN_METHODS_N (sizeof(KNOWN_METHODS) / sizeof(KNOWN_METHODS[0]))
+
+/* Exact (case-sensitive, matching HTTP's own wire convention) match against
+ * KNOWN_METHODS, returning the table's own copy of the name or NULL if
+ * `m` isn't one of them. */
+static const char *method_lookup(const char *m)
+{
+    for (unsigned i = 0; i < KNOWN_METHODS_N; i++)
+        if (strcmp(m, KNOWN_METHODS[i].name) == 0) return KNOWN_METHODS[i].name;
+    return 0;
+}
+
+/* Does this method carry a request body? Every `method` value reaching this
+ * function came from either a fixed literal already in KNOWN_METHODS ("GET"
+ * default, "POST" via --post/--post-multipart) or method_lookup() itself
+ * (via --method), so the "unreachable" fallback never actually triggers. */
+static int method_body_bearing(const char *m)
+{
+    for (unsigned i = 0; i < KNOWN_METHODS_N; i++)
+        if (strcmp(m, KNOWN_METHODS[i].name) == 0) return KNOWN_METHODS[i].body_bearing;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *usage =
         "usage: httpsget [--post] [--auth-basic user:pass | --auth-bearer token] <host> <path> [path...] [now_unix]\n"
         "       httpsget [--auth-basic user:pass | --auth-bearer token] --post <host> <path> <body> [now_unix]\n"
         "       httpsget [--auth-basic user:pass | --auth-bearer token] --post-multipart <host> <path>\n"
-        "                <field=value | field=@localfile> [...] [now_unix]\n";
+        "                <field=value | field=@localfile> [...] [now_unix]\n"
+        "       httpsget [--auth-basic user:pass | --auth-bearer token] --method <GET|HEAD|OPTIONS|DELETE>\n"
+        "                <host> <path> [path...] [now_unix]\n"
+        "       httpsget [--auth-basic user:pass | --auth-bearer token] --method <POST|PUT|PATCH>\n"
+        "                <host> <path> <body> [now_unix]\n";
     const char *method = "GET";
     const uint8_t *post_body = 0;
     int post_bodylen = 0;
@@ -896,16 +973,30 @@ int main(int argc, char **argv)
     int is_multipart = 0;
     int argi = 1;
 
-    /* Leading flags, any order: --post or --post-multipart (Phase 16.4), and
-     * at most one of --auth-basic / --auth-bearer (Phase 16.2). Each
-     * credential value is a single whitespace-free CLI token -- Aurora's
-     * shell has no quoting. */
+    /* Leading flags, any order: --post, --post-multipart (Phase 16.4), or
+     * --method (Phase 16.5) -- --post is just --method POST's older, still-
+     * supported spelling, kept because existing scripts (and this client's
+     * own regression suite) already use it -- and at most one of
+     * --auth-basic / --auth-bearer (Phase 16.2). Each credential value is a
+     * single whitespace-free CLI token -- Aurora's shell has no quoting. */
     for (;;) {
         if (argi < argc && strcmp(argv[argi], "--post") == 0) {
             method = "POST"; argi++; continue;
         }
         if (argi < argc && strcmp(argv[argi], "--post-multipart") == 0) {
             method = "POST"; is_multipart = 1; argi++; continue;
+        }
+        if (argi < argc && strcmp(argv[argi], "--method") == 0) {
+            argi++;
+            if (argi >= argc) { fprintf(2, "%s", usage); return 1; }
+            const char *m = method_lookup(argv[argi]);
+            if (!m) {
+                fprintf(2, "httpsget: --method: unknown method '%s' "
+                           "(expected GET, HEAD, OPTIONS, DELETE, POST, PUT, or PATCH)\n", argv[argi]);
+                return 1;
+            }
+            method = m;
+            argi++; continue;
         }
         if (argi < argc && strcmp(argv[argi], "--auth-basic") == 0) {
             argi++;
@@ -991,11 +1082,12 @@ int main(int argc, char **argv)
         post_body = g_multipart_body;
         post_bodylen = blen;
         content_type = g_multipart_ctype;
-    } else if (method[0] == 'P') {
-        /* --post: exactly one path and one body token -- Aurora's shell has
-         * no quoting (see build_request()'s doc comment), so the body is
-         * whatever single whitespace-free argument follows the path,
-         * typically an application/x-www-form-urlencoded string. */
+    } else if (method_body_bearing(method)) {
+        /* --post, or --method POST/PUT/PATCH (Phase 16.5): exactly one path
+         * and one body token -- Aurora's shell has no quoting (see
+         * build_request()'s doc comment), so the body is whatever single
+         * whitespace-free argument follows the path, typically an
+         * application/x-www-form-urlencoded string. */
         if (argi >= argc || argv[argi][0] != '/') { fprintf(2, "%s", usage); return 1; }
         paths[0] = argv[argi++]; npaths = 1;
         if (argi >= argc) { fprintf(2, "%s", usage); return 1; }
@@ -1005,6 +1097,8 @@ int main(int argc, char **argv)
         argi++;
         if (argi < argc) now = (uint64_t)parse_ul(argv[argi]);
     } else {
+        /* GET (default), or --method HEAD/OPTIONS/DELETE (Phase 16.5): one
+         * or more bodyless paths, same as GET always allowed. */
         for (int i = argi; i < argc; i++) {
             if (argv[i][0] == '/') { if (npaths < MAX_PATHS) paths[npaths++] = argv[i]; }
             else now = (uint64_t)parse_ul(argv[i]);
@@ -1019,10 +1113,19 @@ int main(int argc, char **argv)
             fprintf(2, "httpsget: trust root %u (%s) failed to parse\n", i, ca_roots[i].name); return 1;
         }
 
+    /* Method tag for the status line below (Phase 16.5 generalizes this from
+     * a fixed "(POST)"/"" choice to any non-GET method: "(HEAD)", "(PUT)",
+     * "(multipart)", etc.) -- built with app() rather than one more %s
+     * placeholder, since the method name itself is now a runtime value, not
+     * one of two fixed strings. */
+    char method_tag[24]; int mtn = 0;
+    if (is_multipart) app(method_tag, &mtn, " (multipart)");
+    else if (strcmp(method, "GET") != 0) { app(method_tag, &mtn, " ("); app(method_tag, &mtn, method); app(method_tag, &mtn, ")"); }
+    method_tag[mtn] = 0;
+
     if (npaths == 1)
         printf("[httpsget] %s%s%s%s  (trust store: %u roots)\n", host, paths[0],
-               is_multipart ? " (multipart)" : (post_body ? " (POST)" : ""),
-               g_has_auth ? " (auth)" : "", (unsigned)CA_ROOTS_N);
+               method_tag, g_has_auth ? " (auth)" : "", (unsigned)CA_ROOTS_N);
     else
         printf("[httpsget] %d paths from %s  (trust store: %u roots)\n", npaths, host, (unsigned)CA_ROOTS_N);
 

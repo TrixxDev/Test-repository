@@ -86,6 +86,7 @@ Run the vectors: `make crypto-test`.
 | **16.2** | **HTTP authentication (Basic + Bearer)** — `httpsget --auth-basic user:pass` / `--auth-bearer token` send `Authorization: Basic <base64>` / `Authorization: Bearer <token>` (`user/base64.c`, a new RFC 4648 encoder — nothing else in the codebase needed one yet); the header is re-scoped on every redirect hop to whichever origin it was given for, so it naturally follows a same-origin redirect and just as naturally stops the moment a redirect leaves that origin | `make base64-test` (RFC 4648 §10's own vectors + realistic `user:pass` strings + an undersized-buffer rejection check); `tools/auth_qemu.py` against real TLS 1.3 servers: the server decodes the Basic header itself (not trusting httpsget's encoder) and confirms the exact credentials, confirms the exact Bearer token, and confirms a Bearer token given for origin A is *not* sent to origin B after a cross-origin redirect; full existing host + QEMU regression suite unaffected | ✅ |
 | **16.3** | **RFC-correct redirects for a request with a body** — 16.1's per-hop method/body decision is now made fresh after every redirect response instead of being fixed at the first hop: `307`/`308` resend the exact method and body (RFC 7231 §6.4.7 / RFC 7238), while `301`/`302`/`303` still downgrade to a bodyless `GET` | `tools/redirect_preserve_qemu.py` against a real TLS 1.3 server: a real 4-hop chain (`POST` →307→ `POST` →308→ `POST` →302→ `GET`) confirms both preserving hops resend the identical body bytes and the final `302` hop downgrades to a bodyless `GET` even though the request had been carried as `POST` through the two hops before it — proving the decision is made per-redirect, not "sticky" for the rest of the chain; full existing host + QEMU regression suite (incl. 16.1's own 302-downgrade test) unaffected | ✅ |
 | **16.4** | **multipart/form-data** — `httpsget --post-multipart <host> <path> <field=value \| field=@localfile> [...]` encodes each field as its own MIME part behind a generated boundary; `build_request()`'s Content-Type is now caller-supplied (`content_type`, threaded alongside `body`/`bodylen` through `fetch_request()`/`fetch()`/`fetch_one()`, and preserved or dropped on a redirect by the same 307/308-vs-everything-else rule 16.3 already applies to the body) instead of a hardcoded url-encoded string; a `field=@localfile` value is read off Aurora's own FAT32 disk (`open()`/`read()` in a loop — there's no `stat`/`lseek` to size a file up front) and sent as a file part with a fixed `application/octet-stream` Content-Type | `tools/multipart_qemu.py` against a real TLS 1.3 server: the server extracts the boundary from the *actual* Content-Type header and parses the *actual* body itself into parts (not trusting httpsget's own log), confirming a text field's exact value, a file field's filename/Content-Type, and that the file part's bytes match a real on-disk file byte-for-byte; a same-origin 307 hop then confirms the Content-Type (boundary included) and raw body are byte-identical on the retry, proving 16.3's preservation rule now correctly covers a multipart Content-Type too; full existing host + QEMU regression suite unaffected | ✅ |
+| **16.5** | **General `--method`** — `httpsget --method <GET\|HEAD\|OPTIONS\|DELETE\|POST\|PUT\|PATCH> ...` replaces the old hardcoded GET-or-POST choice with a validated table (`--post` is now just `--method POST`'s older, still-supported spelling); PUT/PATCH reuse `--post`'s body-shaped argument parsing, HEAD/OPTIONS/DELETE reuse GET's multi-path bodyless parsing — `build_request()`/`fetch_request()`/`fetch()`/`fetch_one()` needed no changes at all, since they already took `method` as a plain string. Fixes a real hang risk surfaced by adding HEAD: RFC 7230 §3.3.3 says a HEAD response body is *always* empty regardless of its `Content-Length` (which, if present, describes what a GET would have returned) — without a fix, a keep-alive HEAD response advertising a nonzero `Content-Length` would make the read loop wait forever for body bytes the server will never send; `resp_feed()`/`reusable()` now both special-case a HEAD request's response framing | `tools/method_qemu.py` against a real TLS 1.3 server: confirms `--method PUT`'s real method and exact body bytes, `--method DELETE`'s real method and bodyless request, and — the critical case — that `--method HEAD` against a server advertising `Content-Length: 999999` on a keep-alive connection that sends *zero* actual body bytes still reaches `status=200` within the ordinary wait budget instead of hanging; full existing host + QEMU regression suite (incl. 16.1/16.2/16.3/16.4's own POST/PUT-adjacent paths) unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2329,6 +2330,72 @@ Verified two ways:
   not rejected, so the fix is `shift-<lowercase>` for any uppercase letter
   in a typed command, the same class of gap `-`/`:`/`=`/`&` closed in
   earlier phases.)
+
+## Step 16.5 — a general `--method`
+
+Every phase through 16.4 hardcoded a binary choice: a request was either
+GET or POST, decided once by a `method[0] == 'P'` check in `main()`. That
+was already fragile the moment PUT and PATCH entered the picture — both
+also start with `'P'` — so the real first step of this phase was replacing
+that check with something that actually distinguishes methods, not
+extending it.
+
+**A table, not more flags.** `KNOWN_METHODS` pairs each of
+GET/HEAD/OPTIONS/DELETE/POST/PUT/PATCH with whether it carries a body;
+`--method <VERB>` validates against it and rejects anything else by name
+(`method_lookup()`), and `method_body_bearing()` replaces the old
+`[0]=='P'` hack everywhere it mattered — deciding which of `--post`'s
+body-shaped argument parsing (one path, one body token) or GET's bodyless,
+multi-path parsing a given invocation should use. `--post` itself didn't
+change: it's exactly `--method POST`'s older spelling now, kept only
+because this suite's own earlier scripts already depend on the flag
+existing. The genuinely notable part is what *didn't* need to change:
+`build_request()`, `fetch_request()`, `fetch()`, and `fetch_one()` all
+already took `method` as a plain string with no special-casing beyond
+what the CLI layer decided — so PUT, PATCH, DELETE, HEAD, and OPTIONS all
+work correctly through the entire TLS/redirect/auth/cookie pipeline
+without a single line of change below `main()`'s argument parsing.
+
+**HEAD surfaced a real correctness gap, not just a CLI gap.** RFC 7230
+§3.3.3 rule 1: a response to HEAD is *always* terminated by the header
+block's blank line, full stop — whatever `Content-Length` says (and a
+real server does send one, describing what the equivalent GET would have
+returned) does not describe actual bytes on the wire for a HEAD response.
+Every earlier phase's response-framing logic (`resp_feed()`'s `g_target`
+computation, `reusable()`'s reuse decision) trusted `Content-Length`
+unconditionally, because until this phase every request that could
+produce a response was allowed to have a real body. A keep-alive HEAD
+response advertising a large `Content-Length` would have made the read
+loop in `fetch_request()` wait for body bytes a compliant server will
+never send — a genuine hang, not a wrong answer, and one that would only
+show up against a real server, never in a design review of the diff. The
+fix is two small, coordinated pieces of state carried by the existing
+response-accumulator globals (`g_no_body`, `g_cur_method`, set from
+`resp_reset()`'s new `req_method` parameter): `resp_feed()` sets
+`g_target` to just the header length for a HEAD response regardless of
+`Content-Length`, and `reusable()` now takes the request method too, so a
+HEAD response's real (always-zero) body length — not its claimed one —
+governs whether the connection is safe to keep for the next request.
+
+Verified two ways:
+- **Host**: the full existing suite passes unchanged.
+- **QEMU (`tools/method_qemu.py`)**, against a real TLS 1.3 server: `--method
+  PUT` with a real body confirms the exact method and bytes arrive
+  (reusing `--post`'s own already-proven body path, just under a
+  different verb); `--method DELETE` confirms the request carries no body
+  or `Content-Length` at all. The critical scenario is `--method HEAD`
+  against a server that responds with `Content-Length: 999999` and
+  `Connection: keep-alive` but sends *zero* actual body bytes and never
+  closes the connection afterward, exactly like a real server's HEAD
+  response and exactly the shape that would hang an un-special-cased
+  client forever — the test's own wait budget is deliberately left at
+  this suite's ordinary duration (not padded for "in case it's slow") so
+  that if the fix were missing, `status=200` would simply never appear in
+  the log and the check would fail visibly rather than the test quietly
+  waiting long enough to mask a hang. All 12 checks pass, and the full
+  existing host + QEMU regression suite — including 16.1's `--post` path,
+  now proven to still work as `--method POST`'s validation makes it
+  through unchanged — is unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 
