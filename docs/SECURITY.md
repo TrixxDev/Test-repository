@@ -92,6 +92,7 @@ Run the vectors: `make crypto-test`.
 | **17.1.2** | **DATA frame + generic frame reader** — a new `h2_frame_reader` (`http2/frame.c`) replaces `h2_handshake()`'s ad-hoc header-accumulator/skip-bytes logic with a real, reusable, payload-*preserving* reader (the same role `tls_record_reader` plays for TLS records one layer up): `feed()` takes arbitrarily-chunked plaintext and returns how many bytes it actually consumed (bounded-memory — one frame, up to the RFC 7540 §6.5.2 default `SETTINGS_MAX_FRAME_SIZE`, at a time — not an unbounded queue), `next()` drains a completed frame's header *and* payload bytes. A new `http2/data.c` decodes a DATA frame's payload (RFC 7540 §6.1), including the padding case (`Pad Length` byte + data + padding, rejecting padding ≥ the whole payload) and builds one for future use. `h2_handshake()` itself now recognizes a DATA frame by name in its log (still doesn't act on it — no stream is open) rather than silently skipping it as an unknown type | `make h2-test` (23 new cases: a whole frame fed in one call vs. byte-at-a-time vs. split mid-*payload* all reassemble identically, two complete frames delivered in one `feed()` call drain correctly via two `next()` calls, an oversized frame declaration is rejected before any payload is buffered; DATA parse/build covering unpadded, padded, the two rejection cases, and an END_STREAM round-trip); `tools/h2_handshake_qemu.py` extended with a real, hand-rolled-in-Python, *padded*, `END_STREAM`-flagged DATA frame sent on a stream nothing ever opened, interleaved between the server's SETTINGS and its SETTINGS ACK — Aurora's log names it correctly ("DATA frame seen") without disrupting the handshake's completion, proving the generic reader handles a genuine payload-bearing frame mid-exchange, not just extra bytes of an already-known type. All 14 checks pass (up from 13). Because `h2_handshake()` was refactored, not just extended, this phase repeats the full previous regression sweep (13 QEMU scripts incl. `alpn_qemu.py`) end to end to confirm byte-identical externally-observable behavior — all pass unaffected | ✅ |
 | **17.1.3** | **A real HEADERS frame, HPACK static table only** — new `http2/hpack.c` (RFC 7541 prefixed-integer and string-literal encoding, "Indexed Header Field" and "Literal Header Field *without* Indexing" representations — deliberately not "with incremental indexing", since Aurora tracks no dynamic table of its own to stay in sync with one it would be telling the peer to build) and `http2/headers.c` (`h2_build_headers()`, assembling `:method`/`:scheme`/`:authority`/`:path`/`user-agent` into one HPACK-compressed HEADERS frame using ONLY RFC 7541 Appendix A's static table — no Huffman, no dynamic table, both later phases). `h2_send_request()` sends it once the connection-establishment handshake (17.1.1/17.1.2) succeeds, opening stream 1 (RFC 7540 §5.1.1) with a genuine GET to `u->host`/`u->path`, then recognizes (by frame type only, still not HPACK-decoding) whatever response frame comes back before `fetch_begin()` still ends the attempt — response decoding needs Huffman and/or the dynamic table, which a real server's response headers routinely require | `make h2-test` (22 new cases: RFC 7541 §5.1's own worked example — 1337 with a 5-bit prefix — matches byte-for-byte, indexed/literal/multi-byte-continuation representations checked individually, then four complete HEADERS frames — `GET /`, `GET` with a non-root path plus a user-agent exercising the multi-byte index for entry 58, `POST`, and `PUT` — each checked against hex byte sequences hand-derived directly from RFC 7541's own encoding rules, not copied from any tool); `tools/h2_handshake_qemu.py` extended with a genuine, independent, from-scratch Python HPACK *decoder* (not Aurora's `http2/hpack.c`, and not any third-party package — installing one via `pip` was correctly blocked by this session's own permission policy as an undeclared external dependency) that receives Aurora's real HEADERS frame and decodes `:method=GET`, `:scheme=https`, `:authority=10.0.2.2`, `:path=/whatever` and Aurora's own user-agent string, then answers with a real (single-byte, statically-indexed) `:status: 200` HEADERS frame of its own, which Aurora correctly recognizes by type without decoding it — All 23 checks pass. Writing the C-side hex vectors caught a real off-by-one in the *test itself* (a hand-counted user-agent length one byte too long, so the encoder faithfully copied the string's own NUL terminator in as if it were data — the byte-mismatch check caught it immediately; `http2/hpack.c` was already correct) before it was ever committed. Full existing host suite and the 13-script QEMU regression sweep from 17.1.2 all pass unaffected | ✅ |
 | **17.2.1** | **HPACK Huffman decoding** (RFC 7541 §5.2/Appendix B, new `http2/huffman.c`) — decode-only, matching 17.1.3's own decision to leave Aurora's *encoder* (`hpack.c`) alone: this client never sends a Huffman-coded string, but a real server's response routinely does, so reading one back needs a decoder regardless. `hpack_huffman_decode()` is a bit-by-bit canonical-Huffman walk: accumulate one bit at a time into a candidate `(code, len)` and scan the 256 real symbols (never EOS/256 itself — RFC 7541 §5.2 forbids a sender from ever encoding it) for an exact match; a run longer than the longest real code (28 bits) or than EOS's own 30-bit all-ones code can only mean corrupt input, and trailing padding bits must themselves be a prefix of that same all-ones pattern. The 257-entry code table (256 symbols + EOS) behind it was **not hand-transcribed** — this project has hit exactly that class of error before (the gzip/CRC32/inflate KATs in 15.10, and 17.1.3's own hand-counted user-agent length bug) — instead it was fetched as raw RFC text via `curl` (rejecting `WebFetch`, whose own documentation says large content "may be summarized" by an intermediate model — an unacceptable risk for a bit-exact 257-entry table) and mechanically parsed out of the RFC's own published text with a narrow regex script, which also verified the parse's completeness (257/257 entries, no duplicates or gaps) and cross-checked three RFC-documented values (symbol 47 `/` → `0x18`/6 bits, symbol 0 → `0x1ff8`/13 bits, EOS → `0x3fffffff`/30 bits) before the table was ever written into C | `make h2-test` (11 new cases: RFC 7541 Appendix C.4.1 and C.4.2's own worked Huffman examples — `f1e3c2e5f23a6ba0ab90f4ff` → `"www.example.com"`, `a8eb10649cbf` → `"no-cache"` — decode byte-for-byte correct; empty input decodes to an empty string; a single `0x00` byte decodes one real symbol then is correctly rejected for invalid (non-all-1s) padding; four bytes of `0xff` (a run longer than any valid code) is rejected rather than silently treated as EOS; an undersized output buffer is rejected, not truncated). Before any C was written, the exact same algorithm was prototyped in Python against both RFC C.4 vectors, to catch a design bug independent of any transcription bug in the table. Standalone capability only — not yet wired into `httpsget.c`'s live h2 response path, since decoding a real response also needs the dynamic table (17.2.2); full existing host suite passes unaffected, and the full 16-script QEMU regression sweep (every `tools/*_qemu.py` script, including `h2_handshake_qemu.py` itself) re-run unaffected, since this phase only adds a new, still-unused object file to the link | ✅ |
+| **17.2.2** | **HPACK dynamic table + full header block decode** (RFC 7541 §2.3.2/§4/§6, new `http2/hpack_table.c` and `http2/hpack_decode.c`) — completes decode-side HPACK. `hpack_table.c` holds the full 61-entry static table (RFC 7541 Appendix A, mechanically extracted the same way as 17.2.1's Huffman table — this time each string's length is `sizeof(x)-1`, compiler-computed rather than hand-counted, closing off the exact class of mistake a hand-counted user-agent length caused in 17.1.3) plus a decode-side dynamic table: a fixed 4096-byte arena (matching the RFC 7540 §6.5.2 default `SETTINGS_HEADER_TABLE_SIZE` that applies as long as Aurora's own SETTINGS stays empty — no legally-behaving peer can ever need more than this decoder can hold) storing entries FIFO, insertion evicting the oldest as needed to fit under the current max size, a Dynamic Table Size Update (§6.3) shrinking that max and evicting accordingly, and index resolution across RFC 7541 §2.3.3's unified space (1-61 static, 62+ dynamic, most-recent-first). `hpack_decode.c` adds §5.1's integer decode and §5.2's string-literal decode (raw or Huffman, via `huffman.c`), dispatching every §6 representation — Indexed Header Field, Literal with Incremental Indexing (the one that grows the table), Literal without Indexing, Literal Never Indexed, and Dynamic Table Size Update — into a caller-supplied list of decoded header fields. Aurora's own encoder (`hpack.c`, 17.1.3) is untouched, by design: RFC 7541 §2.3.2 makes the two directions' dynamic tables independent, so tracking what a *peer's* encoder does carries none of the send-side synchronization risk 17.1.3 deliberately avoided | Writing the tests surfaced a real bug before any of this shipped: the decoder initially returned raw pointers into the dynamic table's own byte arena for indexed lookups, but a *later* representation in the same header block can evict and compact that arena out from under an *earlier* one's already-decoded field — not a hypothetical, but literally what RFC 7541's own Appendix C.5.3 example does (a `cache-control` entry read early in a response is evicted later in that same response). Fixed by copying every table-resolved name/value into the caller's scratch buffer immediately upon resolution, before anything else in the block can run. `make h2-test` (86 new cases): the RFC's own isolated representation examples (Appendix C.2.1-C.2.4); the full three-request sequence from Appendix C.3 with the dynamic table growing across calls to the *same* table instance, verifying decoded fields, table entry count, and table byte-size after each request against the RFC's own documented intermediate state (including a dynamic entry referenced back by index 62, then by index 63 once a second insertion pushes it one further back — "Indexed Dynamic Entries" from the roadmap, proven against the RFC's own sequence rather than a self-invented one); the full three-response sequence from Appendix C.5 with `SETTINGS_HEADER_TABLE_SIZE` set to 256 (as the RFC itself specifies) to force real evictions, including the exact C.5.3 case that caught the arena-aliasing bug above; `Dynamic Table Size Update` exercised both as a direct API call (shrinking evicts down to what fits, down to and including emptying the table) and inline within a real header block; and malformed-input rejection (an indexed field pointing past the last live entry, index 0, a size update past the 4096-byte arena cap, a string literal whose declared length runs past the input, an `out_cap` too small for even one field, a `scratch` buffer too small for one decoded string). Full existing host suite passes unaffected. Not yet wired into `httpsget.c` — assembling a decoded header block into an `http_response`-shaped result, and reading the accompanying DATA frame(s), is Phase 17.3; the full 16-script QEMU regression sweep re-run unaffected, since this phase again only adds new, still-unused object files to the link | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2858,6 +2859,103 @@ Verified two ways:
   16-script QEMU regression sweep — every `tools/*_qemu.py` script,
   including `h2_handshake_qemu.py` itself — was re-run in full to confirm
   byte-identical externally observable behavior. All pass unaffected.
+
+## Step 17.2.2 — HPACK dynamic table + full header block decode
+
+17.2.1 gave the decoder a way to read Huffman-coded strings; this phase
+gives it everything else HPACK's compression model depends on. RFC
+7541's dynamic table (§2.3.2) is what makes HPACK actually *compress*
+across a connection, not just per-message: a header seen once can be
+referenced by a one-byte index on every later message, as long as both
+sides track the same table. Without it, 17.1.3/17.2.1's decoder could
+read a single isolated HEADERS frame, but not a real connection's worth
+of them — and a real connection is exactly what Aurora needs to read.
+
+**`http2/hpack_table.c`** holds two tables behind one unified index space
+(RFC 7541 §2.3.3): the 61-entry static table (Appendix A — mechanically
+extracted the same way as 17.2.1's Huffman table, with each string's
+length computed by the compiler via `sizeof(x) - 1` rather than hand-
+counted, closing off the exact class of mistake that produced a hand-
+counted user-agent length bug in 17.1.3), and a dynamic table this
+decoder builds up itself as it processes what a peer's encoder sends. The
+dynamic table is a fixed 4096-byte arena, not a dynamic allocator (this
+directory's established convention for large structures — `static`
+globals sized for the worst case), sized to exactly the RFC 7540 §6.5.2
+default `SETTINGS_HEADER_TABLE_SIZE` that applies as long as Aurora's own
+SETTINGS frame stays empty: no peer behaving legally can ever ask this
+decoder to hold more than that. Insertion (§6.2.1's side effect) evicts
+the oldest entries as needed to stay under the current max size, oldest-
+first, per §4.1's accounting rule (name + value + 32 bytes of overhead
+per entry); a Dynamic Table Size Update (§6.3) changes that max and
+evicts down to fit; an entry larger than the max size, even once the
+table is emptied trying to make room, is simply not stored (§4.4) without
+that being treated as an error.
+
+**`http2/hpack_decode.c`** adds §5.1's prefixed-integer decode and §5.2's
+string-literal decode (raw or Huffman, via `huffman.c`), then dispatches
+every §6 representation a real header block can contain — Indexed Header
+Field, Literal with Incremental Indexing (the only one that grows the
+table), Literal without Indexing, Literal Never Indexed, and Dynamic
+Table Size Update — into a caller-supplied array of decoded header
+fields. Aurora's own encoder (`hpack.c`, 17.1.3) is untouched, deliberately:
+RFC 7541 §2.3.2 makes the two directions' dynamic tables entirely
+independent of each other, so tracking what a *peer's* encoder chooses to
+do carries none of the send-side synchronization risk that motivated
+17.1.3's own choice to never use incremental indexing when Aurora sends.
+
+Writing the tests surfaced a real, working-code bug before any of this
+ever shipped: the decoder's first draft returned raw pointers into the
+dynamic table's own byte arena for anything resolved by index. That's
+fine in isolation, but a *later* representation within the same header
+block can trigger an eviction — which compacts the arena, shifting bytes
+— and an *earlier* representation's already-decoded field, if it also
+came from the dynamic table, would silently point at whatever now occupies
+that shifted memory. This isn't a hypothetical: RFC 7541's own Appendix
+C.5.3 worked example does exactly this (a `cache-control` entry read
+early in a response is evicted later in that very same response) — which
+is how the test written directly from that example caught it. The fix:
+every byte range this decoder ever hands back to a caller — including
+ones resolved *from* the dynamic table, not just freshly-decoded literals
+— is copied into the caller's scratch buffer immediately upon resolution,
+before any later representation in the block gets a chance to mutate the
+table out from under it.
+
+Verified against RFC 7541's own multi-step, multi-request/response
+sequences — not self-invented ones, since those are exactly what this
+phase's dynamic-table bookkeeping needs exercised, and the RFC publishes
+its own expected intermediate table state after each step to check
+against:
+- **Host (`make h2-test`)**: 86 new cases. The four isolated representation
+  examples (Appendix C.2.1-C.2.4: literal with incremental indexing,
+  literal without indexing, literal never indexed, indexed header field).
+  The full three-request sequence from Appendix C.3, decoded through the
+  *same* table instance across all three calls, checking not just the
+  decoded fields but the table's own entry count and byte size against
+  the RFC's documented state after each request — including a dynamic
+  entry referenced back by index 62 in request 2, then by index 63 in
+  request 3 once a second insertion pushes it one further back (RFC
+  7541's own worked example of "Indexed Dynamic Entries" from the
+  roadmap). The full three-response sequence from Appendix C.5, with
+  `SETTINGS_HEADER_TABLE_SIZE` set to 256 exactly as the RFC specifies,
+  to force real evictions — including the third response, the exact case
+  that caught the arena-aliasing bug above. `Dynamic Table Size Update`
+  exercised directly (shrinking evicts down to what fits, down to and
+  including fully emptying the table) and inline within a real header
+  block. Malformed input rejected without corrupting state: an indexed
+  field past the last live entry, index 0 (RFC 7541 §6.1's "MUST treat as
+  a decoding error"), a size update past the 4096-byte arena cap, a
+  string literal whose declared length runs past the input, an output
+  array too small for even one field, and a scratch buffer too small for
+  one decoded string. The full existing host suite passes unaffected.
+- **QEMU**: not yet exercised end-to-end — still not wired into
+  `httpsget.c`'s live h2 response path; assembling a decoded header block
+  into an `http_response`-shaped result, and reading the DATA frame(s)
+  that follow it, is Phase 17.3. `http2/hpack_table.c`/`hpack_decode.c`
+  are new, purely additive object files (linked into `httpsget.elf` but
+  not yet called from any code path), so the full 16-script QEMU
+  regression sweep — every `tools/*_qemu.py` script — was re-run in full
+  to confirm byte-identical externally observable behavior. All pass
+  unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

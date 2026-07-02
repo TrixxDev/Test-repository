@@ -11,8 +11,28 @@
 #include "hpack.h"
 #include "headers.h"
 #include "huffman.h"
+#include "hpack_table.h"
+#include "hpack_decode.h"
 
 static int failures;
+
+static void check_field(const char *name, const hpack_header_field *f, const char *want_name, const char *want_value)
+{
+    size_t wn = strlen(want_name), wv = strlen(want_value);
+    int ok = f->name_len == wn && memcmp(f->name, want_name, wn) == 0 &&
+             f->value_len == wv && memcmp(f->value, want_value, wv) == 0;
+    if (ok) {
+        printf("  PASS  %s\n", name);
+    } else {
+        char got_name[128], got_value[256];
+        int gn = f->name_len < sizeof got_name - 1 ? (int)f->name_len : (int)sizeof got_name - 1;
+        int gv = f->value_len < sizeof got_value - 1 ? (int)f->value_len : (int)sizeof got_value - 1;
+        memcpy(got_name, f->name, gn); got_name[gn] = 0;
+        memcpy(got_value, f->value, gv); got_value[gv] = 0;
+        printf("  FAIL  %s\n        got  %s: %s\n        want %s: %s\n", name, got_name, got_value, want_name, want_value);
+        failures++;
+    }
+}
 
 static int fromhex(const char *hex, uint8_t *out)
 {
@@ -462,6 +482,237 @@ int main(void)
             inlen = fromhex("f1e3c2e5f23a6ba0ab90f4ff", in);
             check_int("Huffman decode rejects an undersized output buffer",
                       hpack_huffman_decode(in, (size_t)inlen, small, sizeof small, &outlen), -1);
+        }
+    }
+
+    printf("HPACK dynamic table + full header block decode (RFC 7541 SS2.3.2/SS4/SS6, Phase 17.2.2):\n");
+    {
+        /* Isolated representation examples, RFC 7541 SS C.2.1-C.2.4. */
+        {
+            hpack_dyn_table t; hpack_table_init(&t, 4096);
+            uint8_t in[64]; int inlen;
+            hpack_header_field out[4]; size_t out_count;
+            uint8_t scratch[128]; size_t scratch_used;
+
+            inlen = fromhex("400a637573746f6d2d6b65790d637573746f6d2d686561646572", in);
+            check_int("C.2.1 (literal with incremental indexing) decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 4, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_field("C.2.1: custom-key: custom-header", &out[0], "custom-key", "custom-header");
+            check_int("C.2.1: added to the dynamic table (1 entry)", t.count, 1);
+            check_int("C.2.1: dynamic table size is 55 (10+13+32)", (int)t.size, 55);
+        }
+        {
+            hpack_dyn_table t; hpack_table_init(&t, 4096);
+            uint8_t in[64]; int inlen;
+            hpack_header_field out[4]; size_t out_count;
+            uint8_t scratch[128]; size_t scratch_used;
+
+            inlen = fromhex("040c2f73616d706c652f70617468", in);
+            check_int("C.2.2 (literal without indexing, indexed name) decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 4, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_field("C.2.2: :path: /sample/path", &out[0], ":path", "/sample/path");
+            check_int("C.2.2: dynamic table untouched (still empty)", t.count, 0);
+        }
+        {
+            hpack_dyn_table t; hpack_table_init(&t, 4096);
+            uint8_t in[64]; int inlen;
+            hpack_header_field out[4]; size_t out_count;
+            uint8_t scratch[128]; size_t scratch_used;
+
+            inlen = fromhex("100870617373776f726406736563726574", in);
+            check_int("C.2.3 (literal never indexed) decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 4, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_field("C.2.3: password: secret", &out[0], "password", "secret");
+            check_int("C.2.3: dynamic table untouched (still empty)", t.count, 0);
+        }
+        {
+            hpack_dyn_table t; hpack_table_init(&t, 4096);
+            uint8_t in[64]; int inlen;
+            hpack_header_field out[4]; size_t out_count;
+            uint8_t scratch[128]; size_t scratch_used;
+
+            inlen = fromhex("82", in);
+            check_int("C.2.4 (indexed header field, static table) decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 4, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_field("C.2.4: :method: GET", &out[0], ":method", "GET");
+            check_int("C.2.4: dynamic table untouched (still empty)", t.count, 0);
+        }
+
+        /* RFC 7541 SS C.3 -- three consecutive requests on ONE connection,
+         * the dynamic table growing across them: a literal-with-indexing
+         * insertion in each of the first two requests, then that same
+         * entry referenced back by a dynamic INDEX (62, then 63 once a
+         * second insertion pushes it one further back) in the requests
+         * that follow -- exactly "Indexed Dynamic Entries" from the
+         * roadmap, verified against the RFC's own multi-step sequence
+         * rather than a self-invented one. */
+        {
+            hpack_dyn_table t; hpack_table_init(&t, 4096);
+            uint8_t in[128]; int inlen;
+            hpack_header_field out[8]; size_t out_count;
+            uint8_t scratch[256]; size_t scratch_used;
+
+            inlen = fromhex("828684410f7777772e6578616d706c652e636f6d", in);
+            check_int("C.3.1 first request decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 8, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_int("C.3.1: 4 header fields decoded", (int)out_count, 4);
+            check_field("C.3.1: :method: GET", &out[0], ":method", "GET");
+            check_field("C.3.1: :scheme: http", &out[1], ":scheme", "http");
+            check_field("C.3.1: :path: /", &out[2], ":path", "/");
+            check_field("C.3.1: :authority: www.example.com (literal, indexed name)", &out[3], ":authority", "www.example.com");
+            check_int("C.3.1: dynamic table has 1 entry", t.count, 1);
+            check_int("C.3.1: dynamic table size is 57", (int)t.size, 57);
+
+            inlen = fromhex("828684be58086e6f2d6361636865", in);
+            check_int("C.3.2 second request decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 8, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_int("C.3.2: 5 header fields decoded", (int)out_count, 5);
+            check_field("C.3.2: :authority (index 62, the entry C.3.1 just added)", &out[3], ":authority", "www.example.com");
+            check_field("C.3.2: cache-control: no-cache (literal, indexed name)", &out[4], "cache-control", "no-cache");
+            check_int("C.3.2: dynamic table has 2 entries", t.count, 2);
+            check_int("C.3.2: dynamic table size is 110", (int)t.size, 110);
+
+            inlen = fromhex("828785bf400a637573746f6d2d6b65790c637573746f6d2d76616c7565", in);
+            check_int("C.3.3 third request decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 8, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_int("C.3.3: 5 header fields decoded", (int)out_count, 5);
+            check_field("C.3.3: :scheme: https", &out[1], ":scheme", "https");
+            check_field("C.3.3: :path: /index.html", &out[2], ":path", "/index.html");
+            check_field("C.3.3: :authority (index 63 now -- pushed back by cache-control's insertion)", &out[3], ":authority", "www.example.com");
+            check_field("C.3.3: custom-key: custom-value (literal name AND value)", &out[4], "custom-key", "custom-value");
+            check_int("C.3.3: dynamic table has 3 entries", t.count, 3);
+            check_int("C.3.3: dynamic table size is 164", (int)t.size, 164);
+        }
+
+        /* RFC 7541 SS C.5 -- three consecutive responses with
+         * SETTINGS_HEADER_TABLE_SIZE=256, deliberately forcing real
+         * evictions (including, in the third response, an entry that was
+         * already referenced earlier in the SAME header block getting
+         * evicted before the block finishes decoding -- exactly the case
+         * that motivated always copying table-resolved bytes into
+         * `scratch` rather than returning raw dynamic-table pointers). */
+        {
+            hpack_dyn_table t; hpack_table_init(&t, 256);
+            uint8_t in[160]; int inlen;
+            hpack_header_field out[8]; size_t out_count;
+            uint8_t scratch[512]; size_t scratch_used;
+
+            inlen = fromhex("4803333032580770726976617465611d4d6f6e2c203231204f637420323031332032303a31333a323120474d546e1768747470733a2f2f7777772e6578616d706c652e636f6d", in);
+            check_int("C.5.1 first response decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 8, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_int("C.5.1: 4 header fields decoded", (int)out_count, 4);
+            check_field("C.5.1: :status: 302", &out[0], ":status", "302");
+            check_field("C.5.1: cache-control: private", &out[1], "cache-control", "private");
+            check_field("C.5.1: date", &out[2], "date", "Mon, 21 Oct 2013 20:13:21 GMT");
+            check_field("C.5.1: location", &out[3], "location", "https://www.example.com");
+            check_int("C.5.1: dynamic table has 4 entries", t.count, 4);
+            check_int("C.5.1: dynamic table size is 222", (int)t.size, 222);
+
+            inlen = fromhex("4803333037c1c0bf", in);
+            check_int("C.5.2 second response decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 8, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_int("C.5.2: 4 header fields decoded", (int)out_count, 4);
+            check_field("C.5.2: :status: 307 (its own insertion evicted the old :status:302 entry to fit)", &out[0], ":status", "307");
+            check_field("C.5.2: cache-control (index 65, reused from response 1, not re-sent)", &out[1], "cache-control", "private");
+            check_field("C.5.2: date (index 64, reused)", &out[2], "date", "Mon, 21 Oct 2013 20:13:21 GMT");
+            check_field("C.5.2: location (index 63, reused)", &out[3], "location", "https://www.example.com");
+            check_int("C.5.2: dynamic table still has 4 entries (one evicted, one added)", t.count, 4);
+            check_int("C.5.2: dynamic table size still 222", (int)t.size, 222);
+
+            inlen = fromhex("88c1611d4d6f6e2c203231204f637420323031332032303a31333a323220474d54c05a04677a69707738666f6f3d4153444a4b48514b425a584f5157454f50495541585157454f49553b206d61782d6167653d333630303b2076657273696f6e3d31", in);
+            check_int("C.5.3 third response decodes", hpack_decode_headers(in, (size_t)inlen, &t, out, 8, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_int("C.5.3: 6 header fields decoded", (int)out_count, 6);
+            check_field("C.5.3: :status: 200", &out[0], ":status", "200");
+            check_field("C.5.3: cache-control (referenced by index, THEN evicted later in this same block)", &out[1], "cache-control", "private");
+            check_field("C.5.3: date (a NEW date value, evicting the response-1 date entry to fit)", &out[2], "date", "Mon, 21 Oct 2013 20:13:22 GMT");
+            check_field("C.5.3: location (referenced by index, THEN evicted later in this same block)", &out[3], "location", "https://www.example.com");
+            check_field("C.5.3: content-encoding: gzip (evicts the just-added date-21 entry to fit)", &out[4], "content-encoding", "gzip");
+            check_field("C.5.3: set-cookie (56-byte value; evicts two entries at once to fit)", &out[5], "set-cookie",
+                       "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1");
+            check_int("C.5.3: dynamic table has 3 entries (several evicted)", t.count, 3);
+            check_int("C.5.3: dynamic table size is 215", (int)t.size, 215);
+        }
+
+        /* Dynamic Table Size Update (RFC 7541 SS6.3), exercised directly:
+         * shrinking below the current size forces an eviction even with
+         * no new entry being inserted. */
+        {
+            hpack_dyn_table t; hpack_table_init(&t, 4096);
+            hpack_table_insert(&t, (const uint8_t*)"a", 1, (const uint8_t*)"1", 1);   /* size 34 */
+            hpack_table_insert(&t, (const uint8_t*)"b", 1, (const uint8_t*)"2", 1);   /* size 34, total 68 */
+            check_int("size update setup: 2 entries before shrinking", t.count, 2);
+            check_int("hpack_table_set_max_size(34) evicts down to what fits", hpack_table_set_max_size(&t, 34), 0);
+            check_int("size update: exactly 1 entry survives", t.count, 1);
+            check_int("size update: the SURVIVING entry is the most recent ('b')", t.entries[0].name_len == 1 && t.arena[t.entries[0].name_off] == 'b', 1);
+            check_int("hpack_table_set_max_size(0) evicts everything", hpack_table_set_max_size(&t, 0), 0);
+            check_int("size update to 0: table is empty", t.count, 0);
+
+            /* Wire-level: a Dynamic Table Size Update instruction (RFC
+             * 7541 SS6.3: "001" + 5-bit-prefixed size) inside a real
+             * header block, ahead of a literal insertion. */
+            hpack_table_init(&t, 4096);
+            uint8_t in[32]; int inlen;
+            hpack_header_field out[4]; size_t out_count;
+            uint8_t scratch[64]; size_t scratch_used;
+            inlen = fromhex("3f01" "82", in);   /* size update to (31+1)=32, then indexed :method:GET */
+            check_int("Dynamic Table Size Update instruction decodes inline", hpack_decode_headers(in, (size_t)inlen, &t, out, 4, &out_count, scratch, sizeof scratch, &scratch_used), 0);
+            check_int("size update inline: only 1 header field emitted (the update itself emits none)", (int)out_count, 1);
+            check_int("size update inline: table's max_size is now 32", (int)t.max_size, 32);
+        }
+
+        /* Malformed / out-of-range input -- all must fail loudly, not
+         * corrupt state or silently produce a wrong result. */
+        {
+            hpack_dyn_table t; hpack_table_init(&t, 4096);
+            uint8_t in[32]; int inlen;
+            hpack_header_field out[4]; size_t out_count;
+            uint8_t scratch[64]; size_t scratch_used;
+
+            /* index 62 with an EMPTY dynamic table -- nothing to resolve. */
+            inlen = fromhex("be", in);
+            check_int("indexed field referencing an empty dynamic table is rejected",
+                      hpack_decode_headers(in, (size_t)inlen, &t, out, 4, &out_count, scratch, sizeof scratch, &scratch_used), -1);
+
+            /* index 0 is explicitly never used (RFC 7541 SS6.1). */
+            inlen = fromhex("80", in);
+            check_int("indexed field with index 0 is rejected",
+                      hpack_decode_headers(in, (size_t)inlen, &t, out, 4, &out_count, scratch, sizeof scratch, &scratch_used), -1);
+
+            /* a Dynamic Table Size Update past HPACK_DYN_ARENA_SIZE (4096)
+             * claims a size this decoder never advertised being able to
+             * support. */
+            check_int("hpack_table_set_max_size() rejects a size past the arena cap",
+                      hpack_table_set_max_size(&t, HPACK_DYN_ARENA_SIZE + 1), -1);
+
+            /* a string literal whose declared length runs past the input. */
+            inlen = fromhex("40" "ff" "0102", in);   /* literal name index=0; the length prefix (with continuation) decodes to 128, but only 2 bytes of the 4-byte input actually follow it */
+            check_int("a string literal whose length overruns the input is rejected",
+                      hpack_decode_headers(in, (size_t)inlen, &t, out, 4, &out_count, scratch, sizeof scratch, &scratch_used), -1);
+
+            /* out_cap too small for even one decoded field. */
+            inlen = fromhex("82", in);
+            check_int("out_cap of 0 rejects a block with any header field",
+                      hpack_decode_headers(in, (size_t)inlen, &t, out, 0, &out_count, scratch, sizeof scratch, &scratch_used), -1);
+
+            /* scratch too small for a literal string. */
+            inlen = fromhex("400a637573746f6d2d6b65790d637573746f6d2d686561646572", in);
+            uint8_t tiny_scratch[4];
+            check_int("scratch too small for a decoded literal is rejected",
+                      hpack_decode_headers(in, (size_t)inlen, &t, out, 4, &out_count, tiny_scratch, sizeof tiny_scratch, &scratch_used), -1);
+        }
+
+        /* hpack_table_get() directly -- static-only lookups, and the
+         * unified index space boundary (61 = last static, 62 = first
+         * dynamic). */
+        {
+            hpack_dyn_table t; hpack_table_init(&t, 4096);
+            const uint8_t *name, *value; size_t name_len, value_len;
+
+            check_int("hpack_table_get(8) resolves the static table", hpack_table_get(&t, 8, &name, &name_len, &value, &value_len), 0);
+            check_int("hpack_table_get(8): name is :status", name_len == 7 && memcmp(name, ":status", 7) == 0, 1);
+            check_int("hpack_table_get(8): value is 200", value_len == 3 && memcmp(value, "200", 3) == 0, 1);
+
+            check_int("hpack_table_get(58) resolves user-agent (no static value)", hpack_table_get(&t, 58, &name, &name_len, &value, &value_len), 0);
+            check_int("hpack_table_get(58): value_len is 0 (no static value)", (int)value_len, 0);
+
+            check_int("hpack_table_get(0) is rejected", hpack_table_get(&t, 0, &name, &name_len, &value, &value_len), -1);
+            check_int("hpack_table_get(62) on an empty dynamic table is rejected", hpack_table_get(&t, 62, &name, &name_len, &value, &value_len), -1);
+
+            hpack_table_insert(&t, (const uint8_t*)"x-test", 6, (const uint8_t*)"v", 1);
+            check_int("hpack_table_get(62) resolves the just-inserted entry", hpack_table_get(&t, 62, &name, &name_len, &value, &value_len), 0);
+            check_int("hpack_table_get(62): name matches", name_len == 6 && memcmp(name, "x-test", 6) == 0, 1);
+            check_int("hpack_table_get(63) (one past the only entry) is rejected", hpack_table_get(&t, 63, &name, &name_len, &value, &value_len), -1);
         }
     }
 

@@ -72,7 +72,8 @@ TLS_U_SRC := crypto/sha256.c crypto/sha384.c crypto/hmac_sha256.c crypto/hkdf.c 
              tls/handshake.c tls/client.c tls/conn.c tls/cert.c tls/trace.c tls/driver.c \
              x509/asn1.c x509/x509.c x509/verify_cert.c \
              compress/crc32.c compress/inflate.c compress/gzip.c \
-             http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c
+             http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c \
+             http2/hpack_table.c http2/hpack_decode.c
 TLS_U_OBJ := $(TLS_U_SRC:.c=.tlsu.o)
 
 %.tlsu.o: %.c
@@ -257,10 +258,11 @@ gzip-test:
 	/tmp/aurora_gzip_test
 
 # Host-side HTTP/2 frame layer test (http2/: RFC 7540 frame header + SETTINGS
-# + DATA + HPACK-compressed HEADERS (static table + Huffman decode)).
+# + DATA + full HPACK: encode (static table), Huffman decode, dynamic table,
+# and full header-block decode).
 .PHONY: h2-test
 h2-test:
-	$(CC) -O2 -Ihttp2 tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c -o /tmp/aurora_h2_test
+	$(CC) -O2 -Ihttp2 tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c -o /tmp/aurora_h2_test
 	/tmp/aurora_h2_test
 
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
