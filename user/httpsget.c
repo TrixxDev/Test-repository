@@ -4,7 +4,8 @@
  * 16.2 adds HTTP authentication; 16.3 makes redirects RFC-correct for a
  * request with a body; 16.4 adds multipart/form-data; 16.5 adds a general
  * --method for HEAD/OPTIONS/DELETE/PUT/PATCH; 17.0 adds ALPN; 17.1.1 adds
- * the HTTP/2 connection-establishment handshake).
+ * the HTTP/2 connection-establishment handshake; 17.1.2 adds a generic
+ * HTTP/2 frame reader and DATA frame support).
  *
  * HTTP POST (Phase 16.1, opening the "Web Platform" series that follows
  * HTTPS v2): `httpsget --post <host> <path> <body> [now_unix]` sends `body`
@@ -54,11 +55,17 @@
  * sends the 24-byte connection preface and an empty SETTINGS frame, then
  * exchanges SETTINGS/SETTINGS-ACK with the server -- the two frames every
  * HTTP/2 connection is required to trade before anything else can happen.
- * That's still ALL it does: there is no HEADERS/DATA framing yet, so even a
+ * That's still ALL it does: there is no HEADERS framing yet, so even a
  * successful handshake can't actually carry a request, and fetch_begin()
  * still ends the connection attempt afterward either way -- now backed by a
  * genuinely negotiated, verified h2 connection instead of an outright
- * refusal to try.
+ * refusal to try. `h2_handshake()`'s own frame reading (Phase 17.1.2) goes
+ * through a generic `h2_frame_reader` (reassembling a header or payload
+ * split across TLS records, the same job `tls_conn`'s `hs_buf` already does
+ * one layer up), so it correctly recognizes -- without necessarily acting
+ * on -- any frame type, including a DATA frame the reader now knows how to
+ * decode the padding-aware payload of (`http2/data.c`), even though nothing
+ * opens a stream to receive real DATA on yet.
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -160,6 +167,7 @@
 #include "base64.h"
 #include "frame.h"
 #include "settings.h"
+#include "data.h"
 
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
@@ -189,6 +197,15 @@ static uint8_t           g_resp[8192];      /* captured response prefix: status 
                                              * body preview (only ~512 B of body is shown), so a
                                              * few KiB suffices -- not the whole transfer (15.0.4). */
 static struct url        g_visited[MAX_REDIRECTS + 1];
+
+/* HTTP/2 frame reassembly (Phase 17.1.2): one h2_frame_reader (~16 KiB,
+ * H2_FRAME_HEADER_LEN + H2_FRAME_PAYLOAD_MAX) is plenty -- like every other
+ * scratch buffer in this file, this client never has more than one fetch in
+ * flight, so there's never a second h2 handshake/exchange needing its own
+ * independent reassembly state at the same time. MUST stay a global for the
+ * same reason g_slots/tls_conn/tls_record_reader already are (see the
+ * 15.10 stack-overflow postmortem in docs/SECURITY.md) -- never a local. */
+static h2_frame_reader   g_h2_reader;
 
 static cookie_jar g_cookies;   /* process-lifetime (Phase 15.9) */
 
@@ -542,19 +559,24 @@ static int resp_done(void) { return g_target >= 0 && g_total >= g_target; }
 /* Complete the mandatory HTTP/2 connection-establishment handshake (RFC
  * 7540 §3.5/§6.5), Phase 17.1.1, once ALPN (17.0) has selected "h2": send
  * the connection preface followed by an empty SETTINGS frame, then read
- * frames until both the server's own SETTINGS (acknowledged immediately, as
- * §6.5 requires) and a SETTINGS ACK for ours have arrived. Their relative
- * order isn't guaranteed by the spec and real servers differ, so both are
- * watched for independently rather than assuming one comes before the
- * other. Any other frame type seen in between (a connection-level
- * WINDOW_UPDATE right after SETTINGS is common in practice) is skipped, not
- * rejected -- this handshake only cares about the two frames it's actually
- * waiting for, the same "skip what you don't understand yet" posture 17.0
- * already established for EncryptedExtensions. A GOAWAY means the server is
- * refusing the connection outright and ends the attempt immediately, since
- * nothing being waited for is ever coming after that.
+ * frames -- via the generic h2_frame_reader (Phase 17.1.2), which handles a
+ * frame header or payload arriving split across TLS records the same way
+ * tls_conn's own hs_buf already does one layer up -- until both the
+ * server's own SETTINGS (acknowledged immediately, as §6.5 requires) and a
+ * SETTINGS ACK for ours have arrived. Their relative order isn't guaranteed
+ * by the spec and real servers differ, so both are watched for
+ * independently rather than assuming one comes before the other. Any other
+ * frame type seen in between (a connection-level WINDOW_UPDATE right after
+ * SETTINGS is common in practice, and so, now that streams exist as a
+ * concept the reader recognizes even though nothing opens one yet, is a
+ * stray DATA frame) is skipped, not rejected -- this handshake only cares
+ * about the two frames it's actually waiting for, the same "skip what
+ * you don't understand yet" posture 17.0 already established for
+ * EncryptedExtensions. A GOAWAY means the server is refusing the
+ * connection outright and ends the attempt immediately, since nothing
+ * being waited for is ever coming after that.
  *
- * Phase 17.1.1 stops here: there is no HEADERS/DATA framing yet, so even a
+ * Phase 17.1.2 still stops here: there is no HEADERS framing yet, so even a
  * successful return doesn't mean a request can actually be sent -- see the
  * caller (fetch_begin()), which still refuses to proceed to an actual
  * fetch either way, now backed by a genuine verified h2 connection instead
@@ -577,9 +599,8 @@ static int h2_handshake(session_slot *slot)
     if (write_all(slot->fd, g_scratch, sl) != 0) { fprintf(2, "[httpsget] h2: write failed\n"); return -1; }
     printf("[httpsget] h2: connection preface + SETTINGS sent\n");
 
+    h2_frame_reader_init(&g_h2_reader);
     int got_server_settings = 0, got_settings_ack = 0, frames_seen = 0;
-    uint8_t hdrbuf[H2_FRAME_HEADER_LEN]; int hdrlen = 0;
-    uint32_t skip_remaining = 0;   /* payload bytes of the frame currently being discarded */
 
     while (!(got_server_settings && got_settings_ack)) {
         const uint8_t *rec; size_t rl; int cc;
@@ -591,50 +612,47 @@ static int h2_handshake(session_slot *slot)
 
             size_t pos = 0;
             while (pos < pl) {
-                if (skip_remaining > 0) {
-                    size_t s = skip_remaining < (uint32_t)(pl - pos) ? skip_remaining : (uint32_t)(pl - pos);
-                    pos += s; skip_remaining -= (uint32_t)s;
-                    continue;
-                }
-                if (hdrlen < H2_FRAME_HEADER_LEN) {
-                    size_t need = (size_t)(H2_FRAME_HEADER_LEN - hdrlen);
-                    size_t have = pl - pos;
-                    size_t take = need < have ? need : have;
-                    memcpy(hdrbuf + hdrlen, g_plain + pos, take);
-                    hdrlen += (int)take; pos += take;
-                    if (hdrlen < H2_FRAME_HEADER_LEN) break;   /* header itself spans a later read */
-                }
-                h2_frame_header fh;
-                h2_parse_frame_header(hdrbuf, sizeof hdrbuf, &fh);
-                hdrlen = 0;
+                int fed = h2_frame_reader_feed(&g_h2_reader, g_plain + pos, pl - pos);
+                if (fed < 0) { fprintf(2, "[httpsget] h2: frame too large (frame size error)\n"); return -1; }
+                pos += (size_t)fed;
 
-                if (++frames_seen > H2_HANDSHAKE_FRAME_CAP) {
-                    fprintf(2, "[httpsget] h2: gave up waiting for SETTINGS/ACK after %d frames\n", frames_seen);
-                    return -1;
-                }
-
-                if (fh.type == H2_TYPE_GOAWAY) {
-                    fprintf(2, "[httpsget] h2: server sent GOAWAY -- refusing this connection\n");
-                    return -1;
-                } else if (h2_is_settings_ack(&fh)) {
-                    if (fh.length != 0) { fprintf(2, "[httpsget] h2: malformed SETTINGS ACK (nonzero length)\n"); return -1; }
-                    got_settings_ack = 1;
-                    printf("[httpsget] h2: our SETTINGS was ACKed\n");
-                } else if (fh.type == H2_TYPE_SETTINGS) {
-                    if (!h2_settings_payload_valid(fh.length)) { fprintf(2, "[httpsget] h2: malformed SETTINGS frame\n"); return -1; }
-                    got_server_settings = 1;
-                    printf("[httpsget] h2: server SETTINGS received (%u bytes)\n", (unsigned)fh.length);
-                    skip_remaining = fh.length;   /* not interpreted yet -- no later phase needs a value yet */
-
-                    uint8_t ack[H2_FRAME_HEADER_LEN];
-                    int an = h2_build_settings_ack(ack, sizeof ack);
-                    int asl = tls_conn_send_app(&slot->conn, ack, (size_t)an, g_scratch, sizeof g_scratch);
-                    if (asl < 0 || write_all(slot->fd, g_scratch, asl) != 0) {
-                        fprintf(2, "[httpsget] h2: could not send our SETTINGS ACK\n"); return -1;
+                h2_frame_header fh; const uint8_t *payload; size_t payload_len;
+                while (h2_frame_reader_next(&g_h2_reader, &fh, &payload, &payload_len) == 1) {
+                    if (++frames_seen > H2_HANDSHAKE_FRAME_CAP) {
+                        fprintf(2, "[httpsget] h2: gave up waiting for SETTINGS/ACK after %d frames\n", frames_seen);
+                        return -1;
                     }
-                    printf("[httpsget] h2: SETTINGS ACK sent\n");
-                } else {
-                    skip_remaining = fh.length;   /* not one of the two frames being waited for -- skip it */
+
+                    if (fh.type == H2_TYPE_GOAWAY) {
+                        fprintf(2, "[httpsget] h2: server sent GOAWAY -- refusing this connection\n");
+                        return -1;
+                    } else if (h2_is_settings_ack(&fh)) {
+                        if (fh.length != 0) { fprintf(2, "[httpsget] h2: malformed SETTINGS ACK (nonzero length)\n"); return -1; }
+                        got_settings_ack = 1;
+                        printf("[httpsget] h2: our SETTINGS was ACKed\n");
+                    } else if (fh.type == H2_TYPE_SETTINGS) {
+                        if (!h2_settings_payload_valid(fh.length)) { fprintf(2, "[httpsget] h2: malformed SETTINGS frame\n"); return -1; }
+                        got_server_settings = 1;
+                        printf("[httpsget] h2: server SETTINGS received (%u bytes)\n", (unsigned)fh.length);
+
+                        uint8_t ack[H2_FRAME_HEADER_LEN];
+                        int an = h2_build_settings_ack(ack, sizeof ack);
+                        int asl = tls_conn_send_app(&slot->conn, ack, (size_t)an, g_scratch, sizeof g_scratch);
+                        if (asl < 0 || write_all(slot->fd, g_scratch, asl) != 0) {
+                            fprintf(2, "[httpsget] h2: could not send our SETTINGS ACK\n"); return -1;
+                        }
+                        printf("[httpsget] h2: SETTINGS ACK sent\n");
+                    } else if (fh.type == H2_TYPE_DATA) {
+                        /* No stream is open yet (HEADERS -- a later phase -- is what
+                         * would open one), so there's nothing to do with this beyond
+                         * recognizing it correctly; (void) keeps an unused-but-
+                         * intentionally-decoded variable from warning. */
+                        (void)payload;
+                        printf("[httpsget] h2: DATA frame seen (stream %u, %u bytes) -- ignored, no open stream yet\n",
+                               (unsigned)fh.stream_id, (unsigned)payload_len);
+                    }
+                    /* anything else (WINDOW_UPDATE, PING, PRIORITY, ...) is silently
+                     * skipped -- not one of the frames this handshake is waiting for. */
                 }
             }
         }

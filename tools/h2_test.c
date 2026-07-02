@@ -1,11 +1,13 @@
 /* Host-side HTTP/2 frame layer test (http2/: RFC 7540 §4.1 frame header,
- * §6.5 SETTINGS). No networking -- pure byte<->struct, exercised entirely
- * on the host. Build/run: `make h2-test`. */
+ * §6.5 SETTINGS, §6.1 DATA, and the generic incremental frame reader).
+ * No networking -- pure byte<->struct, exercised entirely on the host.
+ * Build/run: `make h2-test`. */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include "frame.h"
 #include "settings.h"
+#include "data.h"
 
 static int failures;
 
@@ -116,6 +118,167 @@ int main(void)
         check_int("SETTINGS payload length 18 is valid (three parameters)", h2_settings_payload_valid(18), 1);
         check_int("SETTINGS payload length 5 is invalid (not a multiple of 6)", h2_settings_payload_valid(5), 0);
         check_int("SETTINGS payload length 7 is invalid (not a multiple of 6)", h2_settings_payload_valid(7), 0);
+    }
+
+    printf("HTTP/2 generic frame reader (Phase 17.1.2):\n");
+    {
+        /* 1. a whole empty-payload frame (SETTINGS ACK-shaped) fed in one call */
+        {
+            h2_frame_reader r; h2_frame_reader_init(&r);
+            uint8_t f[H2_FRAME_HEADER_LEN];
+            h2_build_settings_ack(f, sizeof f);
+            int fed = h2_frame_reader_feed(&r, f, sizeof f);
+            check_int("whole empty frame: feed() consumes all 9 bytes", fed, H2_FRAME_HEADER_LEN);
+            h2_frame_header out; const uint8_t *payload; size_t payload_len;
+            int got = h2_frame_reader_next(&r, &out, &payload, &payload_len);
+            check_int("whole empty frame: next() reports it complete", got, 1);
+            check_int("whole empty frame: type is SETTINGS", out.type, H2_TYPE_SETTINGS);
+            check_int("whole empty frame: ACK flag set", (out.flags & H2_FLAG_ACK) != 0, 1);
+            check_int("whole empty frame: payload_len is 0", (int)payload_len, 0);
+            check_int("whole empty frame: next() has nothing more", h2_frame_reader_next(&r, &out, &payload, &payload_len), 0);
+        }
+
+        /* 2. the exact same frame, fed one byte at a time -- a header (or
+         * payload) split across an arbitrary number of separate reads must
+         * reassemble identically to the whole-frame case above. */
+        {
+            h2_frame_reader r; h2_frame_reader_init(&r);
+            uint8_t f[H2_FRAME_HEADER_LEN];
+            h2_build_settings_empty(f, sizeof f);
+            int all_ready_early = 0;
+            for (int i = 0; i < H2_FRAME_HEADER_LEN; i++) {
+                h2_frame_header dummy; const uint8_t *p; size_t pl;
+                if (i < H2_FRAME_HEADER_LEN - 1 && h2_frame_reader_next(&r, &dummy, &p, &pl) == 1) all_ready_early = 1;
+                h2_frame_reader_feed(&r, f + i, 1);
+            }
+            check_int("byte-at-a-time: not reported complete before the last byte arrived", all_ready_early, 0);
+            h2_frame_header out; const uint8_t *payload; size_t payload_len;
+            check_int("byte-at-a-time: complete exactly after the last byte", h2_frame_reader_next(&r, &out, &payload, &payload_len), 1);
+            check_int("byte-at-a-time: type is SETTINGS (non-ACK)", out.type, H2_TYPE_SETTINGS);
+            check_int("byte-at-a-time: ACK flag clear", (out.flags & H2_FLAG_ACK) != 0, 0);
+        }
+
+        /* 3. a frame with a real (nonzero) payload, split at an arbitrary
+         * point that falls INSIDE the payload, not just the header. */
+        {
+            h2_frame_reader r; h2_frame_reader_init(&r);
+            uint8_t payload_in[12] = { 0,1,2,3,4,5,6,7,8,9,10,11 };
+            h2_frame_header h = { sizeof payload_in, H2_TYPE_DATA, 0, 7 };
+            uint8_t f[H2_FRAME_HEADER_LEN + sizeof payload_in];
+            h2_write_frame_header(f, sizeof f, &h);
+            memcpy(f + H2_FRAME_HEADER_LEN, payload_in, sizeof payload_in);
+            /* split at byte 13: 4 bytes into the payload */
+            int fed1 = h2_frame_reader_feed(&r, f, 13);
+            check_int("payload split: first feed consumes exactly what was offered", fed1, 13);
+            h2_frame_header dummy; const uint8_t *p; size_t pl;
+            check_int("payload split: not complete yet", h2_frame_reader_next(&r, &dummy, &p, &pl), 0);
+            int fed2 = h2_frame_reader_feed(&r, f + 13, sizeof f - 13);
+            check_int("payload split: second feed consumes the rest", fed2, (int)(sizeof f - 13));
+            h2_frame_header out; const uint8_t *payload; size_t payload_len;
+            check_int("payload split: now complete", h2_frame_reader_next(&r, &out, &payload, &payload_len), 1);
+            check_int("payload split: stream_id preserved", (int)out.stream_id, 7);
+            check_int("payload split: payload_len matches", (int)payload_len, (int)sizeof payload_in);
+            check_int("payload split: payload bytes match", memcmp(payload, payload_in, sizeof payload_in) == 0, 1);
+        }
+
+        /* 4. two complete frames delivered in ONE feed() call -- next() must
+         * drain both, in order, without needing another feed() in between. */
+        {
+            h2_frame_reader r; h2_frame_reader_init(&r);
+            uint8_t f1[H2_FRAME_HEADER_LEN], f2[H2_FRAME_HEADER_LEN];
+            h2_build_settings_empty(f1, sizeof f1);
+            h2_build_settings_ack(f2, sizeof f2);
+            uint8_t both[2 * H2_FRAME_HEADER_LEN];
+            memcpy(both, f1, H2_FRAME_HEADER_LEN);
+            memcpy(both + H2_FRAME_HEADER_LEN, f2, H2_FRAME_HEADER_LEN);
+            int fed = h2_frame_reader_feed(&r, both, sizeof both);
+            check_int("two frames in one feed: first feed() call takes only the first frame's bytes",
+                      fed, H2_FRAME_HEADER_LEN);
+            h2_frame_header out1; const uint8_t *p1; size_t pl1;
+            check_int("two frames in one feed: first frame ready", h2_frame_reader_next(&r, &out1, &p1, &pl1), 1);
+            check_int("two frames in one feed: first frame is the non-ACK one", (out1.flags & H2_FLAG_ACK) != 0, 0);
+            int fed2 = h2_frame_reader_feed(&r, both + fed, sizeof both - (size_t)fed);
+            check_int("two frames in one feed: second feed() call takes the second frame's bytes",
+                      fed2, H2_FRAME_HEADER_LEN);
+            h2_frame_header out2; const uint8_t *p2; size_t pl2;
+            check_int("two frames in one feed: second frame ready", h2_frame_reader_next(&r, &out2, &p2, &pl2), 1);
+            check_int("two frames in one feed: second frame is the ACK", (out2.flags & H2_FLAG_ACK) != 0, 1);
+        }
+
+        /* 5. a frame declaring a payload larger than H2_FRAME_PAYLOAD_MAX is
+         * a frame size error (RFC 7540 SS4.2) -- rejected, not buffered. */
+        {
+            h2_frame_reader r; h2_frame_reader_init(&r);
+            h2_frame_header h = { H2_FRAME_PAYLOAD_MAX + 1, H2_TYPE_DATA, 0, 1 };
+            uint8_t hdr[H2_FRAME_HEADER_LEN];
+            h2_write_frame_header(hdr, sizeof hdr, &h);
+            check_int("oversized frame declaration is rejected", h2_frame_reader_feed(&r, hdr, sizeof hdr), -1);
+        }
+    }
+
+    printf("HTTP/2 DATA frame (RFC 7540 SS6.1, Phase 17.1.2):\n");
+    {
+        /* unpadded: the whole payload is data */
+        {
+            uint8_t payload[5] = { 'h','e','l','l','o' };
+            const uint8_t *data; size_t data_len;
+            check_int("unpadded DATA parses", h2_data_parse(payload, sizeof payload, 0, &data, &data_len), 0);
+            check_int("unpadded DATA: data_len is the whole payload", (int)data_len, (int)sizeof payload);
+            check_int("unpadded DATA: data points at the payload itself", data == payload, 1);
+        }
+
+        /* padded: [padlen=3][data="hi"][3 bytes of padding] */
+        {
+            uint8_t payload[] = { 3, 'h', 'i', 0, 0, 0 };
+            const uint8_t *data; size_t data_len;
+            check_int("padded DATA parses", h2_data_parse(payload, sizeof payload, H2_FLAG_PADDED, &data, &data_len), 0);
+            check_int("padded DATA: data_len excludes the pad-length byte and padding", (int)data_len, 2);
+            check_int("padded DATA: data starts right after the pad-length byte", data == payload + 1, 1);
+            check_int("padded DATA: data bytes match", memcmp(data, "hi", 2) == 0, 1);
+        }
+
+        /* padding >= whole payload -- RFC 7540 SS6.1 connection error */
+        {
+            uint8_t payload[] = { 5, 'h', 'i' };   /* padlen=5 but only 2 bytes follow */
+            const uint8_t *data; size_t data_len;
+            check_int("DATA with padding >= payload is rejected",
+                      h2_data_parse(payload, sizeof payload, H2_FLAG_PADDED, &data, &data_len), -1);
+        }
+
+        /* PADDED flag but zero-length payload -- no room for the pad-length byte itself */
+        {
+            const uint8_t *data; size_t data_len;
+            check_int("PADDED DATA with an empty payload is rejected",
+                      h2_data_parse((const uint8_t*)"", 0, H2_FLAG_PADDED, &data, &data_len), -1);
+        }
+
+        /* build: header + payload round-trips, END_STREAM flag set/clear correctly */
+        {
+            uint8_t out[64];
+            const uint8_t body[] = "some body bytes";
+            int n = h2_data_build(out, sizeof out, 3, body, sizeof body - 1, 1 /* end_stream */);
+            check_int("DATA build succeeds", n > 0, 1);
+            h2_frame_header h;
+            h2_parse_frame_header(out, (size_t)n, &h);
+            check_int("DATA build: type is DATA", h.type, H2_TYPE_DATA);
+            check_int("DATA build: stream_id preserved", (int)h.stream_id, 3);
+            check_int("DATA build: length matches the body", (int)h.length, (int)(sizeof body - 1));
+            check_int("DATA build: END_STREAM flag set", (h.flags & H2_FLAG_END_STREAM) != 0, 1);
+            check_int("DATA build: payload bytes match", memcmp(out + H2_FRAME_HEADER_LEN, body, sizeof body - 1) == 0, 1);
+
+            int n2 = h2_data_build(out, sizeof out, 3, body, sizeof body - 1, 0 /* not end_stream */);
+            h2_frame_header h2out;
+            h2_parse_frame_header(out, (size_t)n2, &h2out);
+            check_int("DATA build: END_STREAM flag clear when not requested", (h2out.flags & H2_FLAG_END_STREAM) != 0, 0);
+        }
+
+        /* capacity rejection -- an undersized output buffer must fail loudly, not truncate */
+        {
+            uint8_t small[H2_FRAME_HEADER_LEN + 2];
+            const uint8_t body[] = "way too long for this buffer";
+            check_int("DATA build rejects an undersized buffer",
+                      h2_data_build(small, sizeof small, 1, body, sizeof body - 1, 0), -1);
+        }
     }
 
     printf(failures ? "\nHTTP/2 FRAME TEST: %d FAILURE(S)\n" : "\nHTTP/2 FRAME TEST: ALL PASS\n", failures);

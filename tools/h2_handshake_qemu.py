@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Phase 17.1.1 acceptance: the HTTP/2 connection-establishment handshake
-(RFC 7540 §3.5/§6.5), negotiated for real inside QEMU against a genuine
-TLS 1.3 server that speaks real HTTP/2 frames at the byte level (hand-
-rolled here in Python, independent of Aurora's own http2/frame.c -- this
-script's frame encoder is a from-scratch second implementation, not a
-copy, so a bug shared between the two wouldn't hide behind agreement).
+"""Phase 17.1.1/17.1.2 acceptance: the HTTP/2 connection-establishment
+handshake (RFC 7540 §3.5/§6.5) plus the generic frame reader and DATA frame
+support (17.1.2), negotiated for real inside QEMU against a genuine TLS 1.3
+server that speaks real HTTP/2 frames at the byte level (hand-rolled here in
+Python, independent of Aurora's own http2/frame.c -- this script's frame
+encoder is a from-scratch second implementation, not a copy, so a bug
+shared between the two wouldn't hide behind agreement).
 
 One QEMU boot: `httpsget --alpn 10.0.2.2 /whatever <now>` against a server
 whose own ALPN list is `["h2"]` only, forcing the selection (this script
@@ -24,14 +25,20 @@ selection matrix itself). The server:
      of the two frames it's waiting for" logic really does tolerate an
      unrelated frame type interleaved in the middle of the exchange, not
      just extra bytes of a *known* type.
-  4. Waits for Aurora's SETTINGS ACK (type=SETTINGS, flags=ACK, empty) and
+  4. Sends a stray, PADDED, END_STREAM DATA frame on a stream nothing ever
+     opened (Phase 17.1.2): this is the real point of this step -- the
+     generic frame reader now decodes a genuine, payload-bearing, padded
+     frame type correctly (Aurora's own log names it: "DATA frame seen"),
+     not just tolerates extra bytes of a frame type it already recognized
+     like the WINDOW_UPDATE above.
+  5. Waits for Aurora's SETTINGS ACK (type=SETTINGS, flags=ACK, empty) and
      confirms it arrives.
-  5. Sends its own SETTINGS ACK, acknowledging Aurora's SETTINGS from step 2.
-  6. Confirms NO further bytes ever arrive afterward -- Phase 17.1.1 has no
-     HEADERS/DATA framing, so even though the connection-establishment
-     handshake just completed successfully, there is still no way for
-     Aurora to actually send a request over it, and it should say so and
-     stop, not send anything else.
+  6. Sends its own SETTINGS ACK, acknowledging Aurora's SETTINGS from step 2.
+  7. Confirms NO further bytes ever arrive afterward -- there is still no
+     HEADERS framing, so even though the connection-establishment handshake
+     just completed successfully (having correctly parsed a real DATA frame
+     along the way), there is still no way for Aurora to actually send a
+     request over it, and it should say so and stop, not send anything else.
 
 Self-contained and reproducible: no private keys are committed; the
 production user/ca_roots.h is restored on exit. Requires: qemu-system-i386,
@@ -43,15 +50,25 @@ import os, socket, ssl, struct, subprocess, sys, tempfile, threading, time, shut
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+H2_TYPE_DATA = 0
 H2_TYPE_SETTINGS = 4
 H2_TYPE_WINDOW_UPDATE = 8
 H2_FLAG_ACK = 1
+H2_FLAG_END_STREAM = 1
+H2_FLAG_PADDED = 8
 
 
 def h2_frame(type_, flags, stream_id, payload=b""):
     length = len(payload)
     return bytes([(length >> 16) & 0xFF, (length >> 8) & 0xFF, length & 0xFF,
                   type_, flags]) + struct.pack(">I", stream_id & 0x7FFFFFFF) + payload
+
+
+def h2_data_frame(stream_id, data, padding=0, end_stream=False):
+    """A real, padded DATA frame (RFC 7540 SS6.1): [pad_len][data][padding]."""
+    flags = (H2_FLAG_END_STREAM if end_stream else 0) | (H2_FLAG_PADDED if padding else 0)
+    payload = (bytes([padding]) if padding else b"") + data + (b"\x00" * padding)
+    return h2_frame(H2_TYPE_DATA, flags, stream_id, payload)
 
 
 def h2_parse_header(b9):
@@ -131,6 +148,12 @@ def start_server(port, certfile, keyfile, result):
             # isn't specifically waiting for" case its skip logic needs to
             # tolerate mid-handshake, not just before or after it.
             tls.sendall(h2_frame(H2_TYPE_WINDOW_UPDATE, 0, 0, struct.pack(">I", 65535)))
+            # A stray, PADDED, END_STREAM DATA frame on a stream nothing ever
+            # opened (Phase 17.1.2's whole point: the generic frame reader now
+            # decodes a real, payload-bearing, padded frame type correctly --
+            # not just tolerates extra bytes of a frame type it already knew
+            # about, like the empty SETTINGS/WINDOW_UPDATE above).
+            tls.sendall(h2_data_frame(1, b"unsolicited body", padding=5, end_stream=True))
 
             hdr2 = recv_exact(9)
             length2, type2, flags2, _s2 = h2_parse_header(hdr2)
@@ -231,6 +254,9 @@ def main():
              "connection preface + SETTINGS sent" in log),
             ("client log shows the server's SETTINGS was received",
              "server SETTINGS received" in log),
+            ("client log shows the stray padded DATA frame was correctly recognized as DATA "
+             "(not confused with the WINDOW_UPDATE or SETTINGS around it)",
+             "DATA frame seen (stream 1," in log),
             ("client log shows our SETTINGS ACK was sent", "SETTINGS ACK sent" in log),
             ("server confirms it actually received that SETTINGS ACK", result.get("got_client_ack") is True),
             ("client log shows the server's SETTINGS ACK (for ours) was recognized",

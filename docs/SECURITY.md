@@ -89,6 +89,7 @@ Run the vectors: `make crypto-test`.
 | **16.5** | **General `--method`** — `httpsget --method <GET\|HEAD\|OPTIONS\|DELETE\|POST\|PUT\|PATCH> ...` replaces the old hardcoded GET-or-POST choice with a validated table (`--post` is now just `--method POST`'s older, still-supported spelling); PUT/PATCH reuse `--post`'s body-shaped argument parsing, HEAD/OPTIONS/DELETE reuse GET's multi-path bodyless parsing — `build_request()`/`fetch_request()`/`fetch()`/`fetch_one()` needed no changes at all, since they already took `method` as a plain string. Fixes a real hang risk surfaced by adding HEAD: RFC 7230 §3.3.3 says a HEAD response body is *always* empty regardless of its `Content-Length` (which, if present, describes what a GET would have returned) — without a fix, a keep-alive HEAD response advertising a nonzero `Content-Length` would make the read loop wait forever for body bytes the server will never send; `resp_feed()`/`reusable()` now both special-case a HEAD request's response framing | `tools/method_qemu.py` against a real TLS 1.3 server: confirms `--method PUT`'s real method and exact body bytes, `--method DELETE`'s real method and bodyless request, and — the critical case — that `--method HEAD` against a server advertising `Content-Length: 999999` on a keep-alive connection that sends *zero* actual body bytes still reaches `status=200` within the ordinary wait budget instead of hanging; full existing host + QEMU regression suite (incl. 16.1/16.2/16.3/16.4's own POST/PUT-adjacent paths) unaffected | ✅ |
 | **17.0** | **ALPN** (RFC 7301, opening the "modern transport" series, `17.x`, that follows the now-closed `16.x` Web Platform series) — `httpsget --alpn` offers `["h2", "http/1.1"]` in the TLS ClientHello (opt-in: omitted entirely, byte-identical to every pre-17.0 ClientHello, unless the flag is given) and a new `tls_parse_encrypted_extensions()` extracts the server's selection (best-effort/non-fatal on a parse quirk — unlike Certificate/CertificateVerify, nothing here is security-critical enough to abort a handshake over). This phase is deliberately *just* the negotiation: there is no HTTP/2 framing yet, so if the server actually selects `h2`, `fetch_begin()` refuses to continue that connection rather than sending an HTTP/1.1 request line a peer now expecting HTTP/2 framing would never understand | `make tls-test` (21 new cases: a no-ALPN ClientHello is unaffected, an ALPN ClientHello carries both offered names and is exactly the expected 18 bytes longer, ALPN correctly precedes `pre_shared_key` when both are offered together, and `tls_parse_encrypted_extensions()` extracts `h2`/`http/1.1` selections, tolerates an unrelated extension alongside ALPN, and rejects (without over-reading) a malformed message); `tools/alpn_qemu.py` against a real TLS 1.3 server with an independent OpenSSL-backed ALPN implementation: a server that can only pick `http/1.1` does, and Aurora proceeds normally; a server that prefers `h2` gets it, and Aurora's own log shows the refusal while the server independently confirms *no bytes at all* arrive after the handshake; `--alpn` omitted against a server supporting both proves no extension was sent. Full existing host suite and a 12-script QEMU regression sweep (incl. 15.7 PSK resumption, since `EncryptedExtensions` parsing is now always-on for every connection, ALPN or not) all pass unaffected | ✅ |
 | **17.1.1** | **HTTP/2 connection-establishment handshake** (RFC 7540 §3.5/§6.5, new `http2/` directory: `frame.c` — the 9-byte frame header, RFC 7540 §4.1 — and `settings.c` — building an empty SETTINGS and a SETTINGS ACK, RFC 7540 §6.5) — once ALPN (17.0) actually selects `h2`, `h2_handshake()` sends the 24-byte connection preface and an empty SETTINGS frame, then reads frames (across as many TLS records/raw reads as it takes, reassembling a frame header that lands split across two of them) until both the server's own SETTINGS (acknowledged immediately, as §6.5 requires) and a SETTINGS ACK for Aurora's own have arrived — their relative order isn't guaranteed by the spec, so both are watched for independently. Anything else seen in between (a connection-level `WINDOW_UPDATE` right after SETTINGS is common in real servers) is skipped, not rejected — the same "tolerate what you're not specifically waiting for" posture 17.0 established for `EncryptedExtensions`; a `GOAWAY` ends the attempt immediately, since nothing being waited for is ever coming after that. Still `17.1.1`'s entire scope: there is no HEADERS/DATA framing yet, so even a *successful* handshake still can't carry a request — `fetch_begin()` still ends the connection attempt either way, just backed now by a genuinely negotiated h2 connection instead of an outright ALPN-result refusal | `make h2-test` (22 new cases: frame-header encode/decode round-trips incl. 24-bit length and 31-bit stream-ID boundary values, a known byte-for-byte encoding, the reserved top bit surviving a hostile peer setting it, capacity/range rejection, and the SETTINGS/SETTINGS-ACK builders' exact wire bytes); `tools/h2_handshake_qemu.py` against a *real frame-level* HTTP/2 test server (a from-scratch second Python implementation, not a copy of `http2/frame.c` — a bug shared between both wouldn't hide behind agreement): confirms the exact 24-byte preface arrives, the client's SETTINGS is real and empty, a deliberately non-empty server SETTINGS *plus* an interleaved `WINDOW_UPDATE` are both handled correctly (proving the skip logic tolerates an unknown frame type mid-handshake, not just extra bytes of a known one), both SETTINGS ACKs are exchanged in both directions, and — the whole point of this phase's scope boundary — nothing at all is sent afterward. All 13 checks pass; `tools/alpn_qemu.py`'s own h2-selected scenario is updated to match (Aurora now genuinely attempts the handshake instead of refusing outright, so its assertions moved from "no bytes ever arrive" to "the real preface arrives, and no fetch ever completes either way"). Full existing host suite and the same 12-script QEMU regression sweep as 17.0 all pass unaffected | ✅ |
+| **17.1.2** | **DATA frame + generic frame reader** — a new `h2_frame_reader` (`http2/frame.c`) replaces `h2_handshake()`'s ad-hoc header-accumulator/skip-bytes logic with a real, reusable, payload-*preserving* reader (the same role `tls_record_reader` plays for TLS records one layer up): `feed()` takes arbitrarily-chunked plaintext and returns how many bytes it actually consumed (bounded-memory — one frame, up to the RFC 7540 §6.5.2 default `SETTINGS_MAX_FRAME_SIZE`, at a time — not an unbounded queue), `next()` drains a completed frame's header *and* payload bytes. A new `http2/data.c` decodes a DATA frame's payload (RFC 7540 §6.1), including the padding case (`Pad Length` byte + data + padding, rejecting padding ≥ the whole payload) and builds one for future use. `h2_handshake()` itself now recognizes a DATA frame by name in its log (still doesn't act on it — no stream is open) rather than silently skipping it as an unknown type | `make h2-test` (23 new cases: a whole frame fed in one call vs. byte-at-a-time vs. split mid-*payload* all reassemble identically, two complete frames delivered in one `feed()` call drain correctly via two `next()` calls, an oversized frame declaration is rejected before any payload is buffered; DATA parse/build covering unpadded, padded, the two rejection cases, and an END_STREAM round-trip); `tools/h2_handshake_qemu.py` extended with a real, hand-rolled-in-Python, *padded*, `END_STREAM`-flagged DATA frame sent on a stream nothing ever opened, interleaved between the server's SETTINGS and its SETTINGS ACK — Aurora's log names it correctly ("DATA frame seen") without disrupting the handshake's completion, proving the generic reader handles a genuine payload-bearing frame mid-exchange, not just extra bytes of an already-known type. All 14 checks pass (up from 13). Because `h2_handshake()` was refactored, not just extended, this phase repeats the full previous regression sweep (13 QEMU scripts incl. `alpn_qemu.py`) end to end to confirm byte-identical externally-observable behavior — all pass unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2600,6 +2601,80 @@ Verified two ways:
   is new code inside `fetch_begin()` (even though only reachable via
   `--alpn` selecting `h2`), this phase's regression pass repeats 17.0's
   full 12-script QEMU sweep — all pass unaffected.
+
+## Step 17.1.2 — DATA frame + a generic HTTP/2 frame reader
+
+17.1.1's `h2_handshake()` worked, but its frame reading was hand-rolled and
+narrow: a `hdrbuf`/`hdrlen` accumulator for the header, a `skip_remaining`
+counter that threw away every payload byte regardless of frame type — fine
+for a handshake that only ever needed to *notice* SETTINGS/SETTINGS-ACK/
+GOAWAY and ignore everything else, but nothing about it could hand a later
+piece of code the *contents* of a frame it cared about. Streams (17.3) and
+HEADERS (17.1.3) both need exactly that, so 17.1.2 builds it once, properly,
+instead of letting every future h2 feature re-invent its own version.
+
+**`h2_frame_reader` (`http2/frame.c`)** plays the same role for HTTP/2
+frames that `tls_record_reader` already plays for TLS records one layer
+down: feed it arbitrarily-chunked bytes, get back complete frames. Two
+design choices worth naming:
+
+- **`feed()` returns how many bytes it consumed, not void.** An HTTP/2
+  frame boundary has no relationship to a TLS record boundary, so one
+  `tls_conn_recv_app()` call's plaintext can contain anywhere from a
+  fragment of one frame to several complete ones back to back. Rather than
+  buffer an unbounded number of pending frames (a real queue, unbounded
+  memory), `h2_frame_reader` holds exactly one frame — header plus payload
+  — at a time, and `feed()` simply stops accepting bytes the instant that
+  one frame is complete, telling the caller how much it actually took. The
+  caller's job (now `h2_handshake()`'s own inner loop) is a small,
+  mechanical pattern: feed, drain everything ready via `next()` in a loop,
+  and if there's leftover input, feed the remainder again.
+- **The buffer is sized to RFC 7540 §6.5.2's default `SETTINGS_MAX_FRAME_
+  SIZE` (16384) plus the 9-byte header — `H2_FRAME_PAYLOAD_MAX`.** Aurora
+  never negotiates a larger one (its own SETTINGS, 17.1.1, is empty, i.e.
+  every default applies), so a frame declaring more than that is
+  unambiguously a misbehaving peer, not a limit Aurora imposed on itself —
+  `feed()` rejects it outright (a frame size error, RFC 7540 §4.2) rather
+  than trying to accommodate it.
+
+**DATA frame support (`http2/data.c`)** is the other half: `h2_data_parse()`
+decodes RFC 7540 §6.1's optional-padding shape (`Pad Length` byte, then
+data, then that many bytes of padding), rejecting the case the RFC calls
+out explicitly — padding whose declared length is greater than or equal to
+the whole payload — as a connection error rather than reading past the
+buffer; `h2_data_build()` is the send-side mirror (Aurora never needs to
+*send* padding, only tolerate receiving it, so the builder doesn't offer
+the option). `h2_handshake()` itself doesn't act on a DATA frame's
+contents yet — nothing has opened a stream for one to belong to — but it
+now names it correctly in its own log rather than silently treating it as
+one more unknown type to skip, which is the concrete, externally-visible
+proof that "recognizes every frame type" is true today, not aspirational.
+
+Verified two ways:
+- **Host (`make h2-test`)**: 23 new cases for the reader (a whole frame in
+  one `feed()` call, the identical frame fed one byte at a time, a frame
+  whose *payload* — not just its header — is split across two `feed()`
+  calls at an arbitrary boundary, two complete frames delivered in a
+  single `feed()` call draining correctly via two separate `next()`
+  calls, and an oversized frame declaration rejected before any payload
+  is buffered) and for DATA (unpadded, padded, both rejection cases from
+  §6.1, and an END_STREAM flag round-trip through `h2_data_build()`). The
+  full existing host suite passes unchanged.
+- **QEMU (`tools/h2_handshake_qemu.py`, extended)**: the same real
+  frame-level HTTP/2 test server from 17.1.1 now also sends a genuine
+  *padded*, `END_STREAM`-flagged DATA frame — built by a second,
+  independent Python encoder, not `http2/data.c` itself — on a stream
+  nothing ever opened, interleaved between its SETTINGS and its SETTINGS
+  ACK. Aurora's log names it correctly ("DATA frame seen") without the
+  handshake's completion being disrupted, confirmed alongside every check
+  from 17.1.1 (preface, SETTINGS exchange in both directions, nothing
+  sent afterward). All 14 checks pass (13 before, plus the new one).
+  Because `h2_handshake()` was *refactored*, not just extended — its
+  entire frame-reading loop now goes through new code — this phase
+  doesn't stop at re-running the DATA-frame-aware test: it repeats the
+  full prior regression sweep (13 QEMU scripts, the 12 from 17.0 plus
+  `alpn_qemu.py`) end to end, to confirm the refactor changed nothing
+  about externally-observable behavior. All pass unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 
