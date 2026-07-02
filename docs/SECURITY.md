@@ -90,6 +90,7 @@ Run the vectors: `make crypto-test`.
 | **17.0** | **ALPN** (RFC 7301, opening the "modern transport" series, `17.x`, that follows the now-closed `16.x` Web Platform series) — `httpsget --alpn` offers `["h2", "http/1.1"]` in the TLS ClientHello (opt-in: omitted entirely, byte-identical to every pre-17.0 ClientHello, unless the flag is given) and a new `tls_parse_encrypted_extensions()` extracts the server's selection (best-effort/non-fatal on a parse quirk — unlike Certificate/CertificateVerify, nothing here is security-critical enough to abort a handshake over). This phase is deliberately *just* the negotiation: there is no HTTP/2 framing yet, so if the server actually selects `h2`, `fetch_begin()` refuses to continue that connection rather than sending an HTTP/1.1 request line a peer now expecting HTTP/2 framing would never understand | `make tls-test` (21 new cases: a no-ALPN ClientHello is unaffected, an ALPN ClientHello carries both offered names and is exactly the expected 18 bytes longer, ALPN correctly precedes `pre_shared_key` when both are offered together, and `tls_parse_encrypted_extensions()` extracts `h2`/`http/1.1` selections, tolerates an unrelated extension alongside ALPN, and rejects (without over-reading) a malformed message); `tools/alpn_qemu.py` against a real TLS 1.3 server with an independent OpenSSL-backed ALPN implementation: a server that can only pick `http/1.1` does, and Aurora proceeds normally; a server that prefers `h2` gets it, and Aurora's own log shows the refusal while the server independently confirms *no bytes at all* arrive after the handshake; `--alpn` omitted against a server supporting both proves no extension was sent. Full existing host suite and a 12-script QEMU regression sweep (incl. 15.7 PSK resumption, since `EncryptedExtensions` parsing is now always-on for every connection, ALPN or not) all pass unaffected | ✅ |
 | **17.1.1** | **HTTP/2 connection-establishment handshake** (RFC 7540 §3.5/§6.5, new `http2/` directory: `frame.c` — the 9-byte frame header, RFC 7540 §4.1 — and `settings.c` — building an empty SETTINGS and a SETTINGS ACK, RFC 7540 §6.5) — once ALPN (17.0) actually selects `h2`, `h2_handshake()` sends the 24-byte connection preface and an empty SETTINGS frame, then reads frames (across as many TLS records/raw reads as it takes, reassembling a frame header that lands split across two of them) until both the server's own SETTINGS (acknowledged immediately, as §6.5 requires) and a SETTINGS ACK for Aurora's own have arrived — their relative order isn't guaranteed by the spec, so both are watched for independently. Anything else seen in between (a connection-level `WINDOW_UPDATE` right after SETTINGS is common in real servers) is skipped, not rejected — the same "tolerate what you're not specifically waiting for" posture 17.0 established for `EncryptedExtensions`; a `GOAWAY` ends the attempt immediately, since nothing being waited for is ever coming after that. Still `17.1.1`'s entire scope: there is no HEADERS/DATA framing yet, so even a *successful* handshake still can't carry a request — `fetch_begin()` still ends the connection attempt either way, just backed now by a genuinely negotiated h2 connection instead of an outright ALPN-result refusal | `make h2-test` (22 new cases: frame-header encode/decode round-trips incl. 24-bit length and 31-bit stream-ID boundary values, a known byte-for-byte encoding, the reserved top bit surviving a hostile peer setting it, capacity/range rejection, and the SETTINGS/SETTINGS-ACK builders' exact wire bytes); `tools/h2_handshake_qemu.py` against a *real frame-level* HTTP/2 test server (a from-scratch second Python implementation, not a copy of `http2/frame.c` — a bug shared between both wouldn't hide behind agreement): confirms the exact 24-byte preface arrives, the client's SETTINGS is real and empty, a deliberately non-empty server SETTINGS *plus* an interleaved `WINDOW_UPDATE` are both handled correctly (proving the skip logic tolerates an unknown frame type mid-handshake, not just extra bytes of a known one), both SETTINGS ACKs are exchanged in both directions, and — the whole point of this phase's scope boundary — nothing at all is sent afterward. All 13 checks pass; `tools/alpn_qemu.py`'s own h2-selected scenario is updated to match (Aurora now genuinely attempts the handshake instead of refusing outright, so its assertions moved from "no bytes ever arrive" to "the real preface arrives, and no fetch ever completes either way"). Full existing host suite and the same 12-script QEMU regression sweep as 17.0 all pass unaffected | ✅ |
 | **17.1.2** | **DATA frame + generic frame reader** — a new `h2_frame_reader` (`http2/frame.c`) replaces `h2_handshake()`'s ad-hoc header-accumulator/skip-bytes logic with a real, reusable, payload-*preserving* reader (the same role `tls_record_reader` plays for TLS records one layer up): `feed()` takes arbitrarily-chunked plaintext and returns how many bytes it actually consumed (bounded-memory — one frame, up to the RFC 7540 §6.5.2 default `SETTINGS_MAX_FRAME_SIZE`, at a time — not an unbounded queue), `next()` drains a completed frame's header *and* payload bytes. A new `http2/data.c` decodes a DATA frame's payload (RFC 7540 §6.1), including the padding case (`Pad Length` byte + data + padding, rejecting padding ≥ the whole payload) and builds one for future use. `h2_handshake()` itself now recognizes a DATA frame by name in its log (still doesn't act on it — no stream is open) rather than silently skipping it as an unknown type | `make h2-test` (23 new cases: a whole frame fed in one call vs. byte-at-a-time vs. split mid-*payload* all reassemble identically, two complete frames delivered in one `feed()` call drain correctly via two `next()` calls, an oversized frame declaration is rejected before any payload is buffered; DATA parse/build covering unpadded, padded, the two rejection cases, and an END_STREAM round-trip); `tools/h2_handshake_qemu.py` extended with a real, hand-rolled-in-Python, *padded*, `END_STREAM`-flagged DATA frame sent on a stream nothing ever opened, interleaved between the server's SETTINGS and its SETTINGS ACK — Aurora's log names it correctly ("DATA frame seen") without disrupting the handshake's completion, proving the generic reader handles a genuine payload-bearing frame mid-exchange, not just extra bytes of an already-known type. All 14 checks pass (up from 13). Because `h2_handshake()` was refactored, not just extended, this phase repeats the full previous regression sweep (13 QEMU scripts incl. `alpn_qemu.py`) end to end to confirm byte-identical externally-observable behavior — all pass unaffected | ✅ |
+| **17.1.3** | **A real HEADERS frame, HPACK static table only** — new `http2/hpack.c` (RFC 7541 prefixed-integer and string-literal encoding, "Indexed Header Field" and "Literal Header Field *without* Indexing" representations — deliberately not "with incremental indexing", since Aurora tracks no dynamic table of its own to stay in sync with one it would be telling the peer to build) and `http2/headers.c` (`h2_build_headers()`, assembling `:method`/`:scheme`/`:authority`/`:path`/`user-agent` into one HPACK-compressed HEADERS frame using ONLY RFC 7541 Appendix A's static table — no Huffman, no dynamic table, both later phases). `h2_send_request()` sends it once the connection-establishment handshake (17.1.1/17.1.2) succeeds, opening stream 1 (RFC 7540 §5.1.1) with a genuine GET to `u->host`/`u->path`, then recognizes (by frame type only, still not HPACK-decoding) whatever response frame comes back before `fetch_begin()` still ends the attempt — response decoding needs Huffman and/or the dynamic table, which a real server's response headers routinely require | `make h2-test` (22 new cases: RFC 7541 §5.1's own worked example — 1337 with a 5-bit prefix — matches byte-for-byte, indexed/literal/multi-byte-continuation representations checked individually, then four complete HEADERS frames — `GET /`, `GET` with a non-root path plus a user-agent exercising the multi-byte index for entry 58, `POST`, and `PUT` — each checked against hex byte sequences hand-derived directly from RFC 7541's own encoding rules, not copied from any tool); `tools/h2_handshake_qemu.py` extended with a genuine, independent, from-scratch Python HPACK *decoder* (not Aurora's `http2/hpack.c`, and not any third-party package — installing one via `pip` was correctly blocked by this session's own permission policy as an undeclared external dependency) that receives Aurora's real HEADERS frame and decodes `:method=GET`, `:scheme=https`, `:authority=10.0.2.2`, `:path=/whatever` and Aurora's own user-agent string, then answers with a real (single-byte, statically-indexed) `:status: 200` HEADERS frame of its own, which Aurora correctly recognizes by type without decoding it — All 23 checks pass. Writing the C-side hex vectors caught a real off-by-one in the *test itself* (a hand-counted user-agent length one byte too long, so the encoder faithfully copied the string's own NUL terminator in as if it were data — the byte-mismatch check caught it immediately; `http2/hpack.c` was already correct) before it was ever committed. Full existing host suite and the 13-script QEMU regression sweep from 17.1.2 all pass unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2675,6 +2676,92 @@ Verified two ways:
   full prior regression sweep (13 QEMU scripts, the 12 from 17.0 plus
   `alpn_qemu.py`) end to end, to confirm the refactor changed nothing
   about externally-observable behavior. All pass unaffected.
+
+## Step 17.1.3 — a real HEADERS frame, HPACK static table only
+
+17.1.1 and 17.1.2 proved the h2 *connection* works. This phase proves
+Aurora can send a real *request* over it — the difference between "we can
+speak the protocol's opening handshake" and "we can actually ask a server
+for something." What it deliberately still can't do is understand the
+answer: RFC 7541's static table has no *value* for most response headers
+(`date`, `server`, `content-length`, ...), so a real encoder almost always
+falls back to literals, frequently Huffman-coded — and Aurora has neither
+Huffman nor a dynamic table yet. That's 17.2/17.3's job. This phase's
+job is narrower and, on its own terms, complete: build a genuinely
+correct, static-table-only HPACK request a real server accepts.
+
+**`http2/hpack.c`** implements exactly what that needs: RFC 7541 §5.1's
+prefixed-integer encoding (verified directly against the RFC's own worked
+example — 1337 with a 5-bit prefix encodes to `1f 9a 0a`, and `hpack_put_int()`
+produces exactly that), §5.2's string literals (length-prefixed, Huffman
+bit always clear — Huffman is optional for a sender, and decoding it is a
+decode-side problem this phase doesn't have), and two of RFC 7541 §6's
+representations: "Indexed Header Field" (§6.1, both name and value from
+the static table) and "Literal Header Field *without* Indexing" (§6.2.2).
+
+That second choice is deliberate, not incidental: RFC 7541 also defines
+"Literal Header Field *with Incremental Indexing*" (§6.2.1), which tells
+the peer's decoder to add the entry to *its own* dynamic table. Using it
+would be free short-term (nothing about sending it requires Aurora to
+track anything), but a correctness trap for the future — Aurora doesn't
+mirror a dynamic table of its own, so on a hypothetical second request
+reusing this connection, it would have no way to know what index numbers
+the server's dynamic table now has occupied, and any future dynamic-table
+use (17.2) would risk colliding with entries the peer thinks it already
+agreed to. "Without indexing" has no such implication: it explicitly
+tells the peer not to add the entry, so nothing needs to stay in sync.
+
+**`http2/headers.c`** (`h2_build_headers()`) assembles a real request
+from this: `:method` is indexed when it's the static table's own GET/POST
+value, otherwise a literal using GET's index for the name; `:scheme` is
+always `https` (this client only ever reaches h2 over TLS) and always
+indexed; `:path` is indexed only for the literal root `/`; `:authority`
+and `user-agent` are always literals (the static table has no fixed value
+for either — every real host differs, and there's no single "the"
+user-agent). `h2_send_request()`, in `user/httpsget.c`, calls this once
+`h2_handshake()` succeeds, sends the result opening stream 1 (RFC 7540
+§5.1.1's first client-initiated stream ID), then waits for one response
+frame and names it by type only — still not decoding it — before
+`fetch_begin()` ends the connection attempt either way, now for a more
+specific and more honest reason than before: not "no HEADERS framing",
+but "response decoding needs Huffman/the dynamic table."
+
+Verified two ways:
+- **Host (`make h2-test`)**: 22 new cases. The RFC 7541 §5.1 pin above,
+  plus indexed/literal representations checked individually (including
+  the multi-byte continuation case: static table index 58, user-agent,
+  doesn't fit a 4-bit prefix's 15-value max, so it needs a second byte —
+  `0f 2b`, confirmed byte-for-byte). Then four complete HEADERS frames —
+  a plain `GET /`, a `GET` with a real path plus a user-agent (exercising
+  that same multi-byte index in a full frame, not just in isolation),
+  `POST`, and `PUT` (the one case exercising a literal `:method`, since
+  PUT has no static-table value) — each checked against a full hex byte
+  sequence hand-derived directly from RFC 7541's encoding rules, not
+  copied from anywhere. Writing these caught a real bug, in the *test*:
+  a user-agent string literal's length was hand-counted one byte too
+  long, so the encoder faithfully copied the C string's own NUL
+  terminator in as if it were data — `http2/hpack.c` had done exactly
+  what it was told; the check simply proved the *told* was wrong, exactly
+  the kind of transcription slip this project has hit before with hex
+  constants, caught the same way: a precise byte-level check, not eyeballing.
+  The full existing host suite passes unchanged.
+- **QEMU (`tools/h2_handshake_qemu.py`, extended)**: a genuine, from-scratch
+  Python HPACK *decoder* — independent of `http2/hpack.c`, and of any
+  third-party package (this session tried `pip install hpack` as a
+  reference and the action was correctly denied by this environment's own
+  permission policy, since an undeclared external dependency is exactly
+  the kind of thing that policy exists to catch — the from-scratch
+  approach turned out to be the right call anyway, matching how this
+  suite's own frame encoder was already built independently of Aurora's).
+  The test server receives Aurora's real HEADERS frame and decodes
+  `:method=GET`, `:scheme=https`, `:authority=10.0.2.2`, `:path=/whatever`,
+  and Aurora's own user-agent string — the actual values from the actual
+  request, not placeholders — then answers with a real, minimal (single
+  indexed byte) `:status: 200` HEADERS frame, which Aurora's log confirms
+  it recognized by type without decoding it. All 23 checks pass. Because
+  this reaches further into `fetch_begin()`'s h2 path than 17.1.2 did,
+  this phase repeats the full 13-script QEMU regression sweep end to end
+  — all pass unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

@@ -5,7 +5,8 @@
  * request with a body; 16.4 adds multipart/form-data; 16.5 adds a general
  * --method for HEAD/OPTIONS/DELETE/PUT/PATCH; 17.0 adds ALPN; 17.1.1 adds
  * the HTTP/2 connection-establishment handshake; 17.1.2 adds a generic
- * HTTP/2 frame reader and DATA frame support).
+ * HTTP/2 frame reader and DATA frame support; 17.1.3 adds a real,
+ * HPACK-compressed HEADERS frame that opens a genuine h2 request).
  *
  * HTTP POST (Phase 16.1, opening the "Web Platform" series that follows
  * HTTPS v2): `httpsget --post <host> <path> <body> [now_unix]` sends `body`
@@ -66,6 +67,18 @@
  * on -- any frame type, including a DATA frame the reader now knows how to
  * decode the padding-aware payload of (`http2/data.c`), even though nothing
  * opens a stream to receive real DATA on yet.
+ *
+ * A real request (Phase 17.1.3, `http2/hpack.c` + `http2/headers.c`): once
+ * the handshake succeeds, `h2_send_request()` HPACK-compresses :method,
+ * :scheme, :authority, :path and a user-agent -- using ONLY RFC 7541's
+ * static table (no Huffman, no dynamic table; both are 17.2/17.3) -- into a
+ * real HEADERS frame and sends it, opening stream 1. That's still where
+ * this stops: nothing decodes whatever HPACK-compressed response comes
+ * back (a real server's response headers routinely need Huffman and/or the
+ * dynamic table, since the static table has no *value* for most of them --
+ * date, server, content-length, ...), so `fetch_begin()` still ends the
+ * connection attempt afterward -- Aurora can now genuinely SEND a request
+ * over h2, just not yet receive one back.
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -168,6 +181,8 @@
 #include "frame.h"
 #include "settings.h"
 #include "data.h"
+#include "hpack.h"
+#include "headers.h"
 
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
@@ -666,6 +681,81 @@ static int h2_handshake(session_slot *slot)
     return 0;
 }
 
+/* Build and send a minimal GET request's HEADERS frame (Phase 17.1.3) over
+ * an h2 connection whose connection-establishment handshake (h2_handshake(),
+ * above) already succeeded, opening stream 1 -- RFC 7540 §5.1.1's first
+ * client-initiated stream identifier. Always GET, always `u->host`/
+ * `u->path`: proving the encoding pipeline produces a real request a real
+ * server accepts is this phase's whole point, not carrying an arbitrary
+ * method/body over h2 yet (--post doesn't reach here today).
+ *
+ * Then waits for one response frame and just names it by type, without
+ * decoding its HPACK-compressed contents -- RFC 7541's static table has no
+ * *value* for most response headers (date, server, content-length, ...), so
+ * a real encoder almost always falls back to literals, frequently
+ * Huffman-coded for space, and this client doesn't have Huffman or a
+ * dynamic table yet (17.2/17.3). Never treated as a failure if no response
+ * frame shows up in time or the connection just closes -- the request
+ * having been sent and accepted is what this function is actually proving.
+ *
+ * Returns 0 once the HEADERS frame itself was sent successfully (regardless
+ * of what happens afterward), -1 only on a failure to build/seal/write it
+ * (diagnostic already printed). */
+static int h2_send_request(session_slot *slot, const struct url *u)
+{
+    static const char *ua = "Aurora-httpsget/0.3";
+    uint8_t hdrbuf[1024];
+    int hn = h2_build_headers(hdrbuf, sizeof hdrbuf, 1,
+                              "GET", (size_t)strlen("GET"),
+                              u->host, (size_t)strlen(u->host),
+                              u->path, (size_t)strlen(u->path),
+                              ua, (size_t)strlen(ua));
+    if (hn < 0) { fprintf(2, "[httpsget] h2: could not build the HEADERS frame\n"); return -1; }
+
+    int sl = tls_conn_send_app(&slot->conn, hdrbuf, (size_t)hn, g_scratch, sizeof g_scratch);
+    if (sl < 0) { fprintf(2, "[httpsget] h2: could not seal the HEADERS frame\n"); return -1; }
+    if (write_all(slot->fd, g_scratch, sl) != 0) { fprintf(2, "[httpsget] h2: write failed\n"); return -1; }
+    printf("[httpsget] h2: HEADERS frame sent (stream 1, GET %s)\n", u->path);
+
+    h2_frame_reader_init(&g_h2_reader);
+    for (int reads = 0; reads < H2_HANDSHAKE_FRAME_CAP; reads++) {
+        const uint8_t *rec; size_t rl; int cc;
+        while ((cc = tls_reader_next(&slot->reader, &rec, &rl)) == 1) {
+            size_t pl = 0;
+            int rr = tls_conn_recv_app(&slot->conn, rec, rl, g_plain, sizeof g_plain, &pl);
+            if (rr == TLS_CONN_ERR_ALERT || rr < 0) {
+                printf("[httpsget] h2: connection closed while waiting for a response\n");
+                return 0;
+            }
+
+            size_t pos = 0;
+            while (pos < pl) {
+                int fed = h2_frame_reader_feed(&g_h2_reader, g_plain + pos, pl - pos);
+                if (fed < 0) { fprintf(2, "[httpsget] h2: response frame too large (frame size error)\n"); return 0; }
+                pos += (size_t)fed;
+
+                h2_frame_header fh; const uint8_t *payload; size_t payload_len;
+                if (h2_frame_reader_next(&g_h2_reader, &fh, &payload, &payload_len) == 1) {
+                    (void)payload;
+                    const char *tn = fh.type == H2_TYPE_HEADERS ? "HEADERS"
+                                    : fh.type == H2_TYPE_DATA    ? "DATA"
+                                    : fh.type == H2_TYPE_GOAWAY  ? "GOAWAY" : "other";
+                    printf("[httpsget] h2: response frame seen (%s, stream %u, %u bytes) -- "
+                           "not decoded yet (needs HPACK Huffman/dynamic table, a later phase)\n",
+                           tn, (unsigned)fh.stream_id, (unsigned)payload_len);
+                    return 0;
+                }
+            }
+        }
+        if (cc < 0) { fprintf(2, "[httpsget] h2: malformed TLS record while waiting for a response\n"); return 0; }
+        int rn = read(slot->fd, g_scratch, sizeof g_scratch);
+        if (rn <= 0) { printf("[httpsget] h2: connection closed while waiting for a response\n"); return 0; }
+        tls_reader_feed(&slot->reader, g_scratch, (size_t)rn);
+    }
+    printf("[httpsget] h2: gave up waiting for a response\n");
+    return 0;
+}
+
 /* Open a fresh TCP connection to `u` into `slot` (a DNS lookup if `u->host`
  * isn't a literal), doing a TLS 1.3 handshake first if `u->https` -- offering
  * `slot`'s cached ticket for resumption if it has one. On success,
@@ -746,20 +836,22 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
             if (slot->conn.fsm.alpn_negotiated) {
                 printf("[TLS] ALPN negotiated: %s\n", slot->conn.fsm.alpn_selected);
                 if (strcmp(slot->conn.fsm.alpn_selected, "h2") == 0) {
-                    /* Phase 17.1.1 can complete the mandatory h2 connection-
-                     * establishment handshake (preface + SETTINGS exchange),
-                     * but there is still no HEADERS/DATA framing to actually
-                     * send a request with -- so even a successful handshake
-                     * still ends this connection attempt here, just with a
-                     * more specific diagnostic than 17.0's outright refusal
-                     * (whose own message h2_handshake() itself prints on
-                     * failure). Continuing to speak HTTP/1.1 over a
-                     * connection the server now expects to carry HTTP/2
-                     * would just hang or desync, not degrade gracefully. */
-                    if (h2_handshake(slot) == 0) {
-                        fprintf(2, "[httpsget] h2: connection-establishment handshake succeeded, "
-                                   "but HEADERS/DATA framing is not implemented yet (a later phase) "
-                                   "-- there is no way to actually send a request over it yet\n");
+                    /* By Phase 17.1.3, Aurora can complete the mandatory h2
+                     * connection-establishment handshake AND send a real,
+                     * HPACK-compressed HEADERS frame that opens a genuine
+                     * request -- but still can't decode whatever comes back
+                     * (that needs Huffman and/or the dynamic table, 17.2/
+                     * 17.3), so this connection attempt still ends here
+                     * either way, just further along than before. Continuing
+                     * to speak HTTP/1.1 over a connection the server now
+                     * expects to carry HTTP/2 would just hang or desync, not
+                     * degrade gracefully -- diagnostics from whichever step
+                     * didn't succeed have already been printed by it. */
+                    if (h2_handshake(slot) == 0 && h2_send_request(slot, u) == 0) {
+                        fprintf(2, "[httpsget] h2: request sent over a genuinely negotiated h2 "
+                                   "connection, but response decoding needs HPACK Huffman/dynamic "
+                                   "table support (a later phase) -- there is no way to complete a "
+                                   "real fetch over h2 yet\n");
                     }
                     close(slot->fd); return -1;
                 }

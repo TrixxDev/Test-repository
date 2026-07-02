@@ -8,6 +8,8 @@
 #include "frame.h"
 #include "settings.h"
 #include "data.h"
+#include "hpack.h"
+#include "headers.h"
 
 static int failures;
 
@@ -278,6 +280,121 @@ int main(void)
             const uint8_t body[] = "way too long for this buffer";
             check_int("DATA build rejects an undersized buffer",
                       h2_data_build(small, sizeof small, 1, body, sizeof body - 1, 0), -1);
+        }
+    }
+
+    printf("HPACK integer/string encoding (RFC 7541 SS5.1/SS5.2, Phase 17.1.3):\n");
+    {
+        uint8_t buf[16]; size_t pos;
+
+        /* RFC 7541 SS5.1's own worked example: 1337 with a 5-bit prefix. */
+        pos = 0;
+        check_int("hpack_put_int builds", hpack_put_int(buf, sizeof buf, &pos, 5, 0x00, 1337), 0);
+        check_hex("1337 with a 5-bit prefix matches RFC 7541 SS5.1's own example", buf, (int)pos, "1f9a0a");
+
+        /* a value that fits directly in the prefix needs no continuation byte */
+        pos = 0;
+        hpack_put_int(buf, sizeof buf, &pos, 5, 0x00, 10);
+        check_hex("10 with a 5-bit prefix (fits directly, no continuation)", buf, (int)pos, "0a");
+
+        /* string literal: length prefix (Huffman bit clear) + raw bytes */
+        pos = 0;
+        hpack_put_string(buf, sizeof buf, &pos, "hi", 2);
+        check_hex("string \"hi\": length=2, Huffman bit clear, raw bytes", buf, (int)pos, "026869");
+
+        /* indexed header field (RFC 7541 SS6.1): :method GET is index 2, :scheme https is index 7 */
+        pos = 0;
+        hpack_put_indexed(buf, sizeof buf, &pos, HPACK_IDX_METHOD_GET);
+        check_hex("indexed :method GET (index 2)", buf, (int)pos, "82");
+        pos = 0;
+        hpack_put_indexed(buf, sizeof buf, &pos, HPACK_IDX_SCHEME_HTTPS);
+        check_hex("indexed :scheme https (index 7)", buf, (int)pos, "87");
+
+        /* literal with an indexed name (RFC 7541 SS6.2.2): :authority (index 1) = "a.b"
+         * -- 01 (name_index=1, fits the 4-bit prefix directly) + 03 (length=3,
+         * Huffman bit clear) + 61 2e 62 ('a' '.' 'b'). */
+        pos = 0;
+        hpack_put_literal_indexed_name(buf, sizeof buf, &pos, HPACK_IDX_AUTHORITY, "a.b", 3);
+        check_hex("literal :authority = \"a.b\" (indexed name, literal value)", buf, (int)pos, "0103612e62");
+
+        /* an index that doesn't fit the 4-bit prefix (max 15) needs a
+         * continuation byte -- user-agent is index 58: first byte =
+         * flag|15 = 0x0f, then (58-15)=43 as a single continuation byte
+         * (43 < 128, so no further continuation needed). */
+        pos = 0;
+        hpack_put_int(buf, sizeof buf, &pos, 4, 0x00, HPACK_IDX_USER_AGENT);
+        check_hex("index 58 (user-agent) with a 4-bit prefix needs a continuation byte", buf, (int)pos, "0f2b");
+    }
+
+    printf("HTTP/2 HEADERS frame, HPACK static table only (Phase 17.1.3):\n");
+    {
+        /* Every expected hex string below was hand-derived byte-by-byte
+         * against RFC 7541's own encoding rules (see the derivation in the
+         * commit/docs writeup) -- not copied from any external tool. */
+        uint8_t out[256];
+
+        /* GET / to www.example.com, no user-agent -- both :method and :path
+         * are exactly the static table's own values, so everything except
+         * :authority is a single indexed byte. */
+        {
+            int n = h2_build_headers(out, sizeof out, 1,
+                                     "GET", 3, "www.example.com", 15,
+                                     "/", 1, 0, 0);
+            check_int("GET / builds", n > 0, 1);
+            h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
+            check_int("GET /: frame type is HEADERS", h.type, H2_TYPE_HEADERS);
+            check_int("GET /: END_HEADERS set", (h.flags & H2_FLAG_END_HEADERS) != 0, 1);
+            check_int("GET /: END_STREAM set (no request body over h2 yet)", (h.flags & H2_FLAG_END_STREAM) != 0, 1);
+            check_int("GET /: stream_id preserved", (int)h.stream_id, 1);
+            check_hex("GET / payload matches the hand-derived HPACK bytes",
+                      out + H2_FRAME_HEADER_LEN, (int)h.length,
+                      "8287010f7777772e6578616d706c652e636f6d84");
+        }
+
+        /* GET /page1 to 10.0.2.2, with a user-agent -- exercises a literal
+         * :path (not "/") and the multi-byte user-agent index (58) together. */
+        {
+            const char *ua = "Aurora-httpsget/0.3";
+            int n = h2_build_headers(out, sizeof out, 3,
+                                     "GET", 3, "10.0.2.2", 8, "/page1", 6, ua, 19);
+            check_int("GET /page1 + user-agent builds", n > 0, 1);
+            h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
+            check_int("GET /page1: stream_id preserved (3)", (int)h.stream_id, 3);
+            check_hex("GET /page1 + user-agent payload matches the hand-derived HPACK bytes",
+                      out + H2_FRAME_HEADER_LEN, (int)h.length,
+                      "8287010831302e302e322e3204062f70616765310f2b134175726f72612d68747470736765742f302e33");
+        }
+
+        /* POST /submit -- :method POST is also a static-table indexed value (index 3). */
+        {
+            int n = h2_build_headers(out, sizeof out, 1,
+                                     "POST", 4, "example.org", 11, "/submit", 7, 0, 0);
+            check_int("POST /submit builds", n > 0, 1);
+            h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
+            check_hex("POST /submit payload matches the hand-derived HPACK bytes",
+                      out + H2_FRAME_HEADER_LEN, (int)h.length,
+                      "8387010b6578616d706c652e6f726704072f7375626d6974");
+        }
+
+        /* PUT /item -- :method PUT has no static-table value, so it's the
+         * one case that exercises a literal :method (indexed-name-only,
+         * using GET's index 2 for the name, literal value "PUT"). */
+        {
+            int n = h2_build_headers(out, sizeof out, 1,
+                                     "PUT", 3, "example.org", 11, "/item", 5, 0, 0);
+            check_int("PUT /item builds", n > 0, 1);
+            h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
+            check_hex("PUT /item payload matches the hand-derived HPACK bytes",
+                      out + H2_FRAME_HEADER_LEN, (int)h.length,
+                      "020350555487010b6578616d706c652e6f726704052f6974656d");
+        }
+
+        /* capacity rejection -- an undersized output buffer must fail loudly */
+        {
+            uint8_t small[10];
+            int n = h2_build_headers(small, sizeof small, 1,
+                                     "GET", 3, "www.example.com", 15, "/", 1, 0, 0);
+            check_int("HEADERS build rejects an undersized buffer", n, -1);
         }
     }
 

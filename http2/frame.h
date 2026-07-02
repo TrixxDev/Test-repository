@@ -33,13 +33,15 @@
 #define H2_TYPE_WINDOW_UPDATE 0x8
 #define H2_TYPE_CONTINUATION  0x9
 
-#define H2_FLAG_ACK        0x1   /* SETTINGS/PING: this frame acknowledges one the peer sent */
-#define H2_FLAG_END_STREAM 0x1   /* DATA/HEADERS: no more frames follow for this stream (17.1.2).
-                                  * Same bit value as H2_FLAG_ACK -- RFC 7540 §4.1 flags are scoped
-                                  * per frame *type*, not global, so this is fine as long as callers
-                                  * only ever test a flag against a frame of the type it applies to
-                                  * (exactly how h2_is_settings_ack() already works). */
-#define H2_FLAG_PADDED     0x8   /* DATA/HEADERS: payload begins with a 1-byte Pad Length (17.1.2) */
+#define H2_FLAG_ACK         0x1   /* SETTINGS/PING: this frame acknowledges one the peer sent */
+#define H2_FLAG_END_STREAM  0x1   /* DATA/HEADERS: no more frames follow for this stream (17.1.2).
+                                   * Same bit value as H2_FLAG_ACK -- RFC 7540 §4.1 flags are scoped
+                                   * per frame *type*, not global, so this is fine as long as callers
+                                   * only ever test a flag against a frame of the type it applies to
+                                   * (exactly how h2_is_settings_ack() already works). */
+#define H2_FLAG_END_HEADERS 0x4   /* HEADERS: the whole header block fits in this frame, no
+                                   * CONTINUATION follows (17.1.3) */
+#define H2_FLAG_PADDED      0x8   /* DATA/HEADERS: payload begins with a 1-byte Pad Length (17.1.2) */
 
 /* The connection preface (RFC 7540 §3.5): the literal first bytes an HTTP/2
  * client sends, before any frame at all -- both to let a misconfigured
