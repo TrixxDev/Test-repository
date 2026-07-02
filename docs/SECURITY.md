@@ -91,6 +91,7 @@ Run the vectors: `make crypto-test`.
 | **17.1.1** | **HTTP/2 connection-establishment handshake** (RFC 7540 §3.5/§6.5, new `http2/` directory: `frame.c` — the 9-byte frame header, RFC 7540 §4.1 — and `settings.c` — building an empty SETTINGS and a SETTINGS ACK, RFC 7540 §6.5) — once ALPN (17.0) actually selects `h2`, `h2_handshake()` sends the 24-byte connection preface and an empty SETTINGS frame, then reads frames (across as many TLS records/raw reads as it takes, reassembling a frame header that lands split across two of them) until both the server's own SETTINGS (acknowledged immediately, as §6.5 requires) and a SETTINGS ACK for Aurora's own have arrived — their relative order isn't guaranteed by the spec, so both are watched for independently. Anything else seen in between (a connection-level `WINDOW_UPDATE` right after SETTINGS is common in real servers) is skipped, not rejected — the same "tolerate what you're not specifically waiting for" posture 17.0 established for `EncryptedExtensions`; a `GOAWAY` ends the attempt immediately, since nothing being waited for is ever coming after that. Still `17.1.1`'s entire scope: there is no HEADERS/DATA framing yet, so even a *successful* handshake still can't carry a request — `fetch_begin()` still ends the connection attempt either way, just backed now by a genuinely negotiated h2 connection instead of an outright ALPN-result refusal | `make h2-test` (22 new cases: frame-header encode/decode round-trips incl. 24-bit length and 31-bit stream-ID boundary values, a known byte-for-byte encoding, the reserved top bit surviving a hostile peer setting it, capacity/range rejection, and the SETTINGS/SETTINGS-ACK builders' exact wire bytes); `tools/h2_handshake_qemu.py` against a *real frame-level* HTTP/2 test server (a from-scratch second Python implementation, not a copy of `http2/frame.c` — a bug shared between both wouldn't hide behind agreement): confirms the exact 24-byte preface arrives, the client's SETTINGS is real and empty, a deliberately non-empty server SETTINGS *plus* an interleaved `WINDOW_UPDATE` are both handled correctly (proving the skip logic tolerates an unknown frame type mid-handshake, not just extra bytes of a known one), both SETTINGS ACKs are exchanged in both directions, and — the whole point of this phase's scope boundary — nothing at all is sent afterward. All 13 checks pass; `tools/alpn_qemu.py`'s own h2-selected scenario is updated to match (Aurora now genuinely attempts the handshake instead of refusing outright, so its assertions moved from "no bytes ever arrive" to "the real preface arrives, and no fetch ever completes either way"). Full existing host suite and the same 12-script QEMU regression sweep as 17.0 all pass unaffected | ✅ |
 | **17.1.2** | **DATA frame + generic frame reader** — a new `h2_frame_reader` (`http2/frame.c`) replaces `h2_handshake()`'s ad-hoc header-accumulator/skip-bytes logic with a real, reusable, payload-*preserving* reader (the same role `tls_record_reader` plays for TLS records one layer up): `feed()` takes arbitrarily-chunked plaintext and returns how many bytes it actually consumed (bounded-memory — one frame, up to the RFC 7540 §6.5.2 default `SETTINGS_MAX_FRAME_SIZE`, at a time — not an unbounded queue), `next()` drains a completed frame's header *and* payload bytes. A new `http2/data.c` decodes a DATA frame's payload (RFC 7540 §6.1), including the padding case (`Pad Length` byte + data + padding, rejecting padding ≥ the whole payload) and builds one for future use. `h2_handshake()` itself now recognizes a DATA frame by name in its log (still doesn't act on it — no stream is open) rather than silently skipping it as an unknown type | `make h2-test` (23 new cases: a whole frame fed in one call vs. byte-at-a-time vs. split mid-*payload* all reassemble identically, two complete frames delivered in one `feed()` call drain correctly via two `next()` calls, an oversized frame declaration is rejected before any payload is buffered; DATA parse/build covering unpadded, padded, the two rejection cases, and an END_STREAM round-trip); `tools/h2_handshake_qemu.py` extended with a real, hand-rolled-in-Python, *padded*, `END_STREAM`-flagged DATA frame sent on a stream nothing ever opened, interleaved between the server's SETTINGS and its SETTINGS ACK — Aurora's log names it correctly ("DATA frame seen") without disrupting the handshake's completion, proving the generic reader handles a genuine payload-bearing frame mid-exchange, not just extra bytes of an already-known type. All 14 checks pass (up from 13). Because `h2_handshake()` was refactored, not just extended, this phase repeats the full previous regression sweep (13 QEMU scripts incl. `alpn_qemu.py`) end to end to confirm byte-identical externally-observable behavior — all pass unaffected | ✅ |
 | **17.1.3** | **A real HEADERS frame, HPACK static table only** — new `http2/hpack.c` (RFC 7541 prefixed-integer and string-literal encoding, "Indexed Header Field" and "Literal Header Field *without* Indexing" representations — deliberately not "with incremental indexing", since Aurora tracks no dynamic table of its own to stay in sync with one it would be telling the peer to build) and `http2/headers.c` (`h2_build_headers()`, assembling `:method`/`:scheme`/`:authority`/`:path`/`user-agent` into one HPACK-compressed HEADERS frame using ONLY RFC 7541 Appendix A's static table — no Huffman, no dynamic table, both later phases). `h2_send_request()` sends it once the connection-establishment handshake (17.1.1/17.1.2) succeeds, opening stream 1 (RFC 7540 §5.1.1) with a genuine GET to `u->host`/`u->path`, then recognizes (by frame type only, still not HPACK-decoding) whatever response frame comes back before `fetch_begin()` still ends the attempt — response decoding needs Huffman and/or the dynamic table, which a real server's response headers routinely require | `make h2-test` (22 new cases: RFC 7541 §5.1's own worked example — 1337 with a 5-bit prefix — matches byte-for-byte, indexed/literal/multi-byte-continuation representations checked individually, then four complete HEADERS frames — `GET /`, `GET` with a non-root path plus a user-agent exercising the multi-byte index for entry 58, `POST`, and `PUT` — each checked against hex byte sequences hand-derived directly from RFC 7541's own encoding rules, not copied from any tool); `tools/h2_handshake_qemu.py` extended with a genuine, independent, from-scratch Python HPACK *decoder* (not Aurora's `http2/hpack.c`, and not any third-party package — installing one via `pip` was correctly blocked by this session's own permission policy as an undeclared external dependency) that receives Aurora's real HEADERS frame and decodes `:method=GET`, `:scheme=https`, `:authority=10.0.2.2`, `:path=/whatever` and Aurora's own user-agent string, then answers with a real (single-byte, statically-indexed) `:status: 200` HEADERS frame of its own, which Aurora correctly recognizes by type without decoding it — All 23 checks pass. Writing the C-side hex vectors caught a real off-by-one in the *test itself* (a hand-counted user-agent length one byte too long, so the encoder faithfully copied the string's own NUL terminator in as if it were data — the byte-mismatch check caught it immediately; `http2/hpack.c` was already correct) before it was ever committed. Full existing host suite and the 13-script QEMU regression sweep from 17.1.2 all pass unaffected | ✅ |
+| **17.2.1** | **HPACK Huffman decoding** (RFC 7541 §5.2/Appendix B, new `http2/huffman.c`) — decode-only, matching 17.1.3's own decision to leave Aurora's *encoder* (`hpack.c`) alone: this client never sends a Huffman-coded string, but a real server's response routinely does, so reading one back needs a decoder regardless. `hpack_huffman_decode()` is a bit-by-bit canonical-Huffman walk: accumulate one bit at a time into a candidate `(code, len)` and scan the 256 real symbols (never EOS/256 itself — RFC 7541 §5.2 forbids a sender from ever encoding it) for an exact match; a run longer than the longest real code (28 bits) or than EOS's own 30-bit all-ones code can only mean corrupt input, and trailing padding bits must themselves be a prefix of that same all-ones pattern. The 257-entry code table (256 symbols + EOS) behind it was **not hand-transcribed** — this project has hit exactly that class of error before (the gzip/CRC32/inflate KATs in 15.10, and 17.1.3's own hand-counted user-agent length bug) — instead it was fetched as raw RFC text via `curl` (rejecting `WebFetch`, whose own documentation says large content "may be summarized" by an intermediate model — an unacceptable risk for a bit-exact 257-entry table) and mechanically parsed out of the RFC's own published text with a narrow regex script, which also verified the parse's completeness (257/257 entries, no duplicates or gaps) and cross-checked three RFC-documented values (symbol 47 `/` → `0x18`/6 bits, symbol 0 → `0x1ff8`/13 bits, EOS → `0x3fffffff`/30 bits) before the table was ever written into C | `make h2-test` (11 new cases: RFC 7541 Appendix C.4.1 and C.4.2's own worked Huffman examples — `f1e3c2e5f23a6ba0ab90f4ff` → `"www.example.com"`, `a8eb10649cbf` → `"no-cache"` — decode byte-for-byte correct; empty input decodes to an empty string; a single `0x00` byte decodes one real symbol then is correctly rejected for invalid (non-all-1s) padding; four bytes of `0xff` (a run longer than any valid code) is rejected rather than silently treated as EOS; an undersized output buffer is rejected, not truncated). Before any C was written, the exact same algorithm was prototyped in Python against both RFC C.4 vectors, to catch a design bug independent of any transcription bug in the table. Standalone capability only — not yet wired into `httpsget.c`'s live h2 response path, since decoding a real response also needs the dynamic table (17.2.2); full existing host suite passes unaffected, and the full 16-script QEMU regression sweep (every `tools/*_qemu.py` script, including `h2_handshake_qemu.py` itself) re-run unaffected, since this phase only adds a new, still-unused object file to the link | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2762,6 +2763,101 @@ Verified two ways:
   this reaches further into `fetch_begin()`'s h2 path than 17.1.2 did,
   this phase repeats the full 13-script QEMU regression sweep end to end
   — all pass unaffected.
+
+## Step 17.2.1 — HPACK Huffman decoding
+
+17.1.3 could build a real request but not read a real response: RFC 7541's
+static table has no *value* for most response headers (`date`, `server`,
+`content-length`, ...), so a real server's HEADERS frame almost always
+carries literal strings, and those are frequently Huffman-coded — a real
+encoder chooses whichever representation is shorter, and Huffman-coded
+text almost always is. Aurora's own encoder still never produces one (that
+choice, made in 17.1.3, doesn't change here — see below), but reading one
+back is unavoidable if Aurora is ever going to understand what a real
+server actually said. That's this phase's entire scope: decode-only.
+
+**`http2/huffman.c`** implements RFC 7541 §5.2's Huffman coding as a
+bit-by-bit canonical-code walk: read one bit at a time into a candidate
+`(code, len)` pair and, after every bit, scan the table's 256 real symbols
+for an exact match (never matching symbol 256 — EOS — itself, since RFC
+7541 §5.2 forbids a sender from ever encoding it; the prefix-free property
+of a canonical Huffman code means a genuine attempt to smuggle EOS mid-stream
+just runs past every real code's maximum length instead of matching
+anything, which is exactly the `len > 30` rejection path). Whatever bits
+are left over at the very end (0-7 of them, padding to a whole byte) must
+themselves be a prefix of EOS's own code — which is 30 consecutive 1-bits —
+so valid padding is always all-1s; anything else is rejected as corrupt
+input, not silently accepted.
+
+The one architectural decision worth calling out explicitly: **only
+decode.** There is no `hpack_huffman_encode()`, and `http2/hpack.c`
+(17.1.3) is untouched by this phase. This isn't an oversight — RFC 7541
+§5.2 makes Huffman coding optional for a sender, and Aurora's own encoder
+already made that call in 17.1.3 for a specific reason (avoiding any
+dynamic-table synchronization risk with Aurora's Keep-Alive/Session
+Resumption/Multi-Origin Session Cache design). Decoding is a fundamentally
+different, one-directional problem: RFC 7541 §2.3.2 is explicit that the
+encoding and decoding dynamic tables (and, by the same logic, Huffman
+usage) on the two sides of a connection are entirely independent of each
+other. Understanding what a real server chooses to send back carries none
+of the synchronization risk that sending Huffman-coded requests would —
+it's a pure decode-side capability addition, not a protocol behavior
+change on Aurora's own send path.
+
+The 257-entry canonical code table (256 symbols + EOS) behind the decoder
+was **not hand-transcribed from RFC 7541 Appendix B.** This project has
+hit exactly that class of error before — the gzip/CRC32/inflate known-answer
+vectors in 15.10, and even a hand-counted user-agent string length in
+17.1.3's own test, caught only because a byte-level check flagged the
+mismatch — and a 257-entry bit-exact table is a much larger target for the
+same mistake. Two AI-assisted shortcuts were considered and rejected:
+`WebFetch` was ruled out because its own documentation says large content
+"may be summarized" by an intermediate model before being returned — an
+unacceptable risk when the whole point is avoiding a transcription
+intermediary between the RFC's own numbers and the C source; `pip install
+hpack` (an existing third-party Python package with an HPACK-derived
+table available) was correctly denied by this environment's own permission
+policy as an undeclared external dependency, the same call it made when
+17.1.3 tried it for a different reason. Instead: `curl` fetched the RFC's
+raw plaintext directly (`https://www.rfc-editor.org/rfc/rfc7541.txt`, no
+summarization layer in between), a narrow regex script mechanically parsed
+all 257 `(symbol, code, length)` triples out of Appendix B's own text, and
+the parse's own correctness was verified two ways before any C was written:
+completeness (257/257 entries found, no duplicates, no gaps) and three spot
+checks against values the RFC itself documents inline (symbol 47 `/` →
+`0x18` at 6 bits, symbol 0 → `0x1ff8` at 13 bits, EOS → `0x3fffffff` at 30
+bits — all exact). The decode *algorithm* itself was then separately
+prototyped in Python and run against RFC 7541 Appendix C.4's own two
+worked Huffman examples before the C implementation existed, so a bug in
+the algorithm's logic couldn't hide behind a bug in the table, or vice
+versa — the same "independent second implementation" discipline this
+session's QEMU test server has used for its own frame/HPACK code since
+17.1.1.
+
+Verified two ways:
+- **Host (`make h2-test`)**: 11 new cases. RFC 7541 Appendix C.4.1
+  (`f1e3c2e5f23a6ba0ab90f4ff` → `"www.example.com"`) and C.4.2
+  (`a8eb10649cbf` → `"no-cache"`) — the RFC's own published worked
+  examples, not independently invented vectors — both decode byte-for-byte
+  correct. Plus edge cases the RFC vectors alone don't exercise: an empty
+  input decodes to an empty string rather than erroring; a single `0x00`
+  byte decodes one real symbol (`'0'`, the shortest 5-bit code) and then is
+  correctly rejected for invalid, non-all-1s padding, rather than silently
+  truncating the leftover bits; four bytes of `0xff` (a run of 1-bits
+  longer than any real symbol's code, running straight past even EOS's own
+  30-bit length) is rejected outright rather than ever being treated as a
+  decoded EOS; and decoding into a deliberately undersized output buffer
+  fails loudly instead of truncating. The full existing host suite,
+  including every prior `h2-test` case, passes unchanged.
+- **QEMU**: not yet exercised end-to-end — this phase is explicitly scoped
+  as a standalone decode capability, not wired into `httpsget.c`'s live h2
+  response path yet, since a real response also needs the dynamic table
+  (17.2.2) before decoding it end-to-end means anything. Because
+  `http2/huffman.c` is a new, purely additive object file (linked into
+  `httpsget.elf`'s build but not yet called from any code path), the full
+  16-script QEMU regression sweep — every `tools/*_qemu.py` script,
+  including `h2_handshake_qemu.py` itself — was re-run in full to confirm
+  byte-identical externally observable behavior. All pass unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

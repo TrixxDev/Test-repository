@@ -10,8 +10,20 @@
 #include "data.h"
 #include "hpack.h"
 #include "headers.h"
+#include "huffman.h"
 
 static int failures;
+
+static int fromhex(const char *hex, uint8_t *out)
+{
+    int n = 0;
+    for (int i = 0; hex[i] && hex[i + 1]; i += 2) {
+        int hi = hex[i] <= '9' ? hex[i] - '0' : hex[i] - 'a' + 10;
+        int lo = hex[i + 1] <= '9' ? hex[i + 1] - '0' : hex[i + 1] - 'a' + 10;
+        out[n++] = (uint8_t)((hi << 4) | lo);
+    }
+    return n;
+}
 
 static void check_int(const char *name, int got, int want)
 {
@@ -395,6 +407,61 @@ int main(void)
             int n = h2_build_headers(small, sizeof small, 1,
                                      "GET", 3, "www.example.com", 15, "/", 1, 0, 0);
             check_int("HEADERS build rejects an undersized buffer", n, -1);
+        }
+    }
+
+    printf("HPACK Huffman decoding (RFC 7541 Appendix B / Appendix C.4, Phase 17.2.1):\n");
+    {
+        /* The 257-entry code table was mechanically extracted from the RFC's
+         * own published text (not hand-transcribed) -- see huffman.h and
+         * docs/SECURITY.md, Step 17.2.1, for the methodology. The two
+         * vectors below are the RFC's own worked Huffman examples, not
+         * independently invented -- RFC 7541 SS C.4.1 and SS C.4.2. */
+        uint8_t in[64], out[64]; int inlen; size_t outlen;
+
+        inlen = fromhex("f1e3c2e5f23a6ba0ab90f4ff", in);
+        check_int("SS C.4.1 vector decodes", hpack_huffman_decode(in, (size_t)inlen, out, sizeof out, &outlen), 0);
+        check_int("SS C.4.1 vector: decoded length is 15", (int)outlen, 15);
+        check_int("SS C.4.1 vector: decodes to \"www.example.com\"", memcmp(out, "www.example.com", 15) == 0, 1);
+
+        inlen = fromhex("a8eb10649cbf", in);
+        check_int("SS C.4.2 vector decodes", hpack_huffman_decode(in, (size_t)inlen, out, sizeof out, &outlen), 0);
+        check_int("SS C.4.2 vector: decoded length is 8", (int)outlen, 8);
+        check_int("SS C.4.2 vector: decodes to \"no-cache\"", memcmp(out, "no-cache", 8) == 0, 1);
+
+        /* empty input decodes to an empty string, not an error */
+        outlen = 999;
+        check_int("empty input decodes", hpack_huffman_decode(in, 0, out, sizeof out, &outlen), 0);
+        check_int("empty input: decoded length is 0", (int)outlen, 0);
+
+        /* a single 0x00 byte: the first 5 bits are symbol '0' (code 0x00,
+         * len 5), leaving 3 leftover bits (000) that must be padding -- but
+         * valid padding is always all 1s (a prefix of EOS's own 30-bit
+         * all-1s code), so this must be rejected, not silently accepted. */
+        {
+            uint8_t one[1] = { 0x00 };
+            check_int("a single zero byte has invalid (non-all-1s) padding and is rejected",
+                      hpack_huffman_decode(one, 1, out, sizeof out, &outlen), -1);
+        }
+
+        /* a run of 1-bits longer than any real symbol's code (max 28 bits)
+         * and past even EOS's own 30 bits can only mean corrupt/malicious
+         * input -- EOS itself must never be a decode target (RFC 7541
+         * SS5.2: "the string literal itself is compressed using... EOS...
+         * as a padding" but "the encoder MUST NOT generate...EOS"). */
+        {
+            uint8_t allones[4] = { 0xff, 0xff, 0xff, 0xff };
+            check_int("a run of 1-bits longer than any valid code is rejected",
+                      hpack_huffman_decode(allones, 4, out, sizeof out, &outlen), -1);
+        }
+
+        /* output capacity rejection -- decoding "www.example.com" (15
+         * bytes) into a 5-byte buffer must fail loudly, not truncate. */
+        {
+            uint8_t small[5];
+            inlen = fromhex("f1e3c2e5f23a6ba0ab90f4ff", in);
+            check_int("Huffman decode rejects an undersized output buffer",
+                      hpack_huffman_decode(in, (size_t)inlen, small, sizeof small, &outlen), -1);
         }
     }
 
