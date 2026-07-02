@@ -85,6 +85,7 @@ Run the vectors: `make crypto-test`.
 | **16.1** | **HTTP POST** (opening the "Web Platform" series, `16.x`, distinct from the `15.x` HTTPS v2 milestone) — `httpsget --post <host> <path> <body>` sends `body` as `application/x-www-form-urlencoded` with an auto-computed `Content-Length`; a redirect after a POST downgrades to a bodyless GET on the next hop (legacy 301/302/303 behavior; RFC 7231's method-and-body-preserving 307/308 explicitly not yet implemented) | `tools/post_qemu.py` against a real TLS 1.3 server: the server inspects the *actual* incoming request (not just httpsget's own log) and confirms method, `Content-Type`, `Content-Length` and the exact body bytes, then confirms the following redirect hop arrives as a bodyless GET; full existing host + QEMU regression suite unaffected | ✅ |
 | **16.2** | **HTTP authentication (Basic + Bearer)** — `httpsget --auth-basic user:pass` / `--auth-bearer token` send `Authorization: Basic <base64>` / `Authorization: Bearer <token>` (`user/base64.c`, a new RFC 4648 encoder — nothing else in the codebase needed one yet); the header is re-scoped on every redirect hop to whichever origin it was given for, so it naturally follows a same-origin redirect and just as naturally stops the moment a redirect leaves that origin | `make base64-test` (RFC 4648 §10's own vectors + realistic `user:pass` strings + an undersized-buffer rejection check); `tools/auth_qemu.py` against real TLS 1.3 servers: the server decodes the Basic header itself (not trusting httpsget's encoder) and confirms the exact credentials, confirms the exact Bearer token, and confirms a Bearer token given for origin A is *not* sent to origin B after a cross-origin redirect; full existing host + QEMU regression suite unaffected | ✅ |
 | **16.3** | **RFC-correct redirects for a request with a body** — 16.1's per-hop method/body decision is now made fresh after every redirect response instead of being fixed at the first hop: `307`/`308` resend the exact method and body (RFC 7231 §6.4.7 / RFC 7238), while `301`/`302`/`303` still downgrade to a bodyless `GET` | `tools/redirect_preserve_qemu.py` against a real TLS 1.3 server: a real 4-hop chain (`POST` →307→ `POST` →308→ `POST` →302→ `GET`) confirms both preserving hops resend the identical body bytes and the final `302` hop downgrades to a bodyless `GET` even though the request had been carried as `POST` through the two hops before it — proving the decision is made per-redirect, not "sticky" for the rest of the chain; full existing host + QEMU regression suite (incl. 16.1's own 302-downgrade test) unaffected | ✅ |
+| **16.4** | **multipart/form-data** — `httpsget --post-multipart <host> <path> <field=value \| field=@localfile> [...]` encodes each field as its own MIME part behind a generated boundary; `build_request()`'s Content-Type is now caller-supplied (`content_type`, threaded alongside `body`/`bodylen` through `fetch_request()`/`fetch()`/`fetch_one()`, and preserved or dropped on a redirect by the same 307/308-vs-everything-else rule 16.3 already applies to the body) instead of a hardcoded url-encoded string; a `field=@localfile` value is read off Aurora's own FAT32 disk (`open()`/`read()` in a loop — there's no `stat`/`lseek` to size a file up front) and sent as a file part with a fixed `application/octet-stream` Content-Type | `tools/multipart_qemu.py` against a real TLS 1.3 server: the server extracts the boundary from the *actual* Content-Type header and parses the *actual* body itself into parts (not trusting httpsget's own log), confirming a text field's exact value, a file field's filename/Content-Type, and that the file part's bytes match a real on-disk file byte-for-byte; a same-origin 307 hop then confirms the Content-Type (boundary included) and raw body are byte-identical on the retry, proving 16.3's preservation rule now correctly covers a multipart Content-Type too; full existing host + QEMU regression suite unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2250,6 +2251,84 @@ Verified two ways:
   just in the design. All 11 checks pass, and the full existing host +
   QEMU regression suite — including 16.1's own 302-downgrade test, still
   exercising the *other* branch of this same decision — is unaffected.
+
+## Step 16.4 — multipart/form-data
+
+16.1's POST could only ever send one shape of body:
+`application/x-www-form-urlencoded`, hardcoded inside `build_request()`.
+That's fine for a simple form, but file uploads — the other half of what
+`multipart/form-data` (RFC 2388, obsoleted by RFC 7578) actually exists
+for — need each field as its own MIME part with its own headers, behind a
+boundary the body's own bytes can't accidentally collide with. Since this
+client already had a working POST pipeline end to end (method, body,
+redirects, auth), the real work was building the multipart encoding itself
+and giving `build_request()` a `Content-Type` it didn't have to guess.
+
+**`content_type` becomes a first-class parameter**, threaded everywhere
+`body`/`bodylen` already were: `build_request()`, `fetch_request()`,
+`fetch()`, and `fetch_one()`'s per-hop `req_content_type`. `NULL` still
+means "default to url-encoded" (a plain `--post` never has to know this
+parameter exists), but a caller can now hand `build_request()` its own
+value. 16.3's redirect rule — 307/308 preserve, everything else downgrades
+to a bodyless GET — was written generically enough three phases ago that
+extending it to a third piece of per-request state was one more variable
+in the same reset line, not new logic.
+
+**Encoding a field is bounds-checked against the real body cap, not an
+intermediate buffer.** `build_multipart_body()` writes every literal,
+field name, and value straight into the final output buffer through
+`mp_app()`, which checks remaining capacity on every single append — there
+is no smaller fixed-size header buffer of its own that a long field name
+could silently overflow independently of the real `POST_BODY_MAX` cap.
+Both a plain `--post` and a `--post-multipart` body now share that same
+cap: given no `stat`/`lseek` syscall exists to size a file up front (see
+below), and no allocator worth trusting with the request's stack-adjacent
+buffers, one shared, already-proven-safe size is simpler and safer than
+inventing a second, larger one for multipart alone.
+
+**A `field=@localfile` value reads a real file off Aurora's own FAT32
+disk.** `open()`/`read()` in a loop until EOF or the body cap is hit — the
+same shape `user/cat.c` and `user/viewer.c` already use, since there's no
+`stat`/`lseek` syscall to size a file in advance. The file part is sent
+with the path's last component as its `filename` and a fixed
+`application/octet-stream` Content-Type; this client doesn't sniff a type
+from the extension, matching `POST_BODY_MAX`'s own framing of this program
+as "a diagnostic CLI, not a general uploader."
+
+**The boundary itself is intentionally not cryptographically random.** It
+only needs to be unlikely to collide with a field's own text — nowhere
+near the bar TLS's client random needs — so it reuses `fetch_begin()`'s own
+`perf_us() ^ getpid()` LCG pattern (see that function's comment: still not
+suitable for anything security-sensitive) with a different salt, rather
+than inventing a second non-cryptographic RNG for no real benefit.
+
+Verified two ways:
+- **Host**: the full existing suite (crc32/inflate/gzip/cookiejar/base64)
+  passes unchanged — there's no host-testable unit here on its own (unlike
+  base64 or the cookie jar), since multipart encoding is entangled with
+  `httpsget.c`'s freestanding request pipeline; QEMU is the acceptance
+  surface for this phase.
+- **QEMU (`tools/multipart_qemu.py`)**, against a real TLS 1.3 server: a
+  fresh `UPLOAD.TXT` file is baked directly onto `disk.img` for the run
+  (via `tools/mkfat32.py`, never committed) and `httpsget --post-multipart
+  10.0.2.2 /upload name=alice file=@/disk/UPLOAD.TXT` is typed for real.
+  The server extracts the boundary from the *actual* Content-Type header
+  and parses the *actual* body itself into parts — not trusting httpsget's
+  own log line — confirming the text field's exact value, the file field's
+  filename and Content-Type, and that the file part's bytes match the real
+  on-disk file byte-for-byte. `/upload` then 307-redirects to `/upload2`,
+  where the server confirms the Content-Type (boundary included) and the
+  raw body are byte-identical to the first request — proving 16.3's
+  preservation rule now genuinely covers a multipart Content-Type on the
+  wire, not just in the parameter list. All 12 checks pass, and the full
+  existing host + QEMU regression suite is unaffected. (Writing this test
+  also surfaced a QEMU-harness-only bug, not a code bug: `UPLOAD.TXT` is
+  the first typed command in this suite containing uppercase letters, and
+  QEMU's HMP `sendkey` takes lowercase physical-key names — typing the
+  literal character `U` isn't a recognized key and was silently dropped,
+  not rejected, so the fix is `shift-<lowercase>` for any uppercase letter
+  in a typed command, the same class of gap `-`/`:`/`=`/`&` closed in
+  earlier phases.)
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

@@ -2,7 +2,7 @@
  * adds redirects; 15.4 adds HTTP keep-alive; 15.8 adds a multi-origin
  * session cache; 15.9 adds cookies; 15.10 adds gzip; 16.1 adds HTTP POST;
  * 16.2 adds HTTP authentication; 16.3 makes redirects RFC-correct for a
- * request with a body).
+ * request with a body; 16.4 adds multipart/form-data).
  *
  * HTTP POST (Phase 16.1, opening the "Web Platform" series that follows
  * HTTPS v2): `httpsget --post <host> <path> <body> [now_unix]` sends `body`
@@ -13,6 +13,18 @@
  * same method and body on the next hop, while 301/302/303 downgrade to a
  * bodyless GET -- matching what browsers have done since long before it
  * was standardized.
+ *
+ * multipart/form-data (Phase 16.4): `httpsget --post-multipart <host>
+ * <path> <field=value | field=@localfile> [...] [now_unix]` encodes each
+ * field as its own MIME part behind a generated boundary -- `field=value`
+ * is a plain text part, `field=@localfile` reads `localfile` off Aurora's
+ * own FAT32 disk (there's no stat/lseek syscall to size it up front, so
+ * it's read()  in a loop until EOF or the shared POST_BODY_MAX cap) and
+ * sends it as a file part with a fixed application/octet-stream
+ * Content-Type. Same shell constraint as --post: every field is its own
+ * whitespace-free CLI token, so a field's name or value can't itself
+ * contain a space. Follows the same 16.3 redirect rules as a plain POST,
+ * just carrying its Content-Type (with the boundary) along for the ride.
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -119,8 +131,14 @@
 #define AUTH_TOKEN_MAX  512          /* raw bearer token or "user:pass" length cap (Phase 16.2) */
 #define AUTH_HEADER_MAX (8 + 4 * ((AUTH_TOKEN_MAX + 2) / 3))  /* "Basic "/"Bearer " + base64 worst case */
 #define FETCH_REUSE_MAX_BODY (64u * 1024u)  /* don't bother draining a response this big just to reuse the connection */
-#define POST_BODY_MAX 4096           /* a diagnostic CLI, not a general uploader (Phase 16.1) */
+#define POST_BODY_MAX 4096           /* a diagnostic CLI, not a general uploader (Phase 16.1); shared
+                                      * cap for both a plain --post body and an encoded --post-multipart
+                                      * body (Phase 16.4) -- one body buffer size, not two */
 #define REQ_BUF_MAX   (2048 + POST_BODY_MAX)  /* headers (incl. a full Cookie: line) + body */
+#define MULTIPART_FIELDS_MAX 8        /* CLI field cap (Phase 16.4) -- sh.c's ARG_MAX (16) leaves
+                                       * little room for more anyway, see tokenize() in user/sh.c */
+#define BOUNDARY_MAX          40      /* "AuroraBoundary" + 16 hex digits + NUL, rounded up */
+#define MULTIPART_CTYPE_MAX  (32 + BOUNDARY_MAX)  /* "multipart/form-data; boundary=" + boundary */
 
 static x509_cert         g_roots[CA_ROOTS_N];
 /* Outgoing-record scratch: sized for REQ_BUF_MAX plaintext plus TLS/AEAD
@@ -147,6 +165,17 @@ static char       g_auth_header[AUTH_HEADER_MAX];
 static int        g_auth_len;
 static int        g_has_auth;
 static struct url g_auth_origin;
+
+/* multipart/form-data (Phase 16.4): the encoded body and its Content-Type
+ * (which carries the boundary) are built once in main() from
+ * --post-multipart's CLI fields, then handed down through fetch_one()
+ * exactly like a plain --post body -- fetch_one()/fetch()/fetch_request()/
+ * build_request() never need to know a body is multipart-shaped, only that
+ * it comes with a caller-supplied Content-Type instead of the default
+ * url-encoded one. */
+static uint8_t     g_multipart_body[POST_BODY_MAX];
+static char        g_boundary[BOUNDARY_MAX];
+static char        g_multipart_ctype[MULTIPART_CTYPE_MAX];
 
 /* Multi-origin session cache (Phase 15.8): one slot per origin, holding
  * whatever a real client would want to remember about it between requests --
@@ -287,9 +316,12 @@ static void app_uint(char *d, int *n, unsigned v)
  * different origin naturally sends a different (or no) cookie set.
  *
  * `body`/`bodylen` (Phase 16.1) are optional (NULL/0 for a bodyless
- * request); when present they're sent as application/x-www-form-urlencoded
- * -- the one body shape this client's CLI can actually construct (a single
- * whitespace-free token; Aurora's shell has no quoting, see main()).
+ * request); when present, `content_type` (Phase 16.4) says what Content-Type
+ * to send with them -- NULL defaults to application/x-www-form-urlencoded,
+ * the one body shape a plain --post's CLI can actually construct (a single
+ * whitespace-free token; Aurora's shell has no quoting, see main());
+ * --post-multipart instead passes its own "multipart/form-data;
+ * boundary=..." value.
  *
  * `auth_header`/`auth_len` (Phase 16.2) are an optional pre-built
  * Authorization value ("Basic <base64>" or "Bearer <token>"; NULL/0 for
@@ -297,6 +329,7 @@ static void app_uint(char *d, int *n, unsigned v)
  * origin still matches the one credentials were given for. */
 static void build_request(char *req, int *rn, const struct url *u, uint64_t now,
                           const char *method, const uint8_t *body, int bodylen,
+                          const char *content_type,
                           const char *auth_header, int auth_len)
 {
     *rn = 0;
@@ -322,7 +355,9 @@ static void build_request(char *req, int *rn, const struct url *u, uint64_t now,
         app(req, rn, "\r\n");
     }
     if (body && bodylen > 0) {
-        app(req, rn, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ");
+        app(req, rn, "Content-Type: ");
+        app(req, rn, content_type ? content_type : "application/x-www-form-urlencoded");
+        app(req, rn, "\r\nContent-Length: ");
         app_uint(req, rn, (unsigned)bodylen);
         app(req, rn, "\r\n");
     }
@@ -522,12 +557,12 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
  * up front, see the header comment -- or -1 on any other transport failure
  * (diagnostic already printed, unrecoverable). */
 static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
-                         const char *method, const uint8_t *body, int bodylen,
+                         const char *method, const uint8_t *body, int bodylen, const char *content_type,
                          const char *auth_header, int auth_len, fetch_result_t *out)
 {
     resp_reset();
     char req[REQ_BUF_MAX]; int rn;
-    build_request(req, &rn, u, now, method, body, bodylen, auth_header, auth_len);
+    build_request(req, &rn, u, now, method, body, bodylen, content_type, auth_header, auth_len);
 
     int closed = 0;
     if (slot->origin.https) {
@@ -609,20 +644,20 @@ static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
  * (fr is filled), -1 on an unrecoverable transport failure (diagnostic
  * already printed, caller should give up). */
 static int fetch(const struct url *u, uint64_t now, const char *method,
-                 const uint8_t *body, int bodylen,
+                 const uint8_t *body, int bodylen, const char *content_type,
                  const char *auth_header, int auth_len, fetch_result_t *out)
 {
     session_slot *slot = slot_find_or_alloc(u);
     if (slot->conn_open) {
         printf("[httpsget] reusing open connection to %s:%d (keep-alive)\n", u->host, u->port);
-        int rc = fetch_request(slot, u, now, method, body, bodylen, auth_header, auth_len, out);
+        int rc = fetch_request(slot, u, now, method, body, bodylen, content_type, auth_header, auth_len, out);
         if (rc == FETCH_OK) return 0;
         if (rc != FETCH_STALE) return -1;
         printf("[httpsget] reused connection to %s:%d was already closed -- reconnecting\n", u->host, u->port);
         slot_close(slot);
     }
     if (fetch_begin(slot, u, now) != 0) return -1;
-    int rc = fetch_request(slot, u, now, method, body, bodylen, auth_header, auth_len, out);
+    int rc = fetch_request(slot, u, now, method, body, bodylen, content_type, auth_header, auth_len, out);
     if (rc == FETCH_OK) return 0;
     if (rc == FETCH_STALE)
         fprintf(2, "[httpsget] connection to %s:%d closed before the request could be sent\n", u->host, u->port);
@@ -634,14 +669,16 @@ static int fetch(const struct url *u, uint64_t now, const char *method,
  * obtained), or -1 on an unrecoverable transport failure. `label` is printed
  * as a header when there's more than one path in this run.
  *
- * `method`/`post_body`/`post_bodylen` (Phase 16.1) start as given for the
- * first request (hop 0) and are then re-decided after every redirect
- * response, per RFC 7231/7238 (Phase 16.3): 307 and 308 preserve the
- * current method and body unchanged onto the next hop, while every other
- * redirect status (301/302/303) downgrades to a bodyless GET, matching
- * what browsers have done since long before it was standardized. */
+ * `method`/`post_body`/`post_bodylen`/`content_type` (Phase 16.1, extended
+ * 16.4 to also carry a caller-supplied Content-Type alongside the body)
+ * start as given for the first request (hop 0) and are then re-decided
+ * after every redirect response, per RFC 7231/7238 (Phase 16.3): 307 and
+ * 308 preserve the current method, body and Content-Type unchanged onto the
+ * next hop, while every other redirect status (301/302/303) downgrades to
+ * a bodyless GET, matching what browsers have done since long before it
+ * was standardized. */
 static int fetch_one(const char *host, const char *path, uint64_t now, const char *label,
-                     const char *method, const uint8_t *post_body, int post_bodylen)
+                     const char *method, const uint8_t *post_body, int post_bodylen, const char *content_type)
 {
     struct url u; memset(&u, 0, sizeof u);
     u.https = 1; u.port = 443;
@@ -656,6 +693,7 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
     const char *req_method = method;
     const uint8_t *req_body = post_body;
     int req_bodylen = post_bodylen;
+    const char *req_content_type = content_type;
 
     for (;;) {
         for (int i = 0; i < nvisited; i++)
@@ -680,7 +718,7 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
          * naturally stops the moment a redirect leaves that origin. */
         const char *cur_auth = (g_has_auth && same_origin(&g_auth_origin, &u)) ? g_auth_header : 0;
         int cur_auth_len = cur_auth ? g_auth_len : 0;
-        if (fetch(&u, now, req_method, req_body, req_bodylen, cur_auth, cur_auth_len, &fr) != 0)
+        if (fetch(&u, now, req_method, req_body, req_bodylen, req_content_type, cur_auth, cur_auth_len, &fr) != 0)
             return -1;    /* diagnostic already printed */
         /* Only this response's own slot closes -- a redirect to a different
          * origin (Phase 15.8) leaves every other origin's slot exactly as it
@@ -742,28 +780,132 @@ static int fetch_one(const char *host, const char *path, uint64_t now, const cha
             return st;
         }
         printf("[httpsget] %d redirect -> %s\n", st, fr.hr.location);
-        if (st != 307 && st != 308) { req_method = "GET"; req_body = 0; req_bodylen = 0; }
+        if (st != 307 && st != 308) { req_method = "GET"; req_body = 0; req_bodylen = 0; req_content_type = 0; }
         u = next;
         hop++;
     }
+}
+
+/* Non-cryptographic multipart boundary (Phase 16.4): only needs to be
+ * unlikely to collide with a field's own text, nowhere near the strength
+ * TLS needs -- reuses fetch_begin()'s own perf_us()^getpid() LCG pattern
+ * (see its comment; still NOT suitable for anything security-sensitive)
+ * with a different salt so the two streams don't line up. */
+static void gen_boundary(char *out, int cap)
+{
+    static const char *prefix = "AuroraBoundary";
+    static const char *hex = "0123456789abcdef";
+    unsigned seed = perf_us() ^ (unsigned)getpid() ^ 0x5A5A5A5Au;
+    int n = 0;
+    for (int i = 0; prefix[i] && n < cap - 1; i++) out[n++] = prefix[i];
+    for (int i = 0; i < 16 && n < cap - 1; i++) {
+        seed = seed * 1103515245u + 12345u;
+        out[n++] = hex[(seed >> 16) & 0xF];
+    }
+    out[n] = 0;
+}
+
+/* Bounds-checked append into a multipart body buffer -- every write against
+ * `out`/`outcap` goes through this (Phase 16.4), so there's no intermediate
+ * fixed-size header buffer of its own that a long field name or filename
+ * could overflow independently of the real body cap. */
+static int mp_app(uint8_t *out, int *n, int outcap, const char *s)
+{
+    int len = (int)strlen(s);
+    if (*n + len > outcap) return -1;
+    memcpy(out + *n, s, (size_t)len);
+    *n += len;
+    return 0;
+}
+
+/* Encode --post-multipart's fields into `out` as a multipart/form-data body
+ * (RFC 2388/7578), returning the encoded length or -1 if it doesn't fit in
+ * `outcap` or a file field couldn't be opened (a diagnostic already printed
+ * for the latter). Each entry in `fields` is one CLI token "name=value"
+ * (mutated in place at '=', the same trick user/sh.c's own tokenize() uses
+ * on the raw line); a value starting with '@' is instead a path to read
+ * from disk -- there's no stat/lseek syscall to size a file up front, so
+ * it's just read() in a loop until EOF or `outcap` is reached, sent with
+ * the path's last component as its filename and a fixed
+ * application/octet-stream Content-Type (this client doesn't guess a type
+ * from the extension -- a diagnostic CLI, not a general uploader, see
+ * POST_BODY_MAX). */
+static int build_multipart_body(char **fields, int nfields, const char *boundary,
+                                uint8_t *out, int outcap)
+{
+    int n = 0;
+    for (int i = 0; i < nfields; i++) {
+        char *eq = 0;
+        for (char *p = fields[i]; *p; p++) if (*p == '=') { eq = p; break; }
+        if (!eq) continue;   /* main() only ever passes tokens containing '=' -- defensive only */
+        *eq = 0;
+        const char *name = fields[i];
+        const char *value = eq + 1;
+
+        if (mp_app(out, &n, outcap, "--") < 0 || mp_app(out, &n, outcap, boundary) < 0 ||
+            mp_app(out, &n, outcap, "\r\n") < 0) return -1;
+
+        if (value[0] == '@') {
+            const char *path = value + 1;
+            const char *base = path;
+            for (const char *p = path; *p; p++) if (*p == '/') base = p + 1;
+
+            if (mp_app(out, &n, outcap, "Content-Disposition: form-data; name=\"") < 0 ||
+                mp_app(out, &n, outcap, name) < 0 ||
+                mp_app(out, &n, outcap, "\"; filename=\"") < 0 ||
+                mp_app(out, &n, outcap, base) < 0 ||
+                mp_app(out, &n, outcap, "\"\r\nContent-Type: application/octet-stream\r\n\r\n") < 0)
+                return -1;
+
+            int fd = open(path, 0);
+            if (fd < 0) { fprintf(2, "httpsget: --post-multipart: could not open '%s'\n", path); return -1; }
+            for (;;) {
+                int cap = outcap - n;
+                if (cap <= 0) { close(fd); return -1; }
+                int want = cap < 512 ? cap : 512;
+                int r = read(fd, out + n, want);
+                if (r <= 0) break;
+                n += r;
+            }
+            close(fd);
+        } else {
+            if (mp_app(out, &n, outcap, "Content-Disposition: form-data; name=\"") < 0 ||
+                mp_app(out, &n, outcap, name) < 0 ||
+                mp_app(out, &n, outcap, "\"\r\n\r\n") < 0 ||
+                mp_app(out, &n, outcap, value) < 0)
+                return -1;
+        }
+        if (mp_app(out, &n, outcap, "\r\n") < 0) return -1;
+    }
+    if (mp_app(out, &n, outcap, "--") < 0 || mp_app(out, &n, outcap, boundary) < 0 ||
+        mp_app(out, &n, outcap, "--\r\n") < 0) return -1;
+    return n;
 }
 
 int main(int argc, char **argv)
 {
     const char *usage =
         "usage: httpsget [--post] [--auth-basic user:pass | --auth-bearer token] <host> <path> [path...] [now_unix]\n"
-        "       httpsget [--auth-basic user:pass | --auth-bearer token] --post <host> <path> <body> [now_unix]\n";
+        "       httpsget [--auth-basic user:pass | --auth-bearer token] --post <host> <path> <body> [now_unix]\n"
+        "       httpsget [--auth-basic user:pass | --auth-bearer token] --post-multipart <host> <path>\n"
+        "                <field=value | field=@localfile> [...] [now_unix]\n";
     const char *method = "GET";
     const uint8_t *post_body = 0;
     int post_bodylen = 0;
+    const char *content_type = 0;
+    int is_multipart = 0;
     int argi = 1;
 
-    /* Leading flags, any order: --post, and at most one of --auth-basic /
-     * --auth-bearer (Phase 16.2). Each credential value is a single
-     * whitespace-free CLI token -- Aurora's shell has no quoting. */
+    /* Leading flags, any order: --post or --post-multipart (Phase 16.4), and
+     * at most one of --auth-basic / --auth-bearer (Phase 16.2). Each
+     * credential value is a single whitespace-free CLI token -- Aurora's
+     * shell has no quoting. */
     for (;;) {
         if (argi < argc && strcmp(argv[argi], "--post") == 0) {
             method = "POST"; argi++; continue;
+        }
+        if (argi < argc && strcmp(argv[argi], "--post-multipart") == 0) {
+            method = "POST"; is_multipart = 1; argi++; continue;
         }
         if (argi < argc && strcmp(argv[argi], "--auth-basic") == 0) {
             argi++;
@@ -804,7 +946,52 @@ int main(int argc, char **argv)
         g_auth_origin.host[i] = 0;
     }
 
-    if (method[0] == 'P') {
+    if (is_multipart) {
+        /* --post-multipart: one path, then one CLI token per field (Phase
+         * 16.4) -- Aurora's shell has no quoting, so each "name=value" (or
+         * "name=@localfile" for a file part) has to be its own whitespace-
+         * free argument; a trailing purely-numeric token is still now_unix,
+         * exactly like the GET path below. */
+        if (argi >= argc || argv[argi][0] != '/') { fprintf(2, "%s", usage); return 1; }
+        paths[0] = argv[argi++]; npaths = 1;
+
+        char *fields[MULTIPART_FIELDS_MAX]; int nfields = 0;
+        for (; argi < argc; argi++) {
+            char *a = argv[argi];
+            int has_eq = 0;
+            for (char *p = a; *p; p++) if (*p == '=') { has_eq = 1; break; }
+            if (has_eq) {
+                if (nfields >= MULTIPART_FIELDS_MAX) {
+                    fprintf(2, "httpsget: too many multipart fields (max %d)\n", MULTIPART_FIELDS_MAX); return 1;
+                }
+                fields[nfields++] = a;
+                continue;
+            }
+            int all_digit = a[0] != 0;
+            for (char *p = a; *p; p++) if (*p < '0' || *p > '9') { all_digit = 0; break; }
+            if (all_digit) { now = (uint64_t)parse_ul(a); continue; }
+            fprintf(2, "httpsget: --post-multipart: unrecognized argument '%s' "
+                       "(expected field=value or a numeric now_unix)\n", a);
+            return 1;
+        }
+        if (nfields == 0) { fprintf(2, "httpsget: --post-multipart needs at least one field=value\n"); return 1; }
+
+        gen_boundary(g_boundary, sizeof g_boundary);
+        int ctn = 0;
+        app(g_multipart_ctype, &ctn, "multipart/form-data; boundary=");
+        app(g_multipart_ctype, &ctn, g_boundary);
+        g_multipart_ctype[ctn] = 0;
+
+        int blen = build_multipart_body(fields, nfields, g_boundary, g_multipart_body, sizeof g_multipart_body);
+        if (blen < 0) {
+            fprintf(2, "httpsget: --post-multipart: could not build the request body "
+                       "(too large, or a file could not be read -- see above)\n");
+            return 1;
+        }
+        post_body = g_multipart_body;
+        post_bodylen = blen;
+        content_type = g_multipart_ctype;
+    } else if (method[0] == 'P') {
         /* --post: exactly one path and one body token -- Aurora's shell has
          * no quoting (see build_request()'s doc comment), so the body is
          * whatever single whitespace-free argument follows the path,
@@ -834,14 +1021,15 @@ int main(int argc, char **argv)
 
     if (npaths == 1)
         printf("[httpsget] %s%s%s%s  (trust store: %u roots)\n", host, paths[0],
-               post_body ? " (POST)" : "", g_has_auth ? " (auth)" : "", (unsigned)CA_ROOTS_N);
+               is_multipart ? " (multipart)" : (post_body ? " (POST)" : ""),
+               g_has_auth ? " (auth)" : "", (unsigned)CA_ROOTS_N);
     else
         printf("[httpsget] %d paths from %s  (trust store: %u roots)\n", npaths, host, (unsigned)CA_ROOTS_N);
 
     int last_status = 0;
     for (int pi = 0; pi < npaths; pi++) {
         int st = fetch_one(host, paths[pi], now, npaths > 1 ? paths[pi] : 0,
-                           method, post_body, post_bodylen);
+                           method, post_body, post_bodylen, content_type);
         if (st < 0) { close_all_slots(); return 1; }
         last_status = st;
     }
