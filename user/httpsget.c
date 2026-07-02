@@ -3,7 +3,8 @@
  * session cache; 15.9 adds cookies; 15.10 adds gzip; 16.1 adds HTTP POST;
  * 16.2 adds HTTP authentication; 16.3 makes redirects RFC-correct for a
  * request with a body; 16.4 adds multipart/form-data; 16.5 adds a general
- * --method for HEAD/OPTIONS/DELETE/PUT/PATCH; 17.0 adds ALPN).
+ * --method for HEAD/OPTIONS/DELETE/PUT/PATCH; 17.0 adds ALPN; 17.1.1 adds
+ * the HTTP/2 connection-establishment handshake).
  *
  * HTTP POST (Phase 16.1, opening the "Web Platform" series that follows
  * HTTPS v2): `httpsget --post <host> <path> <body> [now_unix]` sends `body`
@@ -47,6 +48,17 @@
  * request line means anything to a peer now expecting HTTP/2 framing.
  * Without --alpn the extension is omitted entirely, byte-identical to every
  * ClientHello before this phase.
+ *
+ * HTTP/2 connection establishment (Phase 17.1.1, RFC 7540 §3.5/§6.5, the
+ * new http2/ directory): once ALPN actually selects h2, `h2_handshake()`
+ * sends the 24-byte connection preface and an empty SETTINGS frame, then
+ * exchanges SETTINGS/SETTINGS-ACK with the server -- the two frames every
+ * HTTP/2 connection is required to trade before anything else can happen.
+ * That's still ALL it does: there is no HEADERS/DATA framing yet, so even a
+ * successful handshake can't actually carry a request, and fetch_begin()
+ * still ends the connection attempt afterward either way -- now backed by a
+ * genuinely negotiated, verified h2 connection instead of an outright
+ * refusal to try.
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -146,6 +158,8 @@
 #include "gzip.h"
 #include "cookiejar.h"
 #include "base64.h"
+#include "frame.h"
+#include "settings.h"
 
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
@@ -521,6 +535,119 @@ static int resp_done(void) { return g_target >= 0 && g_total >= g_target; }
 #define FETCH_OK    0
 #define FETCH_STALE (-2)   /* the write failed: a reused connection was already dead */
 
+#define H2_HANDSHAKE_FRAME_CAP 64   /* safety cap against a pathological/buggy peer never
+                                     * sending the two frames this is waiting for -- the
+                                     * same role MAX_REDIRECTS plays elsewhere in this file */
+
+/* Complete the mandatory HTTP/2 connection-establishment handshake (RFC
+ * 7540 §3.5/§6.5), Phase 17.1.1, once ALPN (17.0) has selected "h2": send
+ * the connection preface followed by an empty SETTINGS frame, then read
+ * frames until both the server's own SETTINGS (acknowledged immediately, as
+ * §6.5 requires) and a SETTINGS ACK for ours have arrived. Their relative
+ * order isn't guaranteed by the spec and real servers differ, so both are
+ * watched for independently rather than assuming one comes before the
+ * other. Any other frame type seen in between (a connection-level
+ * WINDOW_UPDATE right after SETTINGS is common in practice) is skipped, not
+ * rejected -- this handshake only cares about the two frames it's actually
+ * waiting for, the same "skip what you don't understand yet" posture 17.0
+ * already established for EncryptedExtensions. A GOAWAY means the server is
+ * refusing the connection outright and ends the attempt immediately, since
+ * nothing being waited for is ever coming after that.
+ *
+ * Phase 17.1.1 stops here: there is no HEADERS/DATA framing yet, so even a
+ * successful return doesn't mean a request can actually be sent -- see the
+ * caller (fetch_begin()), which still refuses to proceed to an actual
+ * fetch either way, now backed by a genuine verified h2 connection instead
+ * of an outright ALPN-result refusal.
+ *
+ * Returns 0 if the handshake itself completed, -1 on any protocol/
+ * transport failure or if the frame cap is hit (a diagnostic has already
+ * been printed in every case). */
+static int h2_handshake(session_slot *slot)
+{
+    uint8_t plaintext[H2_PREFACE_LEN + H2_FRAME_HEADER_LEN];
+    int n = 0;
+    memcpy(plaintext, H2_PREFACE, H2_PREFACE_LEN); n += H2_PREFACE_LEN;
+    int sn = h2_build_settings_empty(plaintext + n, sizeof plaintext - (size_t)n);
+    if (sn < 0) { fprintf(2, "[httpsget] h2: could not build the initial SETTINGS frame\n"); return -1; }
+    n += sn;
+
+    int sl = tls_conn_send_app(&slot->conn, plaintext, (size_t)n, g_scratch, sizeof g_scratch);
+    if (sl < 0) { fprintf(2, "[httpsget] h2: could not seal the preface+SETTINGS\n"); return -1; }
+    if (write_all(slot->fd, g_scratch, sl) != 0) { fprintf(2, "[httpsget] h2: write failed\n"); return -1; }
+    printf("[httpsget] h2: connection preface + SETTINGS sent\n");
+
+    int got_server_settings = 0, got_settings_ack = 0, frames_seen = 0;
+    uint8_t hdrbuf[H2_FRAME_HEADER_LEN]; int hdrlen = 0;
+    uint32_t skip_remaining = 0;   /* payload bytes of the frame currently being discarded */
+
+    while (!(got_server_settings && got_settings_ack)) {
+        const uint8_t *rec; size_t rl; int cc;
+        while ((cc = tls_reader_next(&slot->reader, &rec, &rl)) == 1) {
+            size_t pl = 0;
+            int rr = tls_conn_recv_app(&slot->conn, rec, rl, g_plain, sizeof g_plain, &pl);
+            if (rr == TLS_CONN_ERR_ALERT) { fprintf(2, "[httpsget] h2: peer sent a TLS alert\n"); return -1; }
+            if (rr < 0) { fprintf(2, "[httpsget] h2: recv_app error %d\n", rr); return -1; }
+
+            size_t pos = 0;
+            while (pos < pl) {
+                if (skip_remaining > 0) {
+                    size_t s = skip_remaining < (uint32_t)(pl - pos) ? skip_remaining : (uint32_t)(pl - pos);
+                    pos += s; skip_remaining -= (uint32_t)s;
+                    continue;
+                }
+                if (hdrlen < H2_FRAME_HEADER_LEN) {
+                    size_t need = (size_t)(H2_FRAME_HEADER_LEN - hdrlen);
+                    size_t have = pl - pos;
+                    size_t take = need < have ? need : have;
+                    memcpy(hdrbuf + hdrlen, g_plain + pos, take);
+                    hdrlen += (int)take; pos += take;
+                    if (hdrlen < H2_FRAME_HEADER_LEN) break;   /* header itself spans a later read */
+                }
+                h2_frame_header fh;
+                h2_parse_frame_header(hdrbuf, sizeof hdrbuf, &fh);
+                hdrlen = 0;
+
+                if (++frames_seen > H2_HANDSHAKE_FRAME_CAP) {
+                    fprintf(2, "[httpsget] h2: gave up waiting for SETTINGS/ACK after %d frames\n", frames_seen);
+                    return -1;
+                }
+
+                if (fh.type == H2_TYPE_GOAWAY) {
+                    fprintf(2, "[httpsget] h2: server sent GOAWAY -- refusing this connection\n");
+                    return -1;
+                } else if (h2_is_settings_ack(&fh)) {
+                    if (fh.length != 0) { fprintf(2, "[httpsget] h2: malformed SETTINGS ACK (nonzero length)\n"); return -1; }
+                    got_settings_ack = 1;
+                    printf("[httpsget] h2: our SETTINGS was ACKed\n");
+                } else if (fh.type == H2_TYPE_SETTINGS) {
+                    if (!h2_settings_payload_valid(fh.length)) { fprintf(2, "[httpsget] h2: malformed SETTINGS frame\n"); return -1; }
+                    got_server_settings = 1;
+                    printf("[httpsget] h2: server SETTINGS received (%u bytes)\n", (unsigned)fh.length);
+                    skip_remaining = fh.length;   /* not interpreted yet -- no later phase needs a value yet */
+
+                    uint8_t ack[H2_FRAME_HEADER_LEN];
+                    int an = h2_build_settings_ack(ack, sizeof ack);
+                    int asl = tls_conn_send_app(&slot->conn, ack, (size_t)an, g_scratch, sizeof g_scratch);
+                    if (asl < 0 || write_all(slot->fd, g_scratch, asl) != 0) {
+                        fprintf(2, "[httpsget] h2: could not send our SETTINGS ACK\n"); return -1;
+                    }
+                    printf("[httpsget] h2: SETTINGS ACK sent\n");
+                } else {
+                    skip_remaining = fh.length;   /* not one of the two frames being waited for -- skip it */
+                }
+            }
+        }
+        if (cc < 0) { fprintf(2, "[httpsget] h2: malformed TLS record\n"); return -1; }
+        if (got_server_settings && got_settings_ack) break;
+        int rn = read(slot->fd, g_scratch, sizeof g_scratch);
+        if (rn <= 0) { fprintf(2, "[httpsget] h2: connection closed before the handshake completed\n"); return -1; }
+        tls_reader_feed(&slot->reader, g_scratch, (size_t)rn);
+    }
+    printf("[httpsget] h2: connection-establishment handshake complete\n");
+    return 0;
+}
+
 /* Open a fresh TCP connection to `u` into `slot` (a DNS lookup if `u->host`
  * isn't a literal), doing a TLS 1.3 handshake first if `u->https` -- offering
  * `slot`'s cached ticket for resumption if it has one. On success,
@@ -601,13 +728,21 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
             if (slot->conn.fsm.alpn_negotiated) {
                 printf("[TLS] ALPN negotiated: %s\n", slot->conn.fsm.alpn_selected);
                 if (strcmp(slot->conn.fsm.alpn_selected, "h2") == 0) {
-                    /* Phase 17.0 is ALPN only -- no HTTP/2 framing yet (a
-                     * later phase). Continuing to speak HTTP/1.1 over a
+                    /* Phase 17.1.1 can complete the mandatory h2 connection-
+                     * establishment handshake (preface + SETTINGS exchange),
+                     * but there is still no HEADERS/DATA framing to actually
+                     * send a request with -- so even a successful handshake
+                     * still ends this connection attempt here, just with a
+                     * more specific diagnostic than 17.0's outright refusal
+                     * (whose own message h2_handshake() itself prints on
+                     * failure). Continuing to speak HTTP/1.1 over a
                      * connection the server now expects to carry HTTP/2
-                     * would just hang or desync, not degrade gracefully, so
-                     * refuse outright with a clear reason instead. */
-                    fprintf(2, "[httpsget] server selected h2 via ALPN -- Aurora does not speak "
-                               "HTTP/2 yet (a later phase); refusing to continue this connection\n");
+                     * would just hang or desync, not degrade gracefully. */
+                    if (h2_handshake(slot) == 0) {
+                        fprintf(2, "[httpsget] h2: connection-establishment handshake succeeded, "
+                                   "but HEADERS/DATA framing is not implemented yet (a later phase) "
+                                   "-- there is no way to actually send a request over it yet\n");
+                    }
                     close(slot->fd); return -1;
                 }
             } else {

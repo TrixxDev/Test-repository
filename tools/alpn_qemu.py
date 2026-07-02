@@ -19,13 +19,16 @@ than trying to run three servers on three ports:
      request that follows is confirmed server-side, then status=200.
   2. Server ALPN list = ["h2", "http/1.1"] (h2 preferred): RFC 7301 has
      the SERVER's own preference govern selection when both are mutually
-     offered, so the server selects "h2". Aurora must detect this and
-     refuse to continue the connection as HTTP/1.1 (Phase 17.0 is ALPN
-     only, no HTTP/2 framing yet) -- verified two ways: the client's own
-     log shows the refusal and never reaches status=200, AND the server
-     independently confirms NO further bytes ever arrive on that
-     connection after the handshake (proving Aurora really did stop, not
-     just misreport success).
+     offered, so the server selects "h2". Aurora must not send an ordinary
+     HTTP/1.1 request over it -- as of Phase 17.1.1 it instead attempts the
+     real h2 connection-establishment handshake (sends the actual 24-byte
+     preface, confirmed server-side), but since this script's server has no
+     idea what to do with those bytes (it's a bare HTTP/1.1-shaped test
+     server, not a real HTTP/2 endpoint), the exchange still never reaches
+     a completed fetch. The protocol-aware verification that the h2
+     handshake itself completes correctly against a REAL frame-level HTTP/2
+     peer lives in tools/h2_handshake_qemu.py; this script only verifies
+     ALPN selection, which that split leaves unaffected.
   3. Same server ALPN list, but `httpsget 10.0.2.2 /page3` is invoked
      WITHOUT --alpn: the server's own selected_alpn_protocol() comes back
      None, which (given the server has h2 and http/1.1 both configured)
@@ -191,7 +194,17 @@ def main():
             ("scenario 1: status=200 reached", "status=200" in log1),
         ]
 
-        # ---- scenario 2: server prefers h2 -- Aurora must refuse to continue ----
+        # ---- scenario 2: server prefers h2 -- Aurora must not send an ordinary
+        # HTTP/1.1 request over it. As of Phase 17.1.1 Aurora actually attempts
+        # the h2 connection-establishment handshake (send the real preface),
+        # but this script's server is a bare HTTP/1.1-shaped test server, not a
+        # real HTTP/2 endpoint -- it has no idea what to do with those bytes,
+        # so the exchange still ends without ever completing a fetch, just via
+        # a different path than 17.0's outright refusal. The dedicated,
+        # protocol-aware verification that the h2 handshake itself completes
+        # correctly against a REAL (frame-level) HTTP/2 peer lives in
+        # tools/h2_handshake_qemu.py -- this script's job is only ALPN
+        # selection, which is unaffected by any of that. ----
         ctx.set_alpn_protocols(["h2", "http/1.1"])
         current_result.clear()
         log2 = run_qemu(serial, "httpsget --alpn 10.0.2.2 /page2 %d" % int(time.time()))
@@ -200,12 +213,12 @@ def main():
         checks += [
             ("scenario 2: server negotiated \"h2\"", r2.get("alpn") == "h2"),
             ("scenario 2: client log shows ALPN negotiated: h2", "ALPN negotiated: h2" in log2),
-            ("scenario 2: client log shows the refusal to continue",
-             "does not speak HTTP/2 yet" in log2 or "refusing to continue" in log2),
-            ("scenario 2: status=200 was NOT reached (connection correctly abandoned)",
+            ("scenario 2: client log shows the h2 handshake was attempted",
+             "connection preface + SETTINGS sent" in log2),
+            ("scenario 2: server received the real h2 preface (not an HTTP/1.1 request)",
+             r2.get("request_line", "").startswith("PRI * HTTP/2.0")),
+            ("scenario 2: status=200 was NOT reached (no HEADERS/DATA framing exists yet)",
              "status=200" not in log2),
-            ("scenario 2: server confirms NO further bytes ever arrived after the handshake",
-             "request_line" not in r2),
         ]
 
         # ---- scenario 3: --alpn omitted -- no ALPN extension sent at all ----

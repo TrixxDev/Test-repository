@@ -71,11 +71,12 @@ TLS_U_SRC := crypto/sha256.c crypto/sha384.c crypto/hmac_sha256.c crypto/hkdf.c 
              tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c \
              tls/handshake.c tls/client.c tls/conn.c tls/cert.c tls/trace.c tls/driver.c \
              x509/asn1.c x509/x509.c x509/verify_cert.c \
-             compress/crc32.c compress/inflate.c compress/gzip.c
+             compress/crc32.c compress/inflate.c compress/gzip.c \
+             http2/frame.c http2/settings.c
 TLS_U_OBJ := $(TLS_U_SRC:.c=.tlsu.o)
 
 %.tlsu.o: %.c
-	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -Icompress -c $< -o $@
+	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -Icompress -Ihttp2 -c $< -o $@
 
 user/crt0.o: user/crt0.S
 	$(CC) --target=$(TARGET) -m32 -ffreestanding -Iinclude -c user/crt0.S -o $@
@@ -140,7 +141,7 @@ user/base64.o: user/base64.c user/base64.h
 	$(CC) $(UCFLAGS) -c user/base64.c -o user/base64.o
 
 user/httpsget.elf: user/httpsget.c user/url.o user/cookiejar.o user/base64.o user/ca_roots.h user/libc.h user/crt0.o $(LIBC_OBJ) $(TLS_U_OBJ) user/user.ld
-	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -Icompress -c user/httpsget.c -o user/httpsget.o
+	$(CC) $(UCFLAGS) -Icrypto -Itls -Ix509 -Icompress -Ihttp2 -c user/httpsget.c -o user/httpsget.o
 	$(LD) -m elf_i386 -no-pie -T user/user.ld user/crt0.o user/httpsget.o user/url.o user/cookiejar.o user/base64.o $(TLS_U_OBJ) $(LIBC_OBJ) -o $@
 
 $(EMBEDDED): user/init.elf tools/bin2c.py
@@ -254,6 +255,12 @@ inflate-test:
 gzip-test:
 	$(CC) -O2 -Icompress tools/gzip_test.c compress/gzip.c compress/inflate.c compress/crc32.c -o /tmp/aurora_gzip_test
 	/tmp/aurora_gzip_test
+
+# Host-side HTTP/2 frame layer test (http2/: RFC 7540 frame header + SETTINGS).
+.PHONY: h2-test
+h2-test:
+	$(CC) -O2 -Ihttp2 tools/h2_test.c http2/frame.c http2/settings.c -o /tmp/aurora_h2_test
+	/tmp/aurora_h2_test
 
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
 .PHONY: x509-test

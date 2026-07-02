@@ -88,6 +88,7 @@ Run the vectors: `make crypto-test`.
 | **16.4** | **multipart/form-data** — `httpsget --post-multipart <host> <path> <field=value \| field=@localfile> [...]` encodes each field as its own MIME part behind a generated boundary; `build_request()`'s Content-Type is now caller-supplied (`content_type`, threaded alongside `body`/`bodylen` through `fetch_request()`/`fetch()`/`fetch_one()`, and preserved or dropped on a redirect by the same 307/308-vs-everything-else rule 16.3 already applies to the body) instead of a hardcoded url-encoded string; a `field=@localfile` value is read off Aurora's own FAT32 disk (`open()`/`read()` in a loop — there's no `stat`/`lseek` to size a file up front) and sent as a file part with a fixed `application/octet-stream` Content-Type | `tools/multipart_qemu.py` against a real TLS 1.3 server: the server extracts the boundary from the *actual* Content-Type header and parses the *actual* body itself into parts (not trusting httpsget's own log), confirming a text field's exact value, a file field's filename/Content-Type, and that the file part's bytes match a real on-disk file byte-for-byte; a same-origin 307 hop then confirms the Content-Type (boundary included) and raw body are byte-identical on the retry, proving 16.3's preservation rule now correctly covers a multipart Content-Type too; full existing host + QEMU regression suite unaffected | ✅ |
 | **16.5** | **General `--method`** — `httpsget --method <GET\|HEAD\|OPTIONS\|DELETE\|POST\|PUT\|PATCH> ...` replaces the old hardcoded GET-or-POST choice with a validated table (`--post` is now just `--method POST`'s older, still-supported spelling); PUT/PATCH reuse `--post`'s body-shaped argument parsing, HEAD/OPTIONS/DELETE reuse GET's multi-path bodyless parsing — `build_request()`/`fetch_request()`/`fetch()`/`fetch_one()` needed no changes at all, since they already took `method` as a plain string. Fixes a real hang risk surfaced by adding HEAD: RFC 7230 §3.3.3 says a HEAD response body is *always* empty regardless of its `Content-Length` (which, if present, describes what a GET would have returned) — without a fix, a keep-alive HEAD response advertising a nonzero `Content-Length` would make the read loop wait forever for body bytes the server will never send; `resp_feed()`/`reusable()` now both special-case a HEAD request's response framing | `tools/method_qemu.py` against a real TLS 1.3 server: confirms `--method PUT`'s real method and exact body bytes, `--method DELETE`'s real method and bodyless request, and — the critical case — that `--method HEAD` against a server advertising `Content-Length: 999999` on a keep-alive connection that sends *zero* actual body bytes still reaches `status=200` within the ordinary wait budget instead of hanging; full existing host + QEMU regression suite (incl. 16.1/16.2/16.3/16.4's own POST/PUT-adjacent paths) unaffected | ✅ |
 | **17.0** | **ALPN** (RFC 7301, opening the "modern transport" series, `17.x`, that follows the now-closed `16.x` Web Platform series) — `httpsget --alpn` offers `["h2", "http/1.1"]` in the TLS ClientHello (opt-in: omitted entirely, byte-identical to every pre-17.0 ClientHello, unless the flag is given) and a new `tls_parse_encrypted_extensions()` extracts the server's selection (best-effort/non-fatal on a parse quirk — unlike Certificate/CertificateVerify, nothing here is security-critical enough to abort a handshake over). This phase is deliberately *just* the negotiation: there is no HTTP/2 framing yet, so if the server actually selects `h2`, `fetch_begin()` refuses to continue that connection rather than sending an HTTP/1.1 request line a peer now expecting HTTP/2 framing would never understand | `make tls-test` (21 new cases: a no-ALPN ClientHello is unaffected, an ALPN ClientHello carries both offered names and is exactly the expected 18 bytes longer, ALPN correctly precedes `pre_shared_key` when both are offered together, and `tls_parse_encrypted_extensions()` extracts `h2`/`http/1.1` selections, tolerates an unrelated extension alongside ALPN, and rejects (without over-reading) a malformed message); `tools/alpn_qemu.py` against a real TLS 1.3 server with an independent OpenSSL-backed ALPN implementation: a server that can only pick `http/1.1` does, and Aurora proceeds normally; a server that prefers `h2` gets it, and Aurora's own log shows the refusal while the server independently confirms *no bytes at all* arrive after the handshake; `--alpn` omitted against a server supporting both proves no extension was sent. Full existing host suite and a 12-script QEMU regression sweep (incl. 15.7 PSK resumption, since `EncryptedExtensions` parsing is now always-on for every connection, ALPN or not) all pass unaffected | ✅ |
+| **17.1.1** | **HTTP/2 connection-establishment handshake** (RFC 7540 §3.5/§6.5, new `http2/` directory: `frame.c` — the 9-byte frame header, RFC 7540 §4.1 — and `settings.c` — building an empty SETTINGS and a SETTINGS ACK, RFC 7540 §6.5) — once ALPN (17.0) actually selects `h2`, `h2_handshake()` sends the 24-byte connection preface and an empty SETTINGS frame, then reads frames (across as many TLS records/raw reads as it takes, reassembling a frame header that lands split across two of them) until both the server's own SETTINGS (acknowledged immediately, as §6.5 requires) and a SETTINGS ACK for Aurora's own have arrived — their relative order isn't guaranteed by the spec, so both are watched for independently. Anything else seen in between (a connection-level `WINDOW_UPDATE` right after SETTINGS is common in real servers) is skipped, not rejected — the same "tolerate what you're not specifically waiting for" posture 17.0 established for `EncryptedExtensions`; a `GOAWAY` ends the attempt immediately, since nothing being waited for is ever coming after that. Still `17.1.1`'s entire scope: there is no HEADERS/DATA framing yet, so even a *successful* handshake still can't carry a request — `fetch_begin()` still ends the connection attempt either way, just backed now by a genuinely negotiated h2 connection instead of an outright ALPN-result refusal | `make h2-test` (22 new cases: frame-header encode/decode round-trips incl. 24-bit length and 31-bit stream-ID boundary values, a known byte-for-byte encoding, the reserved top bit surviving a hostile peer setting it, capacity/range rejection, and the SETTINGS/SETTINGS-ACK builders' exact wire bytes); `tools/h2_handshake_qemu.py` against a *real frame-level* HTTP/2 test server (a from-scratch second Python implementation, not a copy of `http2/frame.c` — a bug shared between both wouldn't hide behind agreement): confirms the exact 24-byte preface arrives, the client's SETTINGS is real and empty, a deliberately non-empty server SETTINGS *plus* an interleaved `WINDOW_UPDATE` are both handled correctly (proving the skip logic tolerates an unknown frame type mid-handshake, not just extra bytes of a known one), both SETTINGS ACKs are exchanged in both directions, and — the whole point of this phase's scope boundary — nothing at all is sent afterward. All 13 checks pass; `tools/alpn_qemu.py`'s own h2-selected scenario is updated to match (Aurora now genuinely attempts the handshake instead of refusing outright, so its assertions moved from "no bytes ever arrive" to "the real preface arrives, and no fetch ever completes either way"). Full existing host suite and the same 12-script QEMU regression sweep as 17.0 all pass unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2496,6 +2497,109 @@ Verified two ways:
   the wrong one twice. Fixed by using a single port-443 server whose
   `SSLContext.set_alpn_protocols()` is reconfigured between the three
   sequential QEMU boots instead.)
+
+## Step 17.1.1 — the HTTP/2 connection-establishment handshake
+
+17.0 stopped the instant ALPN selected `h2`: a clean, deliberate refusal,
+correct as far as it went, but it never actually exercised anything HTTP/2-
+shaped on the wire. RFC 7540 §3.5/§6.5 make two things mandatory before
+*anything* else can happen on an h2 connection — the client's 24-byte
+connection preface and a SETTINGS/SETTINGS-ACK exchange in both directions
+— and that pair is small and self-contained enough to be a real first slice
+of HTTP/2 rather than another "not yet" stub. `17.1.1` implements exactly
+that pair and nothing past it: no HEADERS, no DATA, no streams.
+
+**A new top-level `http2/` directory**, alongside `crypto/`/`tls/`/`x509/`/
+`compress/` — freestanding, portable, no libc, wired into the Makefile the
+same way `compress/` was in 15.10 (added to `TLS_U_SRC`/the `%.tlsu.o`
+pattern's include path, plus its own `h2-test` host target). `frame.c` is
+the smallest reusable unit, matching how `compress/crc32.c` was one
+primitive before `inflate.c` needed it: read/write the 9-byte frame header
+(RFC 7540 §4.1) — 24-bit length, 8-bit type, 8-bit flags, 31-bit stream ID
+with a reserved top bit that's masked to 0 on write and simply ignored on
+read (per §4.1: "unused flags/bits MUST be ignored on receipt", the same
+posture as an unrecognized extension in 17.0). `settings.c` builds the two
+concrete frames this phase needs — an empty SETTINGS (Aurora's own
+announcement: no special preferences) and a SETTINGS ACK (RFC 7540 §6.5:
+zero-length payload is a hard requirement, not just Aurora's own choice) —
+plus a `h2_settings_payload_valid()` check (a real SETTINGS frame's payload
+must be a multiple of 6 bytes, one 6-byte parameter at a time) used only to
+confirm a received SETTINGS is *shaped* correctly; 17.1.1 has no use for any
+individual parameter's *value* yet, so none are interpreted.
+
+**`h2_handshake()`, in `user/httpsget.c`**, replaces the old refuse-outright
+branch. It reuses `fetch_request()`'s own already-proven send/receive shape
+(`tls_conn_send_app()` → `write_all()` to send; `tls_reader_next()` /
+`tls_conn_recv_app()` / a raw `read()`-and-`tls_reader_feed()` fallback to
+receive) verbatim — the only genuinely new piece is what happens to the
+*plaintext* once decrypted: instead of feeding HTTP/1.1 text to `resp_feed()`,
+it walks raw frame bytes. Two details made this the trickiest part of the
+phase, both because a TLS record boundary has no relationship whatsoever to
+an HTTP/2 frame boundary:
+
+- **A frame header can arrive split across two separate reads.** The 9
+  header bytes might straddle a TLS record boundary (or even a raw socket
+  `read()` boundary) exactly like any other byte stream can fragment
+  anywhere. A small `hdrbuf`/`hdrlen` accumulator carries a partial header
+  across calls, only calling `h2_parse_frame_header()` once all 9 bytes are
+  in hand — the same "assemble before you interpret" shape `tls_conn`'s own
+  `hs_buf` reassembly already uses for handshake messages spanning records,
+  just one level further down the stack.
+- **A frame's payload has to be fully consumed before the next header can
+  be found**, even for a frame type the handshake doesn't care about (the
+  server's own SETTINGS carries real parameter bytes Aurora doesn't
+  interpret yet, and any other frame type in between needs its payload
+  skipped too, or the next header would be misread starting mid-payload).
+  A `skip_remaining` counter, decremented across as many reads as it takes,
+  handles this uniformly for every frame type — "acknowledge it and act" for
+  the two frames being waited for, "just consume the bytes" for anything
+  else, including a `GOAWAY` (which additionally ends the attempt
+  immediately: the server is refusing the connection outright, and nothing
+  being waited for is ever coming after that). A `H2_HANDSHAKE_FRAME_CAP`
+  (64) guards against a pathological peer that never sends either frame at
+  all — the same role `MAX_REDIRECTS` plays elsewhere in this file.
+
+**Still refuses to fetch, even on success.** A completed handshake proves
+the h2 *connection* is healthy, not that a request can be sent over it —
+that needs HEADERS framing, which doesn't exist yet. `fetch_begin()` prints
+a different, more specific diagnostic depending on whether `h2_handshake()`
+itself succeeded or failed, but either way still closes the connection and
+returns failure, exactly as 17.0 did. The boundary hasn't moved; what sits
+behind it has grown.
+
+Verified two ways:
+- **Host (`make h2-test`)**: 22 new cases — frame-header encode/decode
+  round-trips across boundary values (a 24-bit-max length, a 31-bit-max
+  stream ID), one byte-for-byte known encoding, confirmation that a
+  hostile peer setting the reserved top bit can't corrupt the recovered
+  stream ID, capacity/range rejection on both write and parse, and the
+  SETTINGS/SETTINGS-ACK builders' exact wire bytes plus
+  `h2_is_settings_ack()`/`h2_settings_payload_valid()` correctness
+  (including that the ACK flag bit means something different on a
+  non-SETTINGS frame type, so type has to be checked too, not just the
+  bit). The full existing host suite passes unchanged.
+- **QEMU (`tools/h2_handshake_qemu.py`)**, against a real frame-level HTTP/2
+  test server — a *from-scratch second* Python implementation of the frame
+  encoding, not a copy of `http2/frame.c`, so a bug shared between the two
+  wouldn't quietly hide behind agreement: the server confirms the exact
+  24-byte preface arrives and the client's SETTINGS is genuinely empty,
+  then sends back a deliberately *non-empty* SETTINGS (one real parameter,
+  proving the client's skip logic handles an arbitrary-length payload, not
+  just a zero-length one) immediately followed by an unprompted
+  `WINDOW_UPDATE` — exactly the "frame type nobody asked for, right in the
+  middle of the exchange" case real servers produce and this phase's design
+  exists to tolerate. Both SETTINGS ACKs are confirmed exchanged in both
+  directions, and — proving the scope boundary holds on the wire, not just
+  in the design — the server confirms nothing at all arrives afterward.
+  All 13 checks pass. `tools/alpn_qemu.py`'s own h2-selected scenario
+  needed updating to match: it used to assert "no bytes ever arrive" (true
+  under 17.0's outright refusal); now that Aurora genuinely attempts the
+  handshake, that assertion became false by design, so it now checks that
+  the *real preface* arrives instead — a strictly stronger proof that the
+  new code path is really firing, not a weaker one. Because `h2_handshake()`
+  is new code inside `fetch_begin()` (even though only reachable via
+  `--alpn` selecting `h2`), this phase's regression pass repeats 17.0's
+  full 12-script QEMU sweep — all pass unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 
