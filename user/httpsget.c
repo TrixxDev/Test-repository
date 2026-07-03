@@ -44,10 +44,6 @@
  * ALPN (Phase 17.0, RFC 7301, opening the "modern transport" series that
  * follows the "Web Platform" series above): `--alpn` offers "h2" and
  * "http/1.1" in the TLS ClientHello and prints whatever the server selects.
- * This is deliberately JUST the negotiation -- there is no HTTP/2 framing
- * yet (a later phase), so if the server actually picks h2, fetch_begin()
- * refuses to continue that connection rather than pretending an HTTP/1.1
- * request line means anything to a peer now expecting HTTP/2 framing.
  * Without --alpn the extension is omitted entirely, byte-identical to every
  * ClientHello before this phase.
  *
@@ -56,29 +52,48 @@
  * sends the 24-byte connection preface and an empty SETTINGS frame, then
  * exchanges SETTINGS/SETTINGS-ACK with the server -- the two frames every
  * HTTP/2 connection is required to trade before anything else can happen.
- * That's still ALL it does: there is no HEADERS framing yet, so even a
- * successful handshake can't actually carry a request, and fetch_begin()
- * still ends the connection attempt afterward either way -- now backed by a
- * genuinely negotiated, verified h2 connection instead of an outright
- * refusal to try. `h2_handshake()`'s own frame reading (Phase 17.1.2) goes
- * through a generic `h2_frame_reader` (reassembling a header or payload
- * split across TLS records, the same job `tls_conn`'s `hs_buf` already does
- * one layer up), so it correctly recognizes -- without necessarily acting
- * on -- any frame type, including a DATA frame the reader now knows how to
- * decode the padding-aware payload of (`http2/data.c`), even though nothing
- * opens a stream to receive real DATA on yet.
+ * `h2_handshake()`'s own frame reading (Phase 17.1.2) goes through a
+ * generic `h2_frame_reader` (reassembling a header or payload split across
+ * TLS records, the same job `tls_conn`'s `hs_buf` already does one layer
+ * up), so it correctly recognizes -- without necessarily acting on -- any
+ * frame type, including a DATA frame the reader knows how to decode the
+ * padding-aware payload of (`http2/data.c`).
  *
  * A real request (Phase 17.1.3, `http2/hpack.c` + `http2/headers.c`): once
- * the handshake succeeds, `h2_send_request()` HPACK-compresses :method,
- * :scheme, :authority, :path and a user-agent -- using ONLY RFC 7541's
- * static table (no Huffman, no dynamic table; both are 17.2/17.3) -- into a
- * real HEADERS frame and sends it, opening stream 1. That's still where
- * this stops: nothing decodes whatever HPACK-compressed response comes
- * back (a real server's response headers routinely need Huffman and/or the
- * dynamic table, since the static table has no *value* for most of them --
- * date, server, content-length, ...), so `fetch_begin()` still ends the
- * connection attempt afterward -- Aurora can now genuinely SEND a request
- * over h2, just not yet receive one back.
+ * the handshake succeeds, `h2_fetch()` HPACK-compresses :method, :scheme,
+ * :authority, :path and a user-agent -- using ONLY RFC 7541's static table
+ * (Aurora's own encoder never uses Huffman or the dynamic table; see
+ * headers.c/hpack.c's own comments for why) -- into a real HEADERS frame
+ * and sends it, opening stream 1.
+ *
+ * A full HPACK decoder (Phase 17.2.1/17.2.2, `http2/huffman.c` +
+ * `http2/hpack_table.c` + `http2/hpack_decode.c`): Huffman decoding (RFC
+ * 7541 §5.2/Appendix B), the full 61-entry static table (Appendix A), and a
+ * decode-side dynamic table (§2.3.2/§4/§6) tracking whatever a *peer's*
+ * encoder does -- independent of Aurora's own send-side static-table-only
+ * choice (RFC 7541 §2.3.2 makes the two directions' tables independent).
+ * Together these can decode any real HEADERS frame a real server sends,
+ * once Phase 17.3 (below) actually calls them on the live response path.
+ *
+ * The first real HTTP/2 response (Phase 17.3): `h2_fetch()` reads stream 1
+ * to completion -- one HEADERS frame (HPACK-decoded via `slot`'s own
+ * per-connection dynamic table) optionally followed by DATA frames, until
+ * the server's own END_STREAM arrives. The decoded header list is
+ * translated into an HTTP/1.1-shaped status-line-plus-headers text block
+ * (`h2_synthesize_header_block()`) and fed, together with each DATA
+ * frame's payload, through the EXISTING `resp_feed()` -- the same function
+ * an HTTP/1.1 response's bytes flow through -- so Set-Cookie parsing, gzip
+ * streaming, and `struct http_response` population all just work,
+ * unchanged, for an h2 response too. `fetch_one()` itself needed zero
+ * changes: it still only ever sees a `fetch_result_t`, never anything
+ * protocol-specific. Deliberately still just one stream, no multiplexing,
+ * and no PRIORITY/PUSH_PROMISE/CONTINUATION/flow-control handling beyond
+ * what's needed to read that one stream -- an h2 connection is always
+ * closed after its one response (a synthesized "Connection: close" line
+ * makes the existing keep-alive/reuse logic below do that on its own, with
+ * no h2-specific code of its own); carrying a request method/body other
+ * than GET over h2 is equally out of scope. Both are natural follow-ups,
+ * not attempted here.
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -183,6 +198,8 @@
 #include "data.h"
 #include "hpack.h"
 #include "headers.h"
+#include "hpack_table.h"
+#include "hpack_decode.h"
 
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
@@ -221,6 +238,19 @@ static struct url        g_visited[MAX_REDIRECTS + 1];
  * same reason g_slots/tls_conn/tls_record_reader already are (see the
  * 15.10 stack-overflow postmortem in docs/SECURITY.md) -- never a local. */
 static h2_frame_reader   g_h2_reader;
+
+/* h2 response decode scratch (Phase 17.3): sized generously for a real
+ * response's header block, not just this project's own test vectors --
+ * H2_HEADER_FIELDS_MAX distinct fields, H2_HPACK_SCRATCH_MAX bytes of
+ * decoded (Huffman-expanded or literal) name/value text. Global for the
+ * same reason g_h2_reader is: this client never has more than one fetch in
+ * flight, so there's never a second h2 response decode needing its own
+ * independent scratch space at the same time (see the 15.10 stack-overflow
+ * postmortem in docs/SECURITY.md for why that discipline matters here). */
+#define H2_HEADER_FIELDS_MAX 48
+#define H2_HPACK_SCRATCH_MAX 4096
+static uint8_t            g_h2_hpack_scratch[H2_HPACK_SCRATCH_MAX];
+static hpack_header_field  g_h2_fields[H2_HEADER_FIELDS_MAX];
 
 static cookie_jar g_cookies;   /* process-lifetime (Phase 15.9) */
 
@@ -274,6 +304,15 @@ typedef struct {
     int         has_ticket;
     tls_session_ticket ticket;
     uint64_t    last_used;    /* LRU clock value (see g_slot_clock), not wall time */
+    int         is_h2;        /* Phase 17.3: this connection negotiated h2 over ALPN and
+                               * completed the connection-establishment handshake -- always
+                               * freshly determined by fetch_begin() at the top of every call,
+                               * never needs resetting in slot_find_or_alloc() too. */
+    hpack_dyn_table h2_dyn_table;   /* this h2 connection's decode-side HPACK compression
+                                     * context (RFC 7541 §2.3.2) -- re-initialized by
+                                     * fetch_begin() every time a fresh h2 connection is
+                                     * established, since a new TCP connection always starts
+                                     * a new compression context with nothing carried over. */
 } session_slot;
 static session_slot g_slots[TLS_SESSION_SLOTS];
 static uint64_t     g_slot_clock;
@@ -570,6 +609,246 @@ static int resp_done(void) { return g_target >= 0 && g_total >= g_target; }
 #define H2_HANDSHAKE_FRAME_CAP 64   /* safety cap against a pathological/buggy peer never
                                      * sending the two frames this is waiting for -- the
                                      * same role MAX_REDIRECTS plays elsewhere in this file */
+#define H2_RESPONSE_FRAME_CAP 256  /* looser than H2_HANDSHAKE_FRAME_CAP -- a real response
+                                    * body can legitimately take many more read()s/frames
+                                    * than the two-frame handshake ever needs */
+
+/* Exact (case-sensitive) match -- RFC 7540 §8.1.2 requires an h2 peer to
+ * send header field names already lowercased, so this never needs to be
+ * case-insensitive the way http.c's own ci_starts() has to be for
+ * HTTP/1.1's looser wire format. */
+static int eq_bytes(const uint8_t *a, size_t alen, const char *b)
+{
+    size_t i = 0;
+    for (; b[i]; i++) if (i >= alen || a[i] != (uint8_t)b[i]) return 0;
+    return i == alen;
+}
+
+/* True if `s[0..len)` is safe to splice verbatim into a synthesized
+ * "name: value\r\n" HTTP/1.1-style header line -- i.e. contains neither CR
+ * nor LF (which would let a malicious HPACK-encoded value inject an extra
+ * header line, or corrupt the synthesized blank-line boundary -- the HTTP
+ * response-splitting equivalent for this translation step) nor, for a
+ * header NAME specifically, a ':' (RFC 7230 token syntax: a field-name can
+ * never legitimately contain one). Aurora's own HPACK decoder (http2/
+ * hpack_decode.c) doesn't enforce field-name/value syntax -- it only knows
+ * how to decode bytes, not validate HTTP semantics -- so this is the
+ * boundary where untrusted wire content actually gets checked before it's
+ * trusted enough to reuse http.c's HTTP/1.1 text parser on. */
+static int h2_text_safe(const uint8_t *s, size_t len, int is_name)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\r' || s[i] == '\n') return 0;
+        if (is_name && s[i] == ':') return 0;
+    }
+    return 1;
+}
+
+/* Translate one decoded HPACK header field list (RFC 7541) for an h2
+ * response into an HTTP/1.1-shaped status-line-plus-headers text block --
+ * so the EXISTING http_parse()-based pipeline below (resp_feed(), Set-
+ * Cookie enumeration via http_find_header(), gzip/content-type/location
+ * detection, body-preview printing in fetch_one()) can consume an h2
+ * response exactly like an HTTP/1.1 one. This is Phase 17.3's whole
+ * point: the upper layer never needs a separate "HTTP/2 response" shape,
+ * or even to know which wire protocol actually carried the response.
+ *
+ * Requires exactly one ":status" pseudo-header, a 3-digit value, and no
+ * other pseudo-header (a conformant HTTP/2 response never sends one --
+ * RFC 7540 §8.1.2.4). Every other decoded field becomes one "name:
+ * value\r\n" line verbatim (after h2_text_safe() clears it), EXCEPT the
+ * handful of HTTP/1.1 connection-specific headers RFC 7540 §8.1.2.2
+ * forbids sending over h2 at all (connection, transfer-encoding,
+ * keep-alive, upgrade) -- skipped rather than trusted, since forwarding
+ * one from a nonconformant peer could desync the reused chunked/keep-alive
+ * logic downstream. A synthesized "Connection: close" line is always
+ * appended instead, so http_parse()'s own keep-alive computation (reused
+ * completely unchanged) naturally comes out false -- Phase 17.3
+ * deliberately doesn't reuse an h2 connection for a second stream/request
+ * (see docs/SECURITY.md, Step 17.3), and this one line is what makes the
+ * EXISTING reusable()/slot_close() logic in fetch()/fetch_one() already do
+ * the right thing with no h2-specific code of its own.
+ *
+ * Returns the header block's length (including the trailing blank line),
+ * or -1 if it wouldn't fit `cap`, :status is missing/duplicated/
+ * non-3-digit, an unexpected pseudo-header appears, or any name/value
+ * fails h2_text_safe(). */
+static int h2_synthesize_header_block(char *out, int cap, const hpack_header_field *fields, size_t count)
+{
+    if (cap < 64) return -1;   /* room for the fixed-shape status line + "Connection: close" trailer below */
+
+    int status = -1;
+    for (size_t i = 0; i < count; i++) {
+        if (fields[i].name_len == 0 || fields[i].name[0] != ':') continue;
+        if (!eq_bytes(fields[i].name, fields[i].name_len, ":status")) return -1;   /* unexpected pseudo-header */
+        if (status >= 0) return -1;                                              /* duplicate :status */
+        if (fields[i].value_len != 3) return -1;
+        int v = 0;
+        for (int k = 0; k < 3; k++) {
+            uint8_t c = fields[i].value[k];
+            if (c < '0' || c > '9') return -1;
+            v = v * 10 + (c - '0');
+        }
+        status = v;
+    }
+    if (status < 0) return -1;   /* no :status pseudo-header at all */
+
+    int n = 0;
+    app(out, &n, "HTTP/1.1 ");
+    app_uint(out, &n, (unsigned)status);
+    app(out, &n, " (via HTTP/2)\r\n");
+
+    for (size_t i = 0; i < count; i++) {
+        if (fields[i].name_len > 0 && fields[i].name[0] == ':') continue;   /* :status already handled */
+        if (!h2_text_safe(fields[i].name, fields[i].name_len, 1) || !h2_text_safe(fields[i].value, fields[i].value_len, 0))
+            return -1;
+        if (eq_bytes(fields[i].name, fields[i].name_len, "connection") ||
+            eq_bytes(fields[i].name, fields[i].name_len, "transfer-encoding") ||
+            eq_bytes(fields[i].name, fields[i].name_len, "keep-alive") ||
+            eq_bytes(fields[i].name, fields[i].name_len, "upgrade"))
+            continue;
+
+        if (n + (int)fields[i].name_len + (int)fields[i].value_len + 4 >= cap) return -1;
+        for (size_t k = 0; k < fields[i].name_len; k++) out[n++] = (char)fields[i].name[k];
+        out[n++] = ':'; out[n++] = ' ';
+        for (size_t k = 0; k < fields[i].value_len; k++) out[n++] = (char)fields[i].value[k];
+        out[n++] = '\r'; out[n++] = '\n';
+    }
+
+    if (n + 20 >= cap) return -1;
+    app(out, &n, "Connection: close\r\n\r\n");
+    return n;
+}
+
+/* Send stream 1's request (Phase 17.1.3's h2_send_request(), extended) and
+ * this time actually read the full response -- Phase 17.3. Always a GET to
+ * u->host/u->path: carrying an arbitrary method/body over h2 is explicitly
+ * out of this phase's scope (see docs/SECURITY.md, Step 17.3), the same way
+ * it always has been for this h2 code path.
+ *
+ * Reads frames on stream 1 until the server's own END_STREAM arrives (on a
+ * body-less HEADERS, or the final DATA frame) or the connection closes.
+ * HEADERS is HPACK-decoded (`slot`'s own persistent dynamic table, so a
+ * peer using "Literal with Incremental Indexing" or an indexed dynamic
+ * entry works correctly) and translated via h2_synthesize_header_block()
+ * into an HTTP/1.1-shaped text block fed through the EXISTING resp_feed()
+ * -- so Set-Cookie parsing, gzip streaming, and Content-Type/Location
+ * detection all just work, unchanged, for an h2 response too. DATA frame
+ * payloads (padding-aware, via h2_data_parse()) are fed through resp_feed()
+ * the same way. This is deliberately still just ONE client stream, never
+ * multiplexed, with no PRIORITY/PUSH_PROMISE/CONTINUATION/flow-control
+ * handling beyond what's needed to read one stream to completion --
+ * "HTTP/2 v2" territory this phase intentionally leaves alone.
+ *
+ * Fills g_hr/g_resp/g_body exactly like the HTTP/1.1 path's own read loop
+ * does (via the same resp_feed()), but does NOT fill `out` itself or scan
+ * for Set-Cookie -- that's fetch_request()'s shared tail, run for this
+ * path too, so an h2 response's cookies are stored exactly the same way
+ * an HTTP/1.1 response's are, with no separate code path of its own.
+ *
+ * Returns 1 if the server's own END_STREAM arrived (a definitive "this
+ * response is complete" signal, the h2 equivalent of an HTTP/1.1
+ * connection closing cleanly), 0 if the connection closed first without
+ * one, or -1 on any protocol/transport failure or malformed HPACK (a
+ * diagnostic has already been printed in every case; per hpack_decode.h's
+ * own contract, a malformed header block is unrecoverable for the rest of
+ * this connection, so -1 here always means "give up on it entirely," not
+ * "retry this one request"). */
+static int h2_fetch(session_slot *slot, const struct url *u)
+{
+    resp_reset("GET");
+
+    static const char *ua = "Aurora-httpsget/0.3";
+    uint8_t hdrbuf[1024];
+    int hn = h2_build_headers(hdrbuf, sizeof hdrbuf, 1,
+                              "GET", (size_t)strlen("GET"),
+                              u->host, (size_t)strlen(u->host),
+                              u->path, (size_t)strlen(u->path),
+                              ua, (size_t)strlen(ua));
+    if (hn < 0) { fprintf(2, "[httpsget] h2: could not build the HEADERS frame\n"); return -1; }
+
+    int sl = tls_conn_send_app(&slot->conn, hdrbuf, (size_t)hn, g_scratch, sizeof g_scratch);
+    if (sl < 0) { fprintf(2, "[httpsget] h2: could not seal the HEADERS frame\n"); return -1; }
+    if (write_all(slot->fd, g_scratch, sl) != 0) { fprintf(2, "[httpsget] h2: write failed\n"); return -1; }
+    printf("[httpsget] h2: HEADERS frame sent (stream 1, GET %s)\n", u->path);
+
+    h2_frame_reader_init(&g_h2_reader);
+    int got_headers = 0, stream_ended = 0;
+
+    for (int reads = 0; !stream_ended && reads < H2_RESPONSE_FRAME_CAP; reads++) {
+        const uint8_t *rec; size_t rl; int cc;
+        while (!stream_ended && (cc = tls_reader_next(&slot->reader, &rec, &rl)) == 1) {
+            size_t pl = 0;
+            int rr = tls_conn_recv_app(&slot->conn, rec, rl, g_plain, sizeof g_plain, &pl);
+            if (rr == TLS_CONN_ERR_ALERT || rr < 0) { stream_ended = 1; break; }
+
+            size_t pos = 0;
+            while (!stream_ended && pos < pl) {
+                int fed = h2_frame_reader_feed(&g_h2_reader, g_plain + pos, pl - pos);
+                if (fed < 0) { fprintf(2, "[httpsget] h2: response frame too large (frame size error)\n"); return -1; }
+                pos += (size_t)fed;
+
+                h2_frame_header fh; const uint8_t *payload; size_t payload_len;
+                while (h2_frame_reader_next(&g_h2_reader, &fh, &payload, &payload_len) == 1) {
+                    if (fh.type == H2_TYPE_GOAWAY) {
+                        fprintf(2, "[httpsget] h2: server sent GOAWAY while reading the response\n");
+                        return -1;
+                    }
+                    if (fh.stream_id != 1) continue;   /* not our stream -- irrelevant */
+                    if (fh.type == H2_TYPE_RST_STREAM) {
+                        fprintf(2, "[httpsget] h2: server reset stream 1\n");
+                        return -1;
+                    }
+
+                    if (fh.type == H2_TYPE_HEADERS) {
+                        if (got_headers) {
+                            fprintf(2, "[httpsget] h2: a second HEADERS on stream 1 (trailers) is not supported\n");
+                            return -1;
+                        }
+                        if (!(fh.flags & H2_FLAG_END_HEADERS)) {
+                            fprintf(2, "[httpsget] h2: HEADERS without END_HEADERS (CONTINUATION is not supported)\n");
+                            return -1;
+                        }
+                        size_t nfields, scratch_used;
+                        if (hpack_decode_headers(payload, payload_len, &slot->h2_dyn_table,
+                                                 g_h2_fields, H2_HEADER_FIELDS_MAX, &nfields,
+                                                 g_h2_hpack_scratch, sizeof g_h2_hpack_scratch, &scratch_used) != 0) {
+                            fprintf(2, "[httpsget] h2: HPACK decode failed (malformed or unsupported header block)\n");
+                            return -1;
+                        }
+                        char hdrtext[4096];
+                        int htn = h2_synthesize_header_block(hdrtext, sizeof hdrtext, g_h2_fields, nfields);
+                        if (htn < 0) { fprintf(2, "[httpsget] h2: could not translate the decoded response headers\n"); return -1; }
+                        got_headers = 1;
+                        printf("[httpsget] h2: HEADERS decoded (%u header fields)\n", (unsigned)nfields);
+                        resp_feed((const uint8_t*)hdrtext, htn);
+                        if (fh.flags & H2_FLAG_END_STREAM) stream_ended = 1;
+                    } else if (fh.type == H2_TYPE_DATA) {
+                        if (!got_headers) { fprintf(2, "[httpsget] h2: DATA before HEADERS on stream 1\n"); return -1; }
+                        const uint8_t *data; size_t data_len;
+                        if (h2_data_parse(payload, payload_len, fh.flags, &data, &data_len) != 0) {
+                            fprintf(2, "[httpsget] h2: malformed DATA frame\n"); return -1;
+                        }
+                        resp_feed(data, (int)data_len);
+                        if (fh.flags & H2_FLAG_END_STREAM) stream_ended = 1;
+                    }
+                    /* anything else on our stream (WINDOW_UPDATE, PRIORITY, ...)
+                     * is silently skipped -- 17.3's deliberately minimal scope. */
+                    if (stream_ended) break;
+                }
+            }
+        }
+        if (stream_ended) break;
+        if (cc < 0) { fprintf(2, "[httpsget] h2: malformed TLS record while reading the response\n"); return -1; }
+        int rn = read(slot->fd, g_scratch, sizeof g_scratch);
+        if (rn <= 0) break;   /* connection closed -- treat whatever arrived as the final response */
+        tls_reader_feed(&slot->reader, g_scratch, (size_t)rn);
+    }
+
+    if (!got_headers) { fprintf(2, "[httpsget] h2: connection closed before any response headers arrived\n"); return -1; }
+    printf("[httpsget] h2: stream 1 complete (status=%d, %d body bytes)\n", g_hr.status, g_total - g_hr.header_len);
+    return stream_ended;
+}
 
 /* Complete the mandatory HTTP/2 connection-establishment handshake (RFC
  * 7540 §3.5/§6.5), Phase 17.1.1, once ALPN (17.0) has selected "h2": send
@@ -681,81 +960,6 @@ static int h2_handshake(session_slot *slot)
     return 0;
 }
 
-/* Build and send a minimal GET request's HEADERS frame (Phase 17.1.3) over
- * an h2 connection whose connection-establishment handshake (h2_handshake(),
- * above) already succeeded, opening stream 1 -- RFC 7540 §5.1.1's first
- * client-initiated stream identifier. Always GET, always `u->host`/
- * `u->path`: proving the encoding pipeline produces a real request a real
- * server accepts is this phase's whole point, not carrying an arbitrary
- * method/body over h2 yet (--post doesn't reach here today).
- *
- * Then waits for one response frame and just names it by type, without
- * decoding its HPACK-compressed contents -- RFC 7541's static table has no
- * *value* for most response headers (date, server, content-length, ...), so
- * a real encoder almost always falls back to literals, frequently
- * Huffman-coded for space, and this client doesn't have Huffman or a
- * dynamic table yet (17.2/17.3). Never treated as a failure if no response
- * frame shows up in time or the connection just closes -- the request
- * having been sent and accepted is what this function is actually proving.
- *
- * Returns 0 once the HEADERS frame itself was sent successfully (regardless
- * of what happens afterward), -1 only on a failure to build/seal/write it
- * (diagnostic already printed). */
-static int h2_send_request(session_slot *slot, const struct url *u)
-{
-    static const char *ua = "Aurora-httpsget/0.3";
-    uint8_t hdrbuf[1024];
-    int hn = h2_build_headers(hdrbuf, sizeof hdrbuf, 1,
-                              "GET", (size_t)strlen("GET"),
-                              u->host, (size_t)strlen(u->host),
-                              u->path, (size_t)strlen(u->path),
-                              ua, (size_t)strlen(ua));
-    if (hn < 0) { fprintf(2, "[httpsget] h2: could not build the HEADERS frame\n"); return -1; }
-
-    int sl = tls_conn_send_app(&slot->conn, hdrbuf, (size_t)hn, g_scratch, sizeof g_scratch);
-    if (sl < 0) { fprintf(2, "[httpsget] h2: could not seal the HEADERS frame\n"); return -1; }
-    if (write_all(slot->fd, g_scratch, sl) != 0) { fprintf(2, "[httpsget] h2: write failed\n"); return -1; }
-    printf("[httpsget] h2: HEADERS frame sent (stream 1, GET %s)\n", u->path);
-
-    h2_frame_reader_init(&g_h2_reader);
-    for (int reads = 0; reads < H2_HANDSHAKE_FRAME_CAP; reads++) {
-        const uint8_t *rec; size_t rl; int cc;
-        while ((cc = tls_reader_next(&slot->reader, &rec, &rl)) == 1) {
-            size_t pl = 0;
-            int rr = tls_conn_recv_app(&slot->conn, rec, rl, g_plain, sizeof g_plain, &pl);
-            if (rr == TLS_CONN_ERR_ALERT || rr < 0) {
-                printf("[httpsget] h2: connection closed while waiting for a response\n");
-                return 0;
-            }
-
-            size_t pos = 0;
-            while (pos < pl) {
-                int fed = h2_frame_reader_feed(&g_h2_reader, g_plain + pos, pl - pos);
-                if (fed < 0) { fprintf(2, "[httpsget] h2: response frame too large (frame size error)\n"); return 0; }
-                pos += (size_t)fed;
-
-                h2_frame_header fh; const uint8_t *payload; size_t payload_len;
-                if (h2_frame_reader_next(&g_h2_reader, &fh, &payload, &payload_len) == 1) {
-                    (void)payload;
-                    const char *tn = fh.type == H2_TYPE_HEADERS ? "HEADERS"
-                                    : fh.type == H2_TYPE_DATA    ? "DATA"
-                                    : fh.type == H2_TYPE_GOAWAY  ? "GOAWAY" : "other";
-                    printf("[httpsget] h2: response frame seen (%s, stream %u, %u bytes) -- "
-                           "not decoded yet (needs HPACK Huffman/dynamic table, a later phase)\n",
-                           tn, (unsigned)fh.stream_id, (unsigned)payload_len);
-                    return 0;
-                }
-            }
-        }
-        if (cc < 0) { fprintf(2, "[httpsget] h2: malformed TLS record while waiting for a response\n"); return 0; }
-        int rn = read(slot->fd, g_scratch, sizeof g_scratch);
-        if (rn <= 0) { printf("[httpsget] h2: connection closed while waiting for a response\n"); return 0; }
-        tls_reader_feed(&slot->reader, g_scratch, (size_t)rn);
-    }
-    printf("[httpsget] h2: gave up waiting for a response\n");
-    return 0;
-}
-
 /* Open a fresh TCP connection to `u` into `slot` (a DNS lookup if `u->host`
  * isn't a literal), doing a TLS 1.3 handshake first if `u->https` -- offering
  * `slot`'s cached ticket for resumption if it has one. On success,
@@ -770,6 +974,10 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
     if (rc == -2) { fprintf(2, "httpsget: DNS resolution failed for %s\n", u->host); close(slot->fd); return -1; }
     if (rc != 0)  { fprintf(2, "httpsget: TCP connect failed (%d)\n", rc); close(slot->fd); return -1; }
     printf("[httpsget] TCP connected to %s:%d\n", u->host, u->port);
+
+    slot->is_h2 = 0;   /* freshly determined by THIS connection attempt every time --
+                        * whatever a slot's previous, possibly-different-origin connection
+                        * negotiated never carries over */
 
     if (u->https) {
         uint8_t priv[32], crand[32];
@@ -836,24 +1044,19 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
             if (slot->conn.fsm.alpn_negotiated) {
                 printf("[TLS] ALPN negotiated: %s\n", slot->conn.fsm.alpn_selected);
                 if (strcmp(slot->conn.fsm.alpn_selected, "h2") == 0) {
-                    /* By Phase 17.1.3, Aurora can complete the mandatory h2
-                     * connection-establishment handshake AND send a real,
-                     * HPACK-compressed HEADERS frame that opens a genuine
-                     * request -- but still can't decode whatever comes back
-                     * (that needs Huffman and/or the dynamic table, 17.2/
-                     * 17.3), so this connection attempt still ends here
-                     * either way, just further along than before. Continuing
-                     * to speak HTTP/1.1 over a connection the server now
-                     * expects to carry HTTP/2 would just hang or desync, not
-                     * degrade gracefully -- diagnostics from whichever step
-                     * didn't succeed have already been printed by it. */
-                    if (h2_handshake(slot) == 0 && h2_send_request(slot, u) == 0) {
-                        fprintf(2, "[httpsget] h2: request sent over a genuinely negotiated h2 "
-                                   "connection, but response decoding needs HPACK Huffman/dynamic "
-                                   "table support (a later phase) -- there is no way to complete a "
-                                   "real fetch over h2 yet\n");
-                    }
-                    close(slot->fd); return -1;
+                    /* Phase 17.3: once the connection-establishment handshake
+                     * completes, this connection is ready to carry a real h2
+                     * request/response -- h2_fetch() (called from
+                     * fetch_request() below, mirroring exactly how the
+                     * HTTP/1.1 path only sends+reads there too) does the
+                     * rest. Continuing to speak HTTP/1.1 over a connection
+                     * the server now expects to carry HTTP/2 framing would
+                     * just hang or desync, not degrade gracefully -- so a
+                     * failed handshake here still aborts the connection
+                     * attempt outright, same as every phase before this one. */
+                    if (h2_handshake(slot) != 0) { close(slot->fd); return -1; }
+                    hpack_table_init(&slot->h2_dyn_table, HPACK_DYN_ARENA_SIZE);
+                    slot->is_h2 = 1;
                 }
             } else {
                 printf("[TLS] ALPN: no protocol selected by the server\n");
@@ -877,54 +1080,71 @@ static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
                          const char *method, const uint8_t *body, int bodylen, const char *content_type,
                          const char *auth_header, int auth_len, fetch_result_t *out)
 {
-    resp_reset(method);
-    char req[REQ_BUF_MAX]; int rn;
-    build_request(req, &rn, u, now, method, body, bodylen, content_type, auth_header, auth_len);
-
     int closed = 0;
-    if (slot->origin.https) {
-        int sl = tls_conn_send_app(&slot->conn, (const uint8_t*)req, (size_t)rn, g_scratch, sizeof g_scratch);
-        if (sl < 0) return FETCH_STALE;
-        if (write_all(slot->fd, g_scratch, sl) != 0) return FETCH_STALE;
-        printf("[httpsget] %s %s HTTP/1.1 sent\n", method, u->path);
 
-        for (;;) {
-            const uint8_t *rec; size_t rl; int cc;
-            while ((cc = tls_reader_next(&slot->reader, &rec, &rl)) == 1) {
-                size_t pl = 0;
-                int rr = tls_conn_recv_app(&slot->conn, rec, rl, g_plain, sizeof g_plain, &pl);
-                if (rr == TLS_CONN_ERR_ALERT) { closed = 1; goto https_done; }
-                if (rr < 0) { fprintf(2, "[httpsget] recv_app error %d\n", rr); goto https_done; }
-                resp_feed(g_plain, (int)pl);
-                /* A NewSessionTicket may ride along with (or instead of) app
-                 * data on any read once CONNECTED (Phase 15.7); it's stored
-                 * on the slot itself, so it outlives this one connection. */
-                { tls_session_ticket t;
-                  if (tls_conn_take_ticket(&slot->conn, &t)) {
-                      t.obtained_ms = now * 1000;
-                      slot->ticket = t; slot->has_ticket = 1;
-                      printf("[httpsget] session ticket cached for %s:%d (lifetime=%us)\n",
-                             u->host, u->port, t.lifetime_secs);
-                  } }
-                if (resp_done()) goto https_done;
-            }
-            if (cc < 0) { fprintf(2, "[httpsget] malformed record\n"); break; }
-            if (g_target < 0 && g_rlen >= (int)sizeof g_resp) break;   /* not reusable: preview cap reached */
-            int n = read(slot->fd, g_scratch, sizeof g_scratch);
-            if (n <= 0) { closed = 1; break; }
-            tls_reader_feed(&slot->reader, g_scratch, (size_t)n);
-        }
-        https_done: ;
+    /* Phase 17.3: an h2-negotiated connection speaks HTTP/2 framing, not
+     * HTTP/1.1 request-line text -- h2_fetch() is this branch's entire
+     * request+response cycle (always a GET, see its own comment for why).
+     * It fills g_hr/g_resp/g_body via the same resp_feed() the HTTP/1.1
+     * path below uses, so the shared tail after this if/else (staleness
+     * check, Set-Cookie scan, *out fill) applies unchanged to an h2
+     * response too -- the caller (fetch()/fetch_one()) never needs to know
+     * which path actually ran. `method`/`body`/`bodylen`/`content_type`/
+     * `auth_header`/`auth_len` are intentionally unused here -- carrying
+     * them over h2 is out of this phase's scope. */
+    if (slot->origin.https && slot->is_h2) {
+        int rc = h2_fetch(slot, u);
+        if (rc < 0) return -1;
+        closed = rc;
     } else {
-        if (write_all(slot->fd, (const uint8_t*)req, rn) != 0) return FETCH_STALE;
-        printf("[httpsget] %s %s HTTP/1.1 sent (plain HTTP)\n", method, u->path);
+        resp_reset(method);
+        char req[REQ_BUF_MAX]; int rn;
+        build_request(req, &rn, u, now, method, body, bodylen, content_type, auth_header, auth_len);
 
-        for (;;) {
-            if (resp_done()) break;
-            if (g_target < 0 && g_rlen >= (int)sizeof g_resp) break;
-            int n = read(slot->fd, g_scratch, sizeof g_scratch);
-            if (n <= 0) { closed = 1; break; }
-            resp_feed(g_scratch, n);
+        if (slot->origin.https) {
+            int sl = tls_conn_send_app(&slot->conn, (const uint8_t*)req, (size_t)rn, g_scratch, sizeof g_scratch);
+            if (sl < 0) return FETCH_STALE;
+            if (write_all(slot->fd, g_scratch, sl) != 0) return FETCH_STALE;
+            printf("[httpsget] %s %s HTTP/1.1 sent\n", method, u->path);
+
+            for (;;) {
+                const uint8_t *rec; size_t rl; int cc;
+                while ((cc = tls_reader_next(&slot->reader, &rec, &rl)) == 1) {
+                    size_t pl = 0;
+                    int rr = tls_conn_recv_app(&slot->conn, rec, rl, g_plain, sizeof g_plain, &pl);
+                    if (rr == TLS_CONN_ERR_ALERT) { closed = 1; goto https_done; }
+                    if (rr < 0) { fprintf(2, "[httpsget] recv_app error %d\n", rr); goto https_done; }
+                    resp_feed(g_plain, (int)pl);
+                    /* A NewSessionTicket may ride along with (or instead of) app
+                     * data on any read once CONNECTED (Phase 15.7); it's stored
+                     * on the slot itself, so it outlives this one connection. */
+                    { tls_session_ticket t;
+                      if (tls_conn_take_ticket(&slot->conn, &t)) {
+                          t.obtained_ms = now * 1000;
+                          slot->ticket = t; slot->has_ticket = 1;
+                          printf("[httpsget] session ticket cached for %s:%d (lifetime=%us)\n",
+                                 u->host, u->port, t.lifetime_secs);
+                      } }
+                    if (resp_done()) goto https_done;
+                }
+                if (cc < 0) { fprintf(2, "[httpsget] malformed record\n"); break; }
+                if (g_target < 0 && g_rlen >= (int)sizeof g_resp) break;   /* not reusable: preview cap reached */
+                int n = read(slot->fd, g_scratch, sizeof g_scratch);
+                if (n <= 0) { closed = 1; break; }
+                tls_reader_feed(&slot->reader, g_scratch, (size_t)n);
+            }
+            https_done: ;
+        } else {
+            if (write_all(slot->fd, (const uint8_t*)req, rn) != 0) return FETCH_STALE;
+            printf("[httpsget] %s %s HTTP/1.1 sent (plain HTTP)\n", method, u->path);
+
+            for (;;) {
+                if (resp_done()) break;
+                if (g_target < 0 && g_rlen >= (int)sizeof g_resp) break;
+                int n = read(slot->fd, g_scratch, sizeof g_scratch);
+                if (n <= 0) { closed = 1; break; }
+                resp_feed(g_scratch, n);
+            }
         }
     }
 

@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Phase 17.1.1/17.1.2/17.1.3 acceptance: the HTTP/2 connection-
+"""Phase 17.1.1/17.1.2/17.1.3/17.2.x/17.3 acceptance: the HTTP/2 connection-
 establishment handshake (RFC 7540 §3.5/§6.5), the generic frame reader and
-DATA frame support (17.1.2), and a real, HPACK-compressed HEADERS request
-using only RFC 7541's static table (17.1.3) -- negotiated for real inside
-QEMU against a genuine TLS 1.3 server that speaks real HTTP/2 frames (and
-now real HPACK) at the byte level, hand-rolled here in Python, independent
-of Aurora's own http2/frame.c and http2/hpack.c -- this script's frame and
-HPACK encoders/decoders are from-scratch second implementations, not a
-copy, so a bug shared between the two wouldn't hide behind agreement.
+DATA frame support (17.1.2), a real HPACK-compressed HEADERS request
+(17.1.3), and -- the point of this file's latest extension -- Aurora's
+first genuinely complete HTTP/2 GET (17.3): a real HPACK-decoded response
+HEADERS frame plus a real multi-frame DATA body, turned into an ordinary
+`struct http_response` and printed exactly like an HTTP/1.1 response would
+be. Negotiated for real inside QEMU against a genuine TLS 1.3 server that
+speaks real HTTP/2 frames and real HPACK at the byte level, hand-rolled
+here in Python, independent of Aurora's own http2/*.c -- this script's
+frame and HPACK encoders/decoders are from-scratch second implementations,
+not a copy, so a bug shared between the two wouldn't hide behind agreement.
+(Huffman coverage lives in the 17.2.1 host tests, verified against RFC
+7541's own Appendix C.4 vectors -- this script's own response deliberately
+stays non-Huffman, since this test's job is proving the wiring end to end,
+not re-proving HPACK primitives already pinned at the unit level.)
 
 One QEMU boot: `httpsget --alpn 10.0.2.2 /whatever <now>` against a server
 whose own ALPN list is `["h2"]` only, forcing the selection (this script
@@ -28,11 +35,10 @@ selection matrix itself). The server:
      unrelated frame type interleaved in the middle of the exchange, not
      just extra bytes of a *known* type.
   4. Sends a stray, PADDED, END_STREAM DATA frame on a stream nothing ever
-     opened (Phase 17.1.2): this is the real point of this step -- the
-     generic frame reader now decodes a genuine, payload-bearing, padded
-     frame type correctly (Aurora's own log names it: "DATA frame seen"),
-     not just tolerates extra bytes of a frame type it already recognized
-     like the WINDOW_UPDATE above.
+     opened (Phase 17.1.2): the generic frame reader decodes a genuine,
+     payload-bearing, padded frame type correctly (Aurora's own log names
+     it: "DATA frame seen"), not just tolerates extra bytes of a frame
+     type it already recognized like the WINDOW_UPDATE above.
   5. Waits for Aurora's SETTINGS ACK (type=SETTINGS, flags=ACK, empty) and
      confirms it arrives.
   6. Sends its own SETTINGS ACK, acknowledging Aurora's SETTINGS from step 2.
@@ -41,13 +47,23 @@ selection matrix itself). The server:
      payload (this script's own decoder), confirming the actual :method,
      :scheme, :authority, :path and user-agent Aurora chose to send, not
      just that *some* bytes shaped like a HEADERS frame arrived.
-  8. Sends back a minimal real response -- a HEADERS frame carrying just
-     ":status: 200" (itself a single indexed static-table byte).
-  9. Confirms NO further bytes ever arrive afterward -- there is still no
-     response *decoding*, so even though Aurora just received a real
-     HTTP/2 response to a request it genuinely sent, it recognizes the
-     response frame by type and stops there, not acting on its (HPACK-
-     compressed) contents.
+  8. Sends back a REAL response (Phase 17.3): a HEADERS frame (END_HEADERS
+     set, END_STREAM clear -- a body follows) carrying `:status: 200`,
+     `content-type`, and `set-cookie`, each via "Literal Header Field with
+     Incremental Indexing" against an indexed NAME (RFC 7541 §6.2.1 --
+     exercising Aurora's decode-side dynamic table growth for real, even
+     though this single-request test has no follow-up to reference the
+     grown entries back by index -- that sequence is what the 17.2.2 host
+     tests already pin against RFC 7541 Appendix C.3/C.5), plus one fully
+     literal name+value header. Then THREE DATA frames on stream 1 --
+     unpadded, then a zero-length one (a real, if unusual, wire event a
+     receiver must tolerate), then a padded one with END_STREAM -- one
+     request touching every item on 17.3.2's own checklist (a sequence of
+     DATA frames, END_STREAM, a zero-length DATA frame, and padding) in a
+     single real response.
+  9. Confirms the connection closes cleanly afterward with no further
+     frames -- Aurora doesn't attempt a second stream or keep this h2
+     connection open (Phase 17.3 deliberately doesn't reuse one yet).
 
 Self-contained and reproducible: no private keys are committed; the
 production user/ca_roots.h is restored on exit. Requires: qemu-system-i386,
@@ -81,6 +97,8 @@ HPACK_STATIC_TABLE = {
     6: (":scheme", "http"),
     7: (":scheme", "https"),
     8: (":status", "200"),
+    31: ("content-type", None),
+    55: ("set-cookie", None),
     58: ("user-agent", None),
 }
 
@@ -152,6 +170,46 @@ def hpack_decode_headers(payload):
 
 def hpack_encode_indexed(index):
     return bytes([0x80 | index])
+
+
+def hpack_encode_int(value, prefix_bits, flag_bits=0):
+    """RFC 7541 SS5.1, the encode side -- mirrors Aurora's own
+    hpack_put_int() (http2/hpack.c), a from-scratch second implementation
+    for this test server's own outgoing responses."""
+    max_prefix = (1 << prefix_bits) - 1
+    if value < max_prefix:
+        return bytes([flag_bits | value])
+    out = bytearray([flag_bits | max_prefix])
+    value -= max_prefix
+    while value >= 128:
+        out.append((value % 128) | 0x80)
+        value //= 128
+    out.append(value)
+    return bytes(out)
+
+
+def hpack_encode_string(s):
+    """RFC 7541 SS5.2, Huffman bit always clear -- this test server, like
+    Aurora's own encoder, never Huffman-encodes what it sends (see this
+    file's own module docstring for why that's fine for what this test
+    needs to prove)."""
+    b = s.encode("latin1")
+    return hpack_encode_int(len(b), 7, 0x00) + b
+
+
+def hpack_encode_literal_incremental(name_index, name, value):
+    """RFC 7541 SS6.2.1, "Literal Header Field with Incremental Indexing".
+    `name_index` = 0 sends `name` as a literal string; a nonzero index
+    resolves the name from the (static, here) table and `name` is
+    ignored. Tells a real decoder to add this field to its dynamic
+    table -- exactly the representation Aurora's own decoder (17.2.2)
+    needs to see exercised for real, not just against its own host-test
+    vectors."""
+    if name_index:
+        out = hpack_encode_int(name_index, 6, 0x40)
+    else:
+        out = hpack_encode_int(0, 6, 0x40) + hpack_encode_string(name)
+    return out + hpack_encode_string(value)
 
 
 def h2_frame(type_, flags, stream_id, payload=b""):
@@ -275,20 +333,39 @@ def start_server(port, certfile, keyfile, result):
                 result["hpack_decode_error"] = str(e)
                 decoded = {}
 
-            # A minimal real response: just ":status: 200", itself a single
-            # indexed static-table byte (index 8) -- proving the round trip
-            # without needing this test to build a bigger response than the
-            # point requires.
-            tls.sendall(h2_frame(H2_TYPE_HEADERS, H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM, 1,
-                                 hpack_encode_indexed(8)))
+            # Phase 17.3: a REAL response -- HEADERS (END_HEADERS set,
+            # END_STREAM clear -- a body follows) using "Literal with
+            # Incremental Indexing" for :status/content-type/set-cookie
+            # (each an indexed NAME + literal value, exercising Aurora's
+            # decode-side dynamic table growth for real) plus one fully
+            # literal name+value header, then three DATA frames covering
+            # every item on 17.3.2's own checklist in one response: a
+            # sequence of frames, a zero-length one, padding, and END_STREAM
+            # on the last one.
+            headers_payload = (
+                hpack_encode_literal_incremental(8, None, "200") +
+                hpack_encode_literal_incremental(31, None, "text/plain") +
+                hpack_encode_literal_incremental(55, None, "h2test=yes; Path=/") +
+                hpack_encode_literal_incremental(0, "x-aurora-test", "hello-http2")
+            )
+            tls.sendall(h2_frame(H2_TYPE_HEADERS, H2_FLAG_END_HEADERS, 1, headers_payload))
 
-            # Nothing more should ever arrive: Aurora recognizes the response
-            # frame by type and stops -- it doesn't (can't yet) act on it.
+            body = (b"<html><body><h1>Hello from HTTP/2</h1>"
+                    b"<p>Aurora's first real HTTP/2 GET, decoded end to end.</p></body></html>")
+            chunk1, chunk2 = body[:40], body[40:]
+            tls.sendall(h2_data_frame(1, chunk1))                              # 1: a real chunk, unpadded
+            tls.sendall(h2_data_frame(1, b""))                                 # 2: zero-length DATA mid-stream
+            tls.sendall(h2_data_frame(1, chunk2, padding=7, end_stream=True))  # 3: padded, END_STREAM
+            result["response_body"] = body
+
+            # The connection should close cleanly afterward: Aurora doesn't
+            # keep an h2 connection open for a second stream/request yet
+            # (Phase 17.3's own scope), so nothing more should ever arrive.
             try:
                 extra = tls.recv(4096)
             except (socket.timeout, ssl.SSLError, OSError):
                 extra = b""
-            result["extra_after_handshake"] = extra
+            result["extra_after_response"] = extra
         except (socket.timeout, OSError, ssl.SSLError) as e:
             result["error"] = str(e)
         try: tls.close()
@@ -394,13 +471,21 @@ def main():
             ("decoded :authority is 10.0.2.2 (the real host)",
              result.get("decoded_headers", {}).get(":authority") == "10.0.2.2"),
             ("decoded user-agent is Aurora's own", result.get("decoded_headers", {}).get("user-agent", "").startswith("Aurora-httpsget")),
-            ("client log shows a response frame was seen and named by type",
-             "response frame seen (HEADERS, stream 1," in log),
-            ("client log shows the final refusal to complete a real fetch, now for the right "
-             "reason (response decoding, not \"no HEADERS framing\")",
-             "response decoding needs HPACK Huffman/dynamic table support" in log),
-            ("status=200 was never reached (nothing decodes the response body yet)", "status=200" not in log),
-            ("server confirms NOTHING further arrived after its response", result.get("extra_after_handshake") == b""),
+
+            # Phase 17.3: the real response is HPACK-decoded and turned into
+            # an ordinary http_response, exactly like an HTTP/1.1 response.
+            ("client log shows the response HEADERS were HPACK-decoded (4 header fields)",
+             "HEADERS decoded (4 header fields)" in log),
+            ("client log shows the synthesized status line (200, tagged as having come via HTTP/2)",
+             "HTTP/1.1 200 (via HTTP/2)" in log),
+            ("client log shows status=200 was actually reached", "status=200" in log),
+            ("client log shows the real page content from the DATA frames (not a placeholder)",
+             "Hello from HTTP/2" in log and "decoded end to end" in log),
+            ("client log shows the Set-Cookie header (decoded via HPACK) was stored",
+             "cookie stored: h2test=yes" in log),
+            ("client log shows the final 200 OK line", "200 OK over Aurora TCP->TLS1.3->HTTP" in log),
+            ("server confirms nothing further arrived after the response (no h2 connection reuse yet)",
+             result.get("extra_after_response") == b""),
             ("no error was recorded server-side", "error" not in result),
         ]
 
@@ -415,7 +500,7 @@ def main():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         sh("make user/httpsget.elf disk.img")
         shutil.rmtree(work, ignore_errors=True)
-    print("\n17.1.1 HTTP/2 CONNECTION-ESTABLISHMENT HANDSHAKE (QEMU, real frame-level server): " +
+    print("\n17.1-17.3 HTTP/2: HANDSHAKE THROUGH A REAL DECODED GET (QEMU, real frame-level server): " +
           ("ALL PASS" if fails == 0 else f"{fails} FAILURE(S)"))
     return 1 if fails else 0
 

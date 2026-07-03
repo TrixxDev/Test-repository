@@ -93,6 +93,7 @@ Run the vectors: `make crypto-test`.
 | **17.1.3** | **A real HEADERS frame, HPACK static table only** — new `http2/hpack.c` (RFC 7541 prefixed-integer and string-literal encoding, "Indexed Header Field" and "Literal Header Field *without* Indexing" representations — deliberately not "with incremental indexing", since Aurora tracks no dynamic table of its own to stay in sync with one it would be telling the peer to build) and `http2/headers.c` (`h2_build_headers()`, assembling `:method`/`:scheme`/`:authority`/`:path`/`user-agent` into one HPACK-compressed HEADERS frame using ONLY RFC 7541 Appendix A's static table — no Huffman, no dynamic table, both later phases). `h2_send_request()` sends it once the connection-establishment handshake (17.1.1/17.1.2) succeeds, opening stream 1 (RFC 7540 §5.1.1) with a genuine GET to `u->host`/`u->path`, then recognizes (by frame type only, still not HPACK-decoding) whatever response frame comes back before `fetch_begin()` still ends the attempt — response decoding needs Huffman and/or the dynamic table, which a real server's response headers routinely require | `make h2-test` (22 new cases: RFC 7541 §5.1's own worked example — 1337 with a 5-bit prefix — matches byte-for-byte, indexed/literal/multi-byte-continuation representations checked individually, then four complete HEADERS frames — `GET /`, `GET` with a non-root path plus a user-agent exercising the multi-byte index for entry 58, `POST`, and `PUT` — each checked against hex byte sequences hand-derived directly from RFC 7541's own encoding rules, not copied from any tool); `tools/h2_handshake_qemu.py` extended with a genuine, independent, from-scratch Python HPACK *decoder* (not Aurora's `http2/hpack.c`, and not any third-party package — installing one via `pip` was correctly blocked by this session's own permission policy as an undeclared external dependency) that receives Aurora's real HEADERS frame and decodes `:method=GET`, `:scheme=https`, `:authority=10.0.2.2`, `:path=/whatever` and Aurora's own user-agent string, then answers with a real (single-byte, statically-indexed) `:status: 200` HEADERS frame of its own, which Aurora correctly recognizes by type without decoding it — All 23 checks pass. Writing the C-side hex vectors caught a real off-by-one in the *test itself* (a hand-counted user-agent length one byte too long, so the encoder faithfully copied the string's own NUL terminator in as if it were data — the byte-mismatch check caught it immediately; `http2/hpack.c` was already correct) before it was ever committed. Full existing host suite and the 13-script QEMU regression sweep from 17.1.2 all pass unaffected | ✅ |
 | **17.2.1** | **HPACK Huffman decoding** (RFC 7541 §5.2/Appendix B, new `http2/huffman.c`) — decode-only, matching 17.1.3's own decision to leave Aurora's *encoder* (`hpack.c`) alone: this client never sends a Huffman-coded string, but a real server's response routinely does, so reading one back needs a decoder regardless. `hpack_huffman_decode()` is a bit-by-bit canonical-Huffman walk: accumulate one bit at a time into a candidate `(code, len)` and scan the 256 real symbols (never EOS/256 itself — RFC 7541 §5.2 forbids a sender from ever encoding it) for an exact match; a run longer than the longest real code (28 bits) or than EOS's own 30-bit all-ones code can only mean corrupt input, and trailing padding bits must themselves be a prefix of that same all-ones pattern. The 257-entry code table (256 symbols + EOS) behind it was **not hand-transcribed** — this project has hit exactly that class of error before (the gzip/CRC32/inflate KATs in 15.10, and 17.1.3's own hand-counted user-agent length bug) — instead it was fetched as raw RFC text via `curl` (rejecting `WebFetch`, whose own documentation says large content "may be summarized" by an intermediate model — an unacceptable risk for a bit-exact 257-entry table) and mechanically parsed out of the RFC's own published text with a narrow regex script, which also verified the parse's completeness (257/257 entries, no duplicates or gaps) and cross-checked three RFC-documented values (symbol 47 `/` → `0x18`/6 bits, symbol 0 → `0x1ff8`/13 bits, EOS → `0x3fffffff`/30 bits) before the table was ever written into C | `make h2-test` (11 new cases: RFC 7541 Appendix C.4.1 and C.4.2's own worked Huffman examples — `f1e3c2e5f23a6ba0ab90f4ff` → `"www.example.com"`, `a8eb10649cbf` → `"no-cache"` — decode byte-for-byte correct; empty input decodes to an empty string; a single `0x00` byte decodes one real symbol then is correctly rejected for invalid (non-all-1s) padding; four bytes of `0xff` (a run longer than any valid code) is rejected rather than silently treated as EOS; an undersized output buffer is rejected, not truncated). Before any C was written, the exact same algorithm was prototyped in Python against both RFC C.4 vectors, to catch a design bug independent of any transcription bug in the table. Standalone capability only — not yet wired into `httpsget.c`'s live h2 response path, since decoding a real response also needs the dynamic table (17.2.2); full existing host suite passes unaffected, and the full 16-script QEMU regression sweep (every `tools/*_qemu.py` script, including `h2_handshake_qemu.py` itself) re-run unaffected, since this phase only adds a new, still-unused object file to the link | ✅ |
 | **17.2.2** | **HPACK dynamic table + full header block decode** (RFC 7541 §2.3.2/§4/§6, new `http2/hpack_table.c` and `http2/hpack_decode.c`) — completes decode-side HPACK. `hpack_table.c` holds the full 61-entry static table (RFC 7541 Appendix A, mechanically extracted the same way as 17.2.1's Huffman table — this time each string's length is `sizeof(x)-1`, compiler-computed rather than hand-counted, closing off the exact class of mistake a hand-counted user-agent length caused in 17.1.3) plus a decode-side dynamic table: a fixed 4096-byte arena (matching the RFC 7540 §6.5.2 default `SETTINGS_HEADER_TABLE_SIZE` that applies as long as Aurora's own SETTINGS stays empty — no legally-behaving peer can ever need more than this decoder can hold) storing entries FIFO, insertion evicting the oldest as needed to fit under the current max size, a Dynamic Table Size Update (§6.3) shrinking that max and evicting accordingly, and index resolution across RFC 7541 §2.3.3's unified space (1-61 static, 62+ dynamic, most-recent-first). `hpack_decode.c` adds §5.1's integer decode and §5.2's string-literal decode (raw or Huffman, via `huffman.c`), dispatching every §6 representation — Indexed Header Field, Literal with Incremental Indexing (the one that grows the table), Literal without Indexing, Literal Never Indexed, and Dynamic Table Size Update — into a caller-supplied list of decoded header fields. Aurora's own encoder (`hpack.c`, 17.1.3) is untouched, by design: RFC 7541 §2.3.2 makes the two directions' dynamic tables independent, so tracking what a *peer's* encoder does carries none of the send-side synchronization risk 17.1.3 deliberately avoided | Writing the tests surfaced a real bug before any of this shipped: the decoder initially returned raw pointers into the dynamic table's own byte arena for indexed lookups, but a *later* representation in the same header block can evict and compact that arena out from under an *earlier* one's already-decoded field — not a hypothetical, but literally what RFC 7541's own Appendix C.5.3 example does (a `cache-control` entry read early in a response is evicted later in that same response). Fixed by copying every table-resolved name/value into the caller's scratch buffer immediately upon resolution, before anything else in the block can run. `make h2-test` (86 new cases): the RFC's own isolated representation examples (Appendix C.2.1-C.2.4); the full three-request sequence from Appendix C.3 with the dynamic table growing across calls to the *same* table instance, verifying decoded fields, table entry count, and table byte-size after each request against the RFC's own documented intermediate state (including a dynamic entry referenced back by index 62, then by index 63 once a second insertion pushes it one further back — "Indexed Dynamic Entries" from the roadmap, proven against the RFC's own sequence rather than a self-invented one); the full three-response sequence from Appendix C.5 with `SETTINGS_HEADER_TABLE_SIZE` set to 256 (as the RFC itself specifies) to force real evictions, including the exact C.5.3 case that caught the arena-aliasing bug above; `Dynamic Table Size Update` exercised both as a direct API call (shrinking evicts down to what fits, down to and including emptying the table) and inline within a real header block; and malformed-input rejection (an indexed field pointing past the last live entry, index 0, a size update past the 4096-byte arena cap, a string literal whose declared length runs past the input, an `out_cap` too small for even one field, a `scratch` buffer too small for one decoded string). Full existing host suite passes unaffected. Not yet wired into `httpsget.c` — assembling a decoded header block into an `http_response`-shaped result, and reading the accompanying DATA frame(s), is Phase 17.3; the full 16-script QEMU regression sweep re-run unaffected, since this phase again only adds new, still-unused object files to the link | ✅ |
+| **17.3** | **The first genuinely complete HTTP/2 response** — pure integration, no new protocol capability: `h2_fetch()` (`user/httpsget.c`, replacing 17.1.3's `h2_send_request()`) reads stream 1 to completion, HPACK-decoding the response HEADERS (against `session_slot`'s own persistent per-connection `hpack_dyn_table`) and translating the decoded field list into an HTTP/1.1-shaped status-line-plus-headers text block (`h2_synthesize_header_block()`), fed together with every DATA frame's payload through the EXISTING `resp_feed()` — the same function an HTTP/1.1 response's bytes already flow through. `fetch_one()` needed zero changes: a `fetch_result_t` is a `fetch_result_t` regardless of which wire protocol produced it, exactly the "the upper layer never needs to know" goal this phase was scoped around. A synthesized `Connection: close` line makes the *existing* keep-alive computation come out false for every h2 response, so the *existing* `reusable()`/`slot_close()` logic in `fetch()`/`fetch_one()` already closes an h2 connection after its one response, with no h2-specific code of its own — Phase 17.3 deliberately keeps to one client stream, no multiplexing, and no PRIORITY/PUSH_PROMISE/CONTINUATION/flow-control handling beyond what finishing that one stream needs; carrying a method/body other than GET over h2 is equally out of scope. `h2_text_safe()` rejects any decoded name/value containing CR/LF (or, for a name, `:`) before it's spliced into the synthesized text — the HTTP response-splitting equivalent for this translation step, since Aurora's own HPACK decoder validates wire *syntax*, not HTTP header *semantics* | Writing the QEMU test caught a real integration bug pre-commit: the first draft had `h2_fetch()` return directly with `FETCH_OK`, which skipped `fetch_request()`'s own Set-Cookie-scanning tail (shared code, positioned *after* the HTTP/1.1-vs-h2 branch) entirely — an h2 response's cookies were silently never stored. Fixed by having `h2_fetch()` return only a `closed` flag and letting the *existing* shared tail (staleness check, Set-Cookie scan via `http_find_header()`, `*out` fill) run unchanged for both paths — the same reuse discipline the rest of this phase applies everywhere else, this time caught by a real acceptance test rather than by inspection. `tools/h2_handshake_qemu.py` (extended a fourth time, now covering 17.1.1 through 17.3 in one script) sends a real response: a HEADERS frame using "Literal with Incremental Indexing" for `:status`/`content-type`/`set-cookie` (indexed names, literal values — exercising real dynamic-table growth, not just the 17.2.2 host tests' own vectors) plus one fully literal header, then three DATA frames covering every item on the roadmap's own DATA checklist in one response — a sequence of frames, a zero-length one, padding, and `END_STREAM` on the last. All 25 checks pass: the real page content and the real `:status: 200` reach Aurora's own printed output (`status=200`, the actual HTML body text, `200 OK over Aurora TCP->TLS1.3->HTTP`), the decoded Set-Cookie is stored, and the connection closes cleanly afterward with nothing further sent — the first HTTP/2 response Aurora has ever fully understood. Full existing host suite and the complete 16-script QEMU regression sweep (this phase changes shared code in `fetch_request()`, not just adds new files, so every existing script was re-run, not assumed unaffected) all pass with byte-identical HTTP/1.1 behavior | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -2956,6 +2957,125 @@ against:
   regression sweep — every `tools/*_qemu.py` script — was re-run in full
   to confirm byte-identical externally observable behavior. All pass
   unaffected.
+
+## Step 17.3 — the first genuinely complete HTTP/2 response
+
+By 17.2.2, every building block for a real HTTP/2 fetch existed: ALPN
+negotiation, the connection-establishment handshake, a generic frame
+reader, a DATA frame parser, an HPACK-compressed HEADERS builder, and a
+complete HPACK decoder (Huffman, the full static table, and a decode-side
+dynamic table). What was still missing was purely the wiring between them
+and the rest of the client. 17.3 is deliberately just that: no new
+protocol capability, only integration -- read stream 1 to completion,
+decode what comes back, and hand it to the exact same code that already
+knows how to print an HTTP/1.1 response.
+
+**The design goal, stated by the user before this phase started**: don't
+invent a separate "HTTP/2 response" representation. `struct http_response`
+(`user/http.h`) and the `g_resp`/`g_hr`/`g_body` globals it's built from
+already do everything a response needs to carry -- status, headers, body.
+An h2 response should produce exactly the same thing an HTTP/1.1 response
+does, so nothing above `fetch_request()` ever needs a protocol-specific
+branch.
+
+**How that's achieved**: `h2_synthesize_header_block()`
+(`user/httpsget.c`) translates a decoded HPACK header-field list into an
+HTTP/1.1-shaped status-line-plus-headers text block -- literally
+`"HTTP/1.1 200 (via HTTP/2)\r\n..."` followed by `"name: value\r\n"` lines
+for every regular header, ending in the usual blank line. That text,
+together with each DATA frame's payload, is fed through the pipeline's
+own existing `resp_feed()` -- the very function an HTTP/1.1 response's
+decrypted bytes already flow through. `resp_feed()` calls `http_parse()`
+(`user/libc/http.c`, unmodified) on it, which is where `g_hr.status`,
+`content_type`, `location`, `gzip`, and `keep_alive` all get populated --
+and since `http_parse()` doesn't know or care whether its input arrived
+over TCP+HTTP/1.1 or was synthesized from a decoded h2 header list, none
+of that logic needed to change. Set-Cookie parsing (`http_find_header()`
+scanning `g_resp` directly), gzip streaming (`feed_gzip()`, triggered by
+`http_parse()` seeing `content-encoding: gzip`), and the body-preview
+printing in `fetch_one()` all inherit the same "it just works" property
+for exactly the same reason.
+
+One line in the synthesized block carries real design weight: `h2_fetch()`
+always appends `Connection: close`, regardless of what the peer actually
+sent. RFC 7540 §8.1.2.2 forbids HTTP/1.1's connection-specific headers
+(`connection`, `transfer-encoding`, `keep-alive`, `upgrade`) over h2
+entirely, and this client doesn't reuse an h2 connection for a second
+stream yet (that's a natural follow-up, not attempted here) -- so forcing
+this line makes `http_parse()`'s own existing keep-alive computation come
+out false, which makes the *existing* `reusable()`/`slot_close()` logic in
+`fetch()`/`fetch_one()` already close the connection after its one
+response, with zero h2-specific code of its own. A `session_slot` gained
+exactly two new fields for this: `is_h2` (freshly determined by
+`fetch_begin()` on every connection attempt) and `h2_dyn_table`, the
+connection's own persistent HPACK decode-side dynamic table (RFC 7541
+§2.3.2 -- a fresh TCP connection always starts a fresh compression
+context, so this is re-initialized every time `is_h2` is set).
+
+**A defensive line worth calling out**: `h2_text_safe()` rejects any
+decoded header name or value containing a CR or LF byte (or, for a name
+specifically, a `:`) before it's spliced verbatim into the synthesized
+text. Aurora's own HPACK decoder (17.2.1/17.2.2) only knows how to decode
+*bytes* correctly -- it doesn't enforce HTTP's own field-name/value
+syntax, which is a decode-independent semantic layer on top. Without this
+check, a malicious server could HPACK-encode a header value containing an
+embedded `\r\n` and inject an extra header line, or corrupt the
+synthesized blank-line boundary, into text this client's own trusted
+HTTP/1.1 parser is about to consume -- the HTTP response-splitting
+vulnerability class, reproduced at the translation boundary between two
+representations Aurora itself controls. Any response failing this check
+is rejected outright (decode failure, matching hpack_decode.h's own "a
+malformed block is unrecoverable for the rest of the connection"
+contract), not silently sanitized.
+
+Verified two ways:
+- **Writing the acceptance test caught a real bug before this ever
+  shipped**: the first draft had `h2_fetch()` fill `*out` and return
+  `FETCH_OK` directly, which skipped straight past `fetch_request()`'s
+  own Set-Cookie-scanning tail -- code that's *shared* between the
+  HTTP/1.1 and h2 paths, but only runs *after* the branch that decides
+  which one to take. An h2 response's Set-Cookie header was silently
+  never stored. The QEMU test below caught this immediately (one failing
+  check out of 25). Fixed by having `h2_fetch()` return only a `closed`
+  flag and restructuring `fetch_request()` so the *existing* shared tail
+  (staleness check, Set-Cookie scan, `*out` fill) runs unchanged
+  regardless of which branch executed -- the same "reuse, don't
+  duplicate" discipline this whole phase is built on, this time enforced
+  by a real integration test rather than caught by inspection.
+- **QEMU (`tools/h2_handshake_qemu.py`, extended a fourth time)**: the
+  same real, independent, from-scratch Python HTTP/2+HPACK server this
+  script has used since 17.1.1 now sends back a REAL response instead of
+  a single indexed byte: a HEADERS frame using "Literal Header Field with
+  Incremental Indexing" (RFC 7541 §6.2.1) for `:status`, `content-type`,
+  and `set-cookie` -- each an indexed NAME with a literal value, so
+  Aurora's decode-side dynamic table genuinely grows during this test,
+  not just against the 17.2.2 host tests' own RFC vectors -- plus one
+  fully literal name+value header, followed by THREE DATA frames chosen
+  to cover every item on this phase's own DATA checklist in one response:
+  a real multi-frame sequence, a zero-length frame in the middle, padding
+  on the last frame, and `END_STREAM` on it. All 25 checks pass: Aurora's
+  own log shows the HEADERS frame HPACK-decoded (4 fields), the
+  synthesized `HTTP/1.1 200 (via HTTP/2)` status line, `status=200`
+  actually reached, the real page text from the DATA frames (not a
+  placeholder), the decoded Set-Cookie stored, and the familiar `200 OK
+  over Aurora TCP->TLS1.3->HTTP` closing line -- the exact same output
+  shape an HTTP/1.1 fetch produces. The server independently confirms the
+  connection closes cleanly afterward with nothing further sent, proving
+  no second stream or keep-alive reuse was attempted. Because this phase
+  changes *shared* code in `fetch_request()` (not just new, still-unused
+  files, as 17.2.1/17.2.2 were), the full 16-script QEMU regression sweep
+  was re-run in full rather than assumed unaffected -- all pass with
+  byte-identical HTTP/1.1 behavior.
+
+With this, Aurora's transport stack finally has the shape the user
+described at the start of the 17.x series: TLS → ALPN → HTTP/1.1 *or*
+HTTP/2, converging on the same `http_response` the rest of the client
+(gzip, cookies, redirects, keep-alive, POST) already knows how to use.
+Deliberately still out of scope, left for later, natural follow-up
+phases: an h2 request carrying a method other than GET or a request body,
+reusing one h2 connection across more than one stream, and any of
+PRIORITY/PUSH_PROMISE/CONTINUATION/real flow-control -- "HTTP/2 v2"
+territory this phase never needed for its own goal.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 
