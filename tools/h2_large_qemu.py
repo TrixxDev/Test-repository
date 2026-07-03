@@ -245,12 +245,19 @@ def start_server(port, certfile, keyfile, result, body_len, repeat, wait_s):
             # which then makes Aurora's own next write fail outright -- not
             # a real Aurora bug, but an artifact of this test's own server
             # closing too early (found the hard way during this phase).
-            # Keep draining whatever Aurora sends back until it goes idle.
+            # Keep draining whatever Aurora sends back until it goes idle --
+            # parsed as real H2 frames (not just discarded raw bytes), so a
+            # REPEAT=1 run (5 MB/20 MB) still captures the connection-level
+            # WINDOW_UPDATEs Aurora sends throughout the one response, the
+            # same way recv_next_headers() already does between responses
+            # when REPEAT >= 2.
             tls.settimeout(max(wait_s - 20, 30))
             try:
                 while True:
-                    d = tls.recv(4096)
-                    if not d: break
+                    wtype, _wflags, wstream, wpayload = recv_h2_frame()
+                    if wtype == H2_TYPE_WINDOW_UPDATE and len(wpayload) == 4:
+                        increment = ((wpayload[0] & 0x7F) << 24) | (wpayload[1] << 16) | (wpayload[2] << 8) | wpayload[3]
+                        result["window_updates"].append((wstream, increment))
             except (socket.timeout, OSError):
                 pass
         except (socket.timeout, OSError, ssl.SSLError) as e:
