@@ -104,7 +104,21 @@ void tcpsock_close(vfs_node_t *node)
 }
 
 /* recv: block (interrupts on so the GUI keeps running) until data arrives, the
- * peer closes (EOF -> 0), or the idle timeout elapses. */
+ * peer closes (EOF -> 0), or the idle timeout elapses.
+ *
+ * Phase 17.5.2 raised the idle timeout from 10s to 60s: large-response
+ * stress testing found a real bug here, not just a size limit. A read()
+ * returning 0 is indistinguishable to every caller from a genuine peer
+ * close (see e.g. user/httpsget.c's h2_fetch(), which folds both into
+ * "connection closed" and quietly accepts whatever body arrived so far as
+ * the complete response) -- but this function was declaring that same 0
+ * after a mere 10 seconds of no NEW bytes on a connection that was still
+ * fully TCP_ESTABLISHED, wrongly turning "still connected, just slow right
+ * now" into a silently truncated response. A 1 MB transfer over Aurora's
+ * own from-scratch TLS record decryption reproduced this reliably even
+ * though the peer never stopped sending and the connection never actually
+ * closed. 60s is still a real backstop against a truly wedged peer -- just
+ * one that no longer fires during ordinary large-response traffic. */
 static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out)
 {
     (void)off;
@@ -112,7 +126,7 @@ static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out)
     if (!t || t->h < 0)
         return -1;
     __asm__ volatile("sti");
-    uint64_t dl = net_now_ms() + 10000;
+    uint64_t dl = net_now_ms() + 60000;
     for (;;) {
         net_poll();
         int g = tcp_recv(t->h, out, size);

@@ -238,6 +238,15 @@
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
 #define MAX_PATHS     16
+#define REPEAT_MAX    100000          /* --repeat sanity cap (Phase 17.5.2) -- Aurora's shell caps a
+                                       * typed command to ARG_MAX (16) tokens (see user/sh.c), which
+                                       * makes "one token per fetch" unusable for testing hundreds of
+                                       * sequential requests over one h2 connection; --repeat N instead
+                                       * loops fetch_one() N times over the SAME path from a single typed
+                                       * command, reusing whatever session_slot the first iteration opened
+                                       * exactly like repeating that path in `paths[]` already would. The
+                                       * cap only guards against a fat-fingered digit, not a real limit
+                                       * this client is designed around. */
 #define AUTH_TOKEN_MAX  512          /* raw bearer token or "user:pass" length cap (Phase 16.2) */
 #define AUTH_HEADER_MAX (8 + 4 * ((AUTH_TOKEN_MAX + 2) / 3))  /* "Basic "/"Bearer " + base64 worst case */
 #define FETCH_REUSE_MAX_BODY (64u * 1024u)  /* don't bother draining a response this big just to reuse the connection */
@@ -681,9 +690,20 @@ static int resp_done(void) { return g_target >= 0 && g_total >= g_target; }
 #define H2_HANDSHAKE_FRAME_CAP 64   /* safety cap against a pathological/buggy peer never
                                      * sending the two frames this is waiting for -- the
                                      * same role MAX_REDIRECTS plays elsewhere in this file */
-#define H2_RESPONSE_FRAME_CAP 256  /* looser than H2_HANDSHAKE_FRAME_CAP -- a real response
-                                    * body can legitimately take many more read()s/frames
-                                    * than the two-frame handshake ever needs */
+#define H2_RESPONSE_FRAME_CAP 65536 /* looser than H2_HANDSHAKE_FRAME_CAP -- a real response
+                                     * body can legitimately take many more read()s/frames
+                                     * than the two-frame handshake ever needs. Phase 17.5.2
+                                     * found this at its original value of 256: Aurora's own
+                                     * guest TCP read() only returns roughly one segment's
+                                     * worth of bytes per call (observed ~1300-1400 bytes),
+                                     * so 256 reads silently exhausted partway through a
+                                     * response as small as ~340000 bytes -- comfortably
+                                     * inside what a real page or download can be, nowhere
+                                     * near the pathological-peer case this cap exists to
+                                     * guard against. Raised with real headroom for the
+                                     * 20 MB responses that phase stress-tests; see
+                                     * h2_fetch()'s own comment on why hitting this is now
+                                     * treated as failure, never a truncated success. */
 
 /* Flow control (Phase 17.4.3, RFC 7540 §6.9). RFC 7540 §6.5.2's default
  * SETTINGS_INITIAL_WINDOW_SIZE -- what's in effect, for BOTH the
@@ -892,11 +912,15 @@ static int h2_maybe_send_window_update(session_slot *slot, uint32_t stream_id, i
  * connection closing cleanly -- and, since 17.4.2, the signal
  * fetch_request() uses to allow reusing this connection for the next
  * request), 0 if the connection closed first without one, or -1 on any
- * protocol/transport failure or malformed HPACK (a diagnostic has already
- * been printed in every case; per hpack_decode.h's own contract, a
- * malformed header block is unrecoverable for the rest of this
- * connection, so -1 here always means "give up on it entirely," not
- * "retry this one request"). */
+ * protocol/transport failure, malformed HPACK, or H2_RESPONSE_FRAME_CAP
+ * being reached while the peer was still actively sending (a diagnostic
+ * has already been printed in every case; per hpack_decode.h's own
+ * contract, a malformed header block is unrecoverable for the rest of this
+ * connection, so -1 here always means "give up on it entirely," not "retry
+ * this one request"). Phase 17.5.2: hitting the frame cap used to be
+ * indistinguishable from a clean peer-initiated close and returned 0 --
+ * silently handing the caller a truncated body as if it were the whole
+ * response. */
 static int h2_fetch(session_slot *slot, const struct url *u,
                     const char *method, const uint8_t *body, int bodylen, const char *content_type)
 {
@@ -934,6 +958,18 @@ static int h2_fetch(session_slot *slot, const struct url *u,
 
     h2_frame_reader_init(&g_h2_reader);
     int got_headers = 0, stream_ended = 0;
+    /* Phase 17.5.2 fix: distinguishes "the loop exited because the peer
+     * genuinely closed the connection" (read() returning <= 0, the
+     * legitimate close-without-END_STREAM case this function's own doc
+     * comment describes) from "the loop exited only because
+     * H2_RESPONSE_FRAME_CAP ran out while the peer was still actively
+     * sending" -- before this fix both were folded into the same
+     * `return stream_ended` (0), silently handing the caller a truncated
+     * body dressed up as a clean 200 OK. Starts true; cleared on every
+     * intentional break below, so it's only still true if the loop instead
+     * exited via its own `reads < H2_RESPONSE_FRAME_CAP` condition going
+     * false. */
+    int gave_up = 1;
 
     for (int reads = 0; !stream_ended && reads < H2_RESPONSE_FRAME_CAP; reads++) {
         const uint8_t *rec; size_t rl; int cc;
@@ -1046,14 +1082,25 @@ static int h2_fetch(session_slot *slot, const struct url *u,
                 }
             }
         }
-        if (stream_ended) break;
+        if (stream_ended) { gave_up = 0; break; }
         if (cc < 0) { fprintf(2, "[httpsget] h2: malformed TLS record while reading the response\n"); return -1; }
         int rn = read(slot->fd, g_scratch, sizeof g_scratch);
-        if (rn <= 0) break;   /* connection closed -- treat whatever arrived as the final response */
+        if (rn <= 0) { gave_up = 0; break; }   /* connection closed -- treat whatever arrived as the final response */
         tls_reader_feed(&slot->reader, g_scratch, (size_t)rn);
     }
 
     if (!got_headers) { fprintf(2, "[httpsget] h2: connection closed before any response headers arrived\n"); return -1; }
+    if (gave_up) {
+        /* Genuinely different from a peer closing without END_STREAM
+         * (above): the connection was still open and still sending -- this
+         * is Aurora giving up on its own safety limit, not the peer ending
+         * the exchange. Reporting this as a truncated "200 OK" would be
+         * silent data corruption from the caller's point of view. */
+        fprintf(2, "[httpsget] h2: gave up on stream %u after %d reads without END_STREAM "
+                   "(H2_RESPONSE_FRAME_CAP reached while the server was still sending)\n",
+               (unsigned)stream_id, H2_RESPONSE_FRAME_CAP);
+        return -1;
+    }
     printf("[httpsget] h2: stream %u complete (status=%d, %d body bytes)\n",
           (unsigned)stream_id, g_hr.status, g_total - g_hr.header_len);
     return stream_ended;
@@ -1682,20 +1729,21 @@ static int method_body_bearing(const char *m)
 int main(int argc, char **argv)
 {
     const char *usage =
-        "usage: httpsget [--alpn] [--post] [--auth-basic user:pass | --auth-bearer token]\n"
+        "usage: httpsget [--alpn] [--repeat N] [--post] [--auth-basic user:pass | --auth-bearer token]\n"
         "                <host> <path> [path...] [now_unix]\n"
-        "       httpsget [--alpn] [--auth-basic user:pass | --auth-bearer token] --post <host> <path> <body> [now_unix]\n"
-        "       httpsget [--alpn] [--auth-basic user:pass | --auth-bearer token] --post-multipart <host> <path>\n"
+        "       httpsget [--alpn] [--repeat N] [--auth-basic user:pass | --auth-bearer token] --post <host> <path> <body> [now_unix]\n"
+        "       httpsget [--alpn] [--repeat N] [--auth-basic user:pass | --auth-bearer token] --post-multipart <host> <path>\n"
         "                <field=value | field=@localfile> [...] [now_unix]\n"
-        "       httpsget [--alpn] [--auth-basic user:pass | --auth-bearer token] --method <GET|HEAD|OPTIONS|DELETE>\n"
+        "       httpsget [--alpn] [--repeat N] [--auth-basic user:pass | --auth-bearer token] --method <GET|HEAD|OPTIONS|DELETE>\n"
         "                <host> <path> [path...] [now_unix]\n"
-        "       httpsget [--alpn] [--auth-basic user:pass | --auth-bearer token] --method <POST|PUT|PATCH>\n"
+        "       httpsget [--alpn] [--repeat N] [--auth-basic user:pass | --auth-bearer token] --method <POST|PUT|PATCH>\n"
         "                <host> <path> <body> [now_unix]\n";
     const char *method = "GET";
     const uint8_t *post_body = 0;
     int post_bodylen = 0;
     const char *content_type = 0;
     int is_multipart = 0;
+    int repeat = 1;
     int argi = 1;
 
     /* Leading flags, any order: --post, --post-multipart (Phase 16.4), or
@@ -1703,7 +1751,11 @@ int main(int argc, char **argv)
      * supported spelling, kept because existing scripts (and this client's
      * own regression suite) already use it -- and at most one of
      * --auth-basic / --auth-bearer (Phase 16.2). Each credential value is a
-     * single whitespace-free CLI token -- Aurora's shell has no quoting. */
+     * single whitespace-free CLI token -- Aurora's shell has no quoting.
+     * --repeat N (Phase 17.5.2) re-runs the fetch loop below N times over
+     * the same path(s), letting one short typed command drive hundreds of
+     * sequential requests -- see REPEAT_MAX's comment for why this exists
+     * as its own flag instead of just typing more path arguments. */
     for (;;) {
         if (argi < argc && strcmp(argv[argi], "--post") == 0) {
             method = "POST"; argi++; continue;
@@ -1725,6 +1777,15 @@ int main(int argc, char **argv)
         }
         if (argi < argc && strcmp(argv[argi], "--alpn") == 0) {
             g_alpn_enabled = 1; argi++; continue;
+        }
+        if (argi < argc && strcmp(argv[argi], "--repeat") == 0) {
+            argi++;
+            if (argi >= argc) { fprintf(2, "%s", usage); return 1; }
+            unsigned long r = parse_ul(argv[argi]);
+            if (r < 1) r = 1;
+            if (r > REPEAT_MAX) r = REPEAT_MAX;
+            repeat = (int)r;
+            argi++; continue;
         }
         if (argi < argc && strcmp(argv[argi], "--auth-basic") == 0) {
             argi++;
@@ -1858,11 +1919,14 @@ int main(int argc, char **argv)
         printf("[httpsget] %d paths from %s  (trust store: %u roots)\n", npaths, host, (unsigned)CA_ROOTS_N);
 
     int last_status = 0;
-    for (int pi = 0; pi < npaths; pi++) {
-        int st = fetch_one(host, paths[pi], now, npaths > 1 ? paths[pi] : 0,
-                           method, post_body, post_bodylen, content_type);
-        if (st < 0) { close_all_slots(); return 1; }
-        last_status = st;
+    for (int rep = 0; rep < repeat; rep++) {
+        if (repeat > 1) printf("[httpsget] ---- repeat %d/%d ----\n", rep + 1, repeat);
+        for (int pi = 0; pi < npaths; pi++) {
+            int st = fetch_one(host, paths[pi], now, npaths > 1 ? paths[pi] : 0,
+                               method, post_body, post_bodylen, content_type);
+            if (st < 0) { close_all_slots(); return 1; }
+            last_status = st;
+        }
     }
     close_all_slots();
 
