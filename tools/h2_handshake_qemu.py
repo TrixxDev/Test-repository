@@ -484,7 +484,8 @@ def main():
             ("client log shows the Set-Cookie header (decoded via HPACK) was stored",
              "cookie stored: h2test=yes" in log),
             ("client log shows the final 200 OK line", "200 OK over Aurora TCP->TLS1.3->HTTP" in log),
-            ("server confirms nothing further arrived after the response (no h2 connection reuse yet)",
+            ("server confirms nothing further arrived after the response (this test only fetches one path -- "
+             "see tools/h2_reuse_qemu.py for connection-reuse coverage, Phase 17.4.2)",
              result.get("extra_after_response") == b""),
             ("no error was recorded server-side", "error" not in result),
         ]

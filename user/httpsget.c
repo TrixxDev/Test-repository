@@ -75,10 +75,10 @@
  * Together these can decode any real HEADERS frame a real server sends,
  * once Phase 17.3 (below) actually calls them on the live response path.
  *
- * The first real HTTP/2 response (Phase 17.3): `h2_fetch()` reads stream 1
- * to completion -- one HEADERS frame (HPACK-decoded via `slot`'s own
- * per-connection dynamic table) optionally followed by DATA frames, until
- * the server's own END_STREAM arrives. The decoded header list is
+ * The first real HTTP/2 response (Phase 17.3): `h2_fetch()` reads one
+ * stream to completion -- one HEADERS frame (HPACK-decoded via `slot`'s
+ * own per-connection dynamic table) optionally followed by DATA frames,
+ * until the server's own END_STREAM arrives. The decoded header list is
  * translated into an HTTP/1.1-shaped status-line-plus-headers text block
  * (`h2_synthesize_header_block()`) and fed, together with each DATA
  * frame's payload, through the EXISTING `resp_feed()` -- the same function
@@ -86,14 +86,31 @@
  * streaming, and `struct http_response` population all just work,
  * unchanged, for an h2 response too. `fetch_one()` itself needed zero
  * changes: it still only ever sees a `fetch_result_t`, never anything
- * protocol-specific. Deliberately still just one stream, no multiplexing,
- * and no PRIORITY/PUSH_PROMISE/CONTINUATION/flow-control handling beyond
- * what's needed to read that one stream -- an h2 connection is always
- * closed after its one response (a synthesized "Connection: close" line
- * makes the existing keep-alive/reuse logic below do that on its own, with
- * no h2-specific code of its own); carrying a request method/body other
- * than GET over h2 is equally out of scope. Both are natural follow-ups,
- * not attempted here.
+ * protocol-specific. Deliberately still just one stream active at a time,
+ * no multiplexing, and no PRIORITY/PUSH_PROMISE/CONTINUATION/flow-control
+ * handling beyond what's needed to read one stream to completion.
+ *
+ * Request bodies (Phase 17.4.1): `h2_fetch()` sends whatever `method`/
+ * `body`/`bodylen`/`content_type` `fetch_request()` was given -- the same
+ * 16.5 `--method` verbs the HTTP/1.1 path accepts, not just GET -- with
+ * Content-Type/Content-Length added by `h2_build_headers()` and the body
+ * itself following as one DATA frame.
+ *
+ * Connection reuse (Phase 17.4.2): an h2 connection is no longer closed
+ * after its one response. `session_slot.next_h2_stream` opens stream 1,
+ * 3, 5, ... in sequence (RFC 7540 §5.1.1) for however many requests land
+ * on the same origin, `session_slot.h2_dyn_table` (already persistent per
+ * connection since 17.3) now genuinely spans more than one of them, and
+ * `g_hr.keep_alive` is set directly from whether `h2_fetch()`'s own
+ * stream actually completed with END_STREAM -- not from a synthesized
+ * "Connection: close" line anymore, since HTTP/1.1's keep-alive
+ * computation doesn't map onto h2 semantics cleanly (h2 framing needs no
+ * Content-Length the way that computation assumes one). The EXISTING
+ * `reusable()`/`slot_close()` logic in `fetch()`/`fetch_one()` still does
+ * the deciding, unchanged -- it's just being told the truth about h2 now
+ * instead of a hardcoded "never." Still just one stream at a time, in
+ * sequence, never multiplexed; multiplexing, PRIORITY, CONTINUATION, and
+ * PUSH_PROMISE remain out of scope.
  *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
@@ -313,6 +330,12 @@ typedef struct {
                                      * fetch_begin() every time a fresh h2 connection is
                                      * established, since a new TCP connection always starts
                                      * a new compression context with nothing carried over. */
+    uint32_t    next_h2_stream;     /* Phase 17.4.2: the stream ID this connection's NEXT
+                                     * h2_fetch() call will open -- 1, 3, 5, ... in sequence
+                                     * (RFC 7540 §5.1.1: client-initiated streams are odd and
+                                     * strictly increasing). Reset to 1 by fetch_begin() every
+                                     * time a fresh h2 connection is established, same as
+                                     * h2_dyn_table above. */
 } session_slot;
 static session_slot g_slots[TLS_SESSION_SLOTS];
 static uint64_t     g_slot_clock;
@@ -366,11 +389,25 @@ static int same_origin(const struct url *a, const struct url *b)
 }
 
 /* May the connection this response arrived on be reused for another request?
- * Server-offered keep-alive is necessary but not sufficient: a body without a
- * determinate length (no Content-Length, or chunked) can only be known to
- * have ended when the connection closes, which defeats reuse; and a body
- * that's merely very large isn't worth draining to the end just to save one
+ * Server-offered keep-alive is necessary but not sufficient: for HTTP/1.1, a
+ * body without a determinate length (no Content-Length, or chunked) can only
+ * be known to have ended when the connection closes, which defeats reuse
+ * (http_parse() already builds this into hr->keep_alive itself -- it's never
+ * true when content_length is -1 or the body is chunked); and a body that's
+ * merely very large isn't worth draining to the end just to save one
  * handshake.
+ *
+ * That size cap doesn't apply the same way to h2 (Phase 17.4.2): h2_fetch()
+ * always reads a response to its own real end (END_STREAM) as part of
+ * getting it AT ALL -- there's no separate "drain the rest, or don't"
+ * choice the cap exists to make for HTTP/1.1, and h2 framing doesn't need
+ * Content-Length in the first place (a real h2 response commonly omits it,
+ * relying on END_STREAM instead). `hr->content_length < 0` with
+ * `hr->keep_alive` already true only happens for an h2 response (set
+ * directly by fetch_request()'s h2 branch from h2_fetch()'s own
+ * end-of-stream signal, never by http_parse()) -- treated as reusable with
+ * no size check, since the "cost" the cap is weighing against was already
+ * paid in full just to read the response.
  *
  * `req_method` (Phase 16.5) matters because a HEAD response's Content-Length,
  * if present, describes what a GET would have returned, not what actually
@@ -380,8 +417,10 @@ static int same_origin(const struct url *a, const struct url *b)
  * FETCH_REUSE_MAX_BODY. */
 static int reusable(const struct http_response *hr, const char *req_method)
 {
+    if (!hr->keep_alive) return 0;
+    if (hr->content_length < 0) return 1;
     unsigned effective_len = strcmp(req_method, "HEAD") == 0 ? 0 : (unsigned)hr->content_length;
-    return hr->keep_alive && effective_len <= FETCH_REUSE_MAX_BODY;
+    return effective_len <= FETCH_REUSE_MAX_BODY;
 }
 
 /* Find the slot already bound to `u`'s origin, or bind a fresh one: an
@@ -495,7 +534,12 @@ static void build_request(char *req, int *rn, const struct url *u, uint64_t now,
 typedef struct {
     struct http_response hr;
     int rlen;             /* bytes captured into g_resp (<= sizeof g_resp) */
-    int closed;           /* did the peer actually close the TCP connection this exchange */
+    int closed;           /* HTTP/1.1: did the peer actually close the TCP connection this
+                           * exchange. h2 (Phase 17.4.2): did this stream reach a definitive
+                           * end (END_STREAM) -- usually while the TCP connection stays open
+                           * for more streams; a different question with the same "did we
+                           * get the *whole* response" answer fetch_one()'s truncated-preview
+                           * check needs, which is the only thing this field is actually for. */
 } fetch_result_t;
 
 /* Response accumulation state for the in-flight fetch_request() call. Reset by
@@ -660,14 +704,15 @@ static int h2_text_safe(const uint8_t *s, size_t len, int is_name)
  * handful of HTTP/1.1 connection-specific headers RFC 7540 §8.1.2.2
  * forbids sending over h2 at all (connection, transfer-encoding,
  * keep-alive, upgrade) -- skipped rather than trusted, since forwarding
- * one from a nonconformant peer could desync the reused chunked/keep-alive
- * logic downstream. A synthesized "Connection: close" line is always
- * appended instead, so http_parse()'s own keep-alive computation (reused
- * completely unchanged) naturally comes out false -- Phase 17.3
- * deliberately doesn't reuse an h2 connection for a second stream/request
- * (see docs/SECURITY.md, Step 17.3), and this one line is what makes the
- * EXISTING reusable()/slot_close() logic in fetch()/fetch_one() already do
- * the right thing with no h2-specific code of its own.
+ * one from a nonconformant peer could desync the reused chunked logic
+ * downstream. Unlike before Phase 17.4.2, no synthesized "Connection:
+ * close" line is added -- http_parse()'s own keep-alive computation
+ * doesn't map onto h2 semantics cleanly anyway (h2 framing doesn't need
+ * Content-Length the way that computation assumes), so fetch_request()'s
+ * h2 branch sets g_hr.keep_alive itself, directly from whether this
+ * stream's own END_STREAM actually arrived (see h2_fetch()'s own return
+ * value) -- a decision this function has no way to make on its own,
+ * since it only ever sees one HEADERS frame at a time.
  *
  * Returns the header block's length (including the trailing blank line),
  * or -1 if it wouldn't fit `cap`, :status is missing/duplicated/
@@ -675,7 +720,7 @@ static int h2_text_safe(const uint8_t *s, size_t len, int is_name)
  * fails h2_text_safe(). */
 static int h2_synthesize_header_block(char *out, int cap, const hpack_header_field *fields, size_t count)
 {
-    if (cap < 64) return -1;   /* room for the fixed-shape status line + "Connection: close" trailer below */
+    if (cap < 64) return -1;   /* room for the fixed-shape status line below */
 
     int status = -1;
     for (size_t i = 0; i < count; i++) {
@@ -715,15 +760,18 @@ static int h2_synthesize_header_block(char *out, int cap, const hpack_header_fie
         out[n++] = '\r'; out[n++] = '\n';
     }
 
-    if (n + 20 >= cap) return -1;
-    app(out, &n, "Connection: close\r\n\r\n");
+    if (n + 2 >= cap) return -1;
+    app(out, &n, "\r\n");
     return n;
 }
 
-/* Send stream 1's request (Phase 17.1.3's h2_send_request(), extended --
- * Phase 17.4.1 generalizes it from a hardcoded GET to any of the 16.5
- * --method verbs, with a request body for the body-bearing ones) and read
- * the full response -- Phase 17.3.
+/* Send one request (Phase 17.1.3's h2_send_request(), extended -- 17.4.1
+ * generalizes it from a hardcoded GET to any of the 16.5 --method verbs
+ * with a request body for the body-bearing ones; 17.4.2 generalizes it
+ * from a hardcoded stream 1 to `slot->next_h2_stream`, so a second
+ * request on the SAME connection opens stream 3, not another stream 1 --
+ * RFC 7540 §5.1.1: client-initiated streams are odd, strictly increasing)
+ * and read the full response -- Phase 17.3.
  *
  * `method` is sent as-is (matching the userspace client's own
  * KNOWN_METHODS, 16.5); `body`/`bodylen` (0/0 for a bodyless request) and
@@ -735,45 +783,55 @@ static int h2_synthesize_header_block(char *out, int cap, const hpack_header_fie
  * 4096-byte POST_BODY_MAX cap comfortably fits in a single frame (well
  * under H2_FRAME_PAYLOAD_MAX), so there's no need to split it.
  *
- * Reads frames on stream 1 until the server's own END_STREAM arrives (on a
- * body-less HEADERS, or the final DATA frame) or the connection closes.
- * HEADERS is HPACK-decoded (`slot`'s own persistent dynamic table, so a
- * peer using "Literal with Incremental Indexing" or an indexed dynamic
- * entry works correctly) and translated via h2_synthesize_header_block()
- * into an HTTP/1.1-shaped text block fed through the EXISTING resp_feed()
- * -- so Set-Cookie parsing, gzip streaming, and Content-Type/Location
- * detection all just work, unchanged, for an h2 response too. DATA frame
- * payloads (padding-aware, via h2_data_parse()) are fed through resp_feed()
- * the same way. This is deliberately still just ONE client stream, never
- * multiplexed, with no PRIORITY/PUSH_PROMISE/CONTINUATION/flow-control
- * handling beyond what's needed to read one stream to completion --
- * "HTTP/2 v2" territory this phase intentionally leaves alone.
+ * Reads frames on this stream until the server's own END_STREAM arrives
+ * (on a body-less HEADERS, or the final DATA frame) or the connection
+ * closes. HEADERS is HPACK-decoded (`slot`'s own persistent dynamic
+ * table -- persistent across requests on this same connection too, now
+ * that 17.4.2 lets one connection carry more than one, so a peer using
+ * "Literal with Incremental Indexing" on request 2 to reference an entry
+ * request 1 added works correctly) and translated via
+ * h2_synthesize_header_block() into an HTTP/1.1-shaped text block fed
+ * through the EXISTING resp_feed() -- so Set-Cookie parsing, gzip
+ * streaming, and Content-Type/Location detection all just work, unchanged,
+ * for an h2 response too. DATA frame payloads (padding-aware, via
+ * h2_data_parse()) are fed through resp_feed() the same way. This is
+ * deliberately still just ONE active stream at a time, never multiplexed
+ * (17.4.2 lets a connection carry a *sequence* of streams, not concurrent
+ * ones), with no PRIORITY/PUSH_PROMISE/CONTINUATION/flow-control handling
+ * beyond what's needed to read one stream to completion -- "HTTP/2 v2"
+ * territory this phase intentionally leaves alone.
  *
  * Fills g_hr/g_resp/g_body exactly like the HTTP/1.1 path's own read loop
- * does (via the same resp_feed()), but does NOT fill `out` itself or scan
- * for Set-Cookie -- that's fetch_request()'s shared tail, run for this
- * path too, so an h2 response's cookies are stored exactly the same way
- * an HTTP/1.1 response's are, with no separate code path of its own.
+ * does (via the same resp_feed()), but does NOT fill `out`, scan for
+ * Set-Cookie, or set g_hr.keep_alive itself -- that's fetch_request()'s
+ * shared tail, run for this path too, so an h2 response's cookies are
+ * stored exactly the same way an HTTP/1.1 response's are, with no
+ * separate code path of its own.
  *
  * Returns 1 if the server's own END_STREAM arrived (a definitive "this
  * response is complete" signal, the h2 equivalent of an HTTP/1.1
- * connection closing cleanly), 0 if the connection closed first without
- * one, or -1 on any protocol/transport failure or malformed HPACK (a
- * diagnostic has already been printed in every case; per hpack_decode.h's
- * own contract, a malformed header block is unrecoverable for the rest of
- * this connection, so -1 here always means "give up on it entirely," not
+ * connection closing cleanly -- and, since 17.4.2, the signal
+ * fetch_request() uses to allow reusing this connection for the next
+ * request), 0 if the connection closed first without one, or -1 on any
+ * protocol/transport failure or malformed HPACK (a diagnostic has already
+ * been printed in every case; per hpack_decode.h's own contract, a
+ * malformed header block is unrecoverable for the rest of this
+ * connection, so -1 here always means "give up on it entirely," not
  * "retry this one request"). */
 static int h2_fetch(session_slot *slot, const struct url *u,
                     const char *method, const uint8_t *body, int bodylen, const char *content_type)
 {
     resp_reset(method);
 
+    uint32_t stream_id = slot->next_h2_stream;
+    slot->next_h2_stream += 2;
+
     static const char *ua = "Aurora-httpsget/0.3";
     const char *ct = bodylen > 0 ? (content_type ? content_type : "application/x-www-form-urlencoded") : 0;
     size_t ctlen = ct ? strlen(ct) : 0;
 
     uint8_t reqbuf[H2_FRAME_HEADER_LEN + 1024 + H2_FRAME_HEADER_LEN + POST_BODY_MAX];
-    int rn = h2_build_headers(reqbuf, sizeof reqbuf, 1,
+    int rn = h2_build_headers(reqbuf, sizeof reqbuf, stream_id,
                               method, (size_t)strlen(method),
                               u->host, (size_t)strlen(u->host),
                               u->path, (size_t)strlen(u->path),
@@ -782,7 +840,7 @@ static int h2_fetch(session_slot *slot, const struct url *u,
     if (rn < 0) { fprintf(2, "[httpsget] h2: could not build the HEADERS frame\n"); return -1; }
 
     if (bodylen > 0) {
-        int dn = h2_data_build(reqbuf + rn, sizeof reqbuf - (size_t)rn, 1, body, (size_t)bodylen, 1 /* end_stream */);
+        int dn = h2_data_build(reqbuf + rn, sizeof reqbuf - (size_t)rn, stream_id, body, (size_t)bodylen, 1 /* end_stream */);
         if (dn < 0) { fprintf(2, "[httpsget] h2: could not build the request body's DATA frame\n"); return -1; }
         rn += dn;
     }
@@ -790,8 +848,8 @@ static int h2_fetch(session_slot *slot, const struct url *u,
     int sl = tls_conn_send_app(&slot->conn, reqbuf, (size_t)rn, g_scratch, sizeof g_scratch);
     if (sl < 0) { fprintf(2, "[httpsget] h2: could not seal the request\n"); return -1; }
     if (write_all(slot->fd, g_scratch, sl) != 0) { fprintf(2, "[httpsget] h2: write failed\n"); return -1; }
-    printf("[httpsget] h2: HEADERS%s frame sent (stream 1, %s %s)\n",
-          bodylen > 0 ? "+DATA" : "", method, u->path);
+    printf("[httpsget] h2: HEADERS%s frame sent (stream %u, %s %s)\n",
+          bodylen > 0 ? "+DATA" : "", (unsigned)stream_id, method, u->path);
 
     h2_frame_reader_init(&g_h2_reader);
     int got_headers = 0, stream_ended = 0;
@@ -803,27 +861,38 @@ static int h2_fetch(session_slot *slot, const struct url *u,
             int rr = tls_conn_recv_app(&slot->conn, rec, rl, g_plain, sizeof g_plain, &pl);
             if (rr == TLS_CONN_ERR_ALERT || rr < 0) { stream_ended = 1; break; }
 
+            /* Drain the WHOLE decrypted chunk even after stream_ended
+             * becomes true partway through it (17.4.2): once this
+             * connection can be reused, any trailing bytes left unfed
+             * here -- e.g. a connection-level WINDOW_UPDATE the server
+             * sent right behind its response -- would otherwise be
+             * silently lost (g_plain gets overwritten on the next
+             * decrypt). Harmless before 17.4.2, since the connection was
+             * always closed moments later regardless; a real bug once
+             * the connection lives on to carry a second request. */
             size_t pos = 0;
-            while (!stream_ended && pos < pl) {
+            while (pos < pl) {
                 int fed = h2_frame_reader_feed(&g_h2_reader, g_plain + pos, pl - pos);
                 if (fed < 0) { fprintf(2, "[httpsget] h2: response frame too large (frame size error)\n"); return -1; }
                 pos += (size_t)fed;
 
                 h2_frame_header fh; const uint8_t *payload; size_t payload_len;
                 while (h2_frame_reader_next(&g_h2_reader, &fh, &payload, &payload_len) == 1) {
+                    if (stream_ended) continue;   /* already complete -- keep draining, but stop acting on frames */
+
                     if (fh.type == H2_TYPE_GOAWAY) {
                         fprintf(2, "[httpsget] h2: server sent GOAWAY while reading the response\n");
                         return -1;
                     }
-                    if (fh.stream_id != 1) continue;   /* not our stream -- irrelevant */
+                    if (fh.stream_id != stream_id) continue;   /* not our stream -- irrelevant */
                     if (fh.type == H2_TYPE_RST_STREAM) {
-                        fprintf(2, "[httpsget] h2: server reset stream 1\n");
+                        fprintf(2, "[httpsget] h2: server reset stream %u\n", (unsigned)stream_id);
                         return -1;
                     }
 
                     if (fh.type == H2_TYPE_HEADERS) {
                         if (got_headers) {
-                            fprintf(2, "[httpsget] h2: a second HEADERS on stream 1 (trailers) is not supported\n");
+                            fprintf(2, "[httpsget] h2: a second HEADERS on stream %u (trailers) is not supported\n", (unsigned)stream_id);
                             return -1;
                         }
                         if (!(fh.flags & H2_FLAG_END_HEADERS)) {
@@ -845,7 +914,7 @@ static int h2_fetch(session_slot *slot, const struct url *u,
                         resp_feed((const uint8_t*)hdrtext, htn);
                         if (fh.flags & H2_FLAG_END_STREAM) stream_ended = 1;
                     } else if (fh.type == H2_TYPE_DATA) {
-                        if (!got_headers) { fprintf(2, "[httpsget] h2: DATA before HEADERS on stream 1\n"); return -1; }
+                        if (!got_headers) { fprintf(2, "[httpsget] h2: DATA before HEADERS on stream %u\n", (unsigned)stream_id); return -1; }
                         const uint8_t *data; size_t data_len;
                         if (h2_data_parse(payload, payload_len, fh.flags, &data, &data_len) != 0) {
                             fprintf(2, "[httpsget] h2: malformed DATA frame\n"); return -1;
@@ -855,7 +924,6 @@ static int h2_fetch(session_slot *slot, const struct url *u,
                     }
                     /* anything else on our stream (WINDOW_UPDATE, PRIORITY, ...)
                      * is silently skipped -- 17.3's deliberately minimal scope. */
-                    if (stream_ended) break;
                 }
             }
         }
@@ -867,7 +935,8 @@ static int h2_fetch(session_slot *slot, const struct url *u,
     }
 
     if (!got_headers) { fprintf(2, "[httpsget] h2: connection closed before any response headers arrived\n"); return -1; }
-    printf("[httpsget] h2: stream 1 complete (status=%d, %d body bytes)\n", g_hr.status, g_total - g_hr.header_len);
+    printf("[httpsget] h2: stream %u complete (status=%d, %d body bytes)\n",
+          (unsigned)stream_id, g_hr.status, g_total - g_hr.header_len);
     return stream_ended;
 }
 
@@ -1077,6 +1146,7 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
                      * attempt outright, same as every phase before this one. */
                     if (h2_handshake(slot) != 0) { close(slot->fd); return -1; }
                     hpack_table_init(&slot->h2_dyn_table, HPACK_DYN_ARENA_SIZE);
+                    slot->next_h2_stream = 1;
                     slot->is_h2 = 1;
                 }
             } else {
@@ -1103,21 +1173,28 @@ static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
 {
     int closed = 0;
 
-    /* Phase 17.3/17.4.1: an h2-negotiated connection speaks HTTP/2 framing,
-     * not HTTP/1.1 request-line text -- h2_fetch() is this branch's entire
-     * request+response cycle, now honoring `method`/`body`/`bodylen`/
-     * `content_type` the same way the HTTP/1.1 path below does (17.4.1
-     * generalizes it from a hardcoded GET). It fills g_hr/g_resp/g_body via
-     * the same resp_feed() the HTTP/1.1 path uses, so the shared tail after
-     * this if/else (staleness check, Set-Cookie scan, *out fill) applies
-     * unchanged to an h2 response too -- the caller (fetch()/fetch_one())
-     * never needs to know which path actually ran. `auth_header`/
-     * `auth_len` are still intentionally unused here -- an Authorization
-     * header over h2 is a natural follow-up, not attempted yet. */
+    /* Phase 17.3/17.4.1/17.4.2: an h2-negotiated connection speaks HTTP/2
+     * framing, not HTTP/1.1 request-line text -- h2_fetch() is this
+     * branch's entire request+response cycle, honoring `method`/`body`/
+     * `bodylen`/`content_type` the same way the HTTP/1.1 path below does
+     * (17.4.1). It fills g_hr/g_resp/g_body via the same resp_feed() the
+     * HTTP/1.1 path uses, so the shared tail after this if/else (staleness
+     * check, Set-Cookie scan, *out fill) applies unchanged to an h2
+     * response too -- the caller (fetch()/fetch_one()) never needs to know
+     * which path actually ran. g_hr.keep_alive is set directly from
+     * h2_fetch()'s own return value (17.4.2), not from whatever
+     * http_parse() guessed from the synthesized text -- an h2 response's
+     * "did this really finish cleanly" signal is END_STREAM, something
+     * only h2_fetch() itself observed, not a Connection header (h2 doesn't
+     * have one) or a Content-Length-based guess (h2 doesn't need one
+     * either). `auth_header`/`auth_len` are still intentionally unused
+     * here -- an Authorization header over h2 is a natural follow-up, not
+     * attempted yet. */
     if (slot->origin.https && slot->is_h2) {
         int rc = h2_fetch(slot, u, method, body, bodylen, content_type);
         if (rc < 0) return -1;
         closed = rc;
+        g_hr.keep_alive = (rc == 1);
     } else {
         resp_reset(method);
         char req[REQ_BUF_MAX]; int rn;
