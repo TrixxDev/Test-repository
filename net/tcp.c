@@ -6,7 +6,6 @@
 #include "inet.h"
 #include "perf.h"
 #include "string.h"
-#include "kio.h"
 
 struct tcp_hdr {
     uint16_t src_port;
@@ -153,32 +152,25 @@ static uint32_t seg_len(uint8_t flags, unsigned len)
     return len + ((flags & TCP_SYN) ? 1 : 0) + ((flags & TCP_FIN) ? 1 : 0);
 }
 
-/* DEBUG ONLY (temporary): force exactly one simulated loss of an outbound
- * PSH segment after a handful of real ones have gone out, so we can observe
- * -- deterministically, without waiting on real network loss -- what happens
- * to a connection when ONE small control write (like a WINDOW_UPDATE) is
- * lost while net/tcp.c's rtx tracking is a single slot. */
-static int dbg_psh_count;
-static int dbg_force_drop_armed = 1;
-
-/* Send a sequence-consuming segment and cache it for retransmission. */
+/* Send a sequence-consuming segment and cache it for retransmission.
+ *
+ * `c->rtx` holds exactly ONE outstanding segment -- calling this again
+ * while a previous one is still `pending` (unacknowledged) overwrites it,
+ * losing that earlier segment's own retry tracking. In practice
+ * net/tcpsock.c's tsk_write() already waits for `tcp_tx_idle()` (this slot
+ * going non-pending) after every chunk it sends, including a single-chunk
+ * write, before returning -- so two back-to-back tcp_send() calls from
+ * different write() calls (e.g. user/httpsget.c's h2_maybe_send_window_update()
+ * sending the stream-level then connection-level WINDOW_UPDATE) only
+ * collide if the first segment's ACK genuinely doesn't arrive within that
+ * 4-second wait, a real loss on top of an already-slow path. Not fixed
+ * here -- doing so properly means tracking more than one in-flight segment,
+ * a bigger change than this phase's own confirmed bug (see tcp_send()'s
+ * comment) needs. */
 static int tcp_xmit_track(struct conn *c, uint8_t flags, uint32_t seq,
                           const void *data, unsigned len)
 {
     if (len > TCP_TX_MAX) len = TCP_TX_MAX;
-
-    if (c->rtx.pending) {
-        kprintf("[DBG-RTX] CLOBBER: overwriting still-pending rtx (old seq=%u len=%u flags=0x%x "
-                "retries=%u) with new seq=%u len=%u flags=0x%x\n",
-                c->rtx.seq, c->rtx.len, c->rtx.flags, c->rtx.retries, seq, len, flags);
-    }
-
-    if ((flags & TCP_PSH) && dbg_force_drop_armed && ++dbg_psh_count == 6) {
-        dbg_force_drop_armed = 0;
-        test_drop_data = 1;
-        kprintf("[DBG-FORCE] forcing simulated loss of PSH send #%d (seq=%u len=%u)\n",
-                dbg_psh_count, seq, len);
-    }
 
     int r = 0;
     if ((flags & TCP_PSH) && test_drop_data) {
@@ -186,8 +178,6 @@ static int tcp_xmit_track(struct conn *c, uint8_t flags, uint32_t seq,
     } else {
         r = tcp_xmit(c, flags, seq, c->tcb.rcv_nxt, data, len);
     }
-    if (r != 0)
-        kprintf("[DBG-RTX] tcp_xmit FAILED (r=%d) for seq=%u len=%u flags=0x%x\n", r, seq, len, flags);
 
     if (data && len) memcpy(c->rtx.data, data, len);
     c->rtx.len     = len;
@@ -217,17 +207,26 @@ static void rtx_save_syn(struct conn *c)
 int tcp_send(int h, const void *data, size_t len)
 {
     struct conn *c = conn_of(h);
-    if (!c || c->tcb.state != TCP_ESTABLISHED || !data) {
-        kprintf("[DBG-SEND] tcp_send REFUSED h=%d c=%p state=%s data=%p\n",
-                h, (void *)c, c ? tcp_state_name(c->tcb.state) : "N/A", data);
+    if (!c || c->tcb.state != TCP_ESTABLISHED || !data)
         return -1;
-    }
     if (len > TCP_TX_MAX)
         len = TCP_TX_MAX;                        /* one segment only, no splitting */
-    if (tcp_xmit_track(c, TCP_PSH | TCP_ACK, c->tcb.snd_nxt, data, (unsigned)len) != 0) {
-        kprintf("[DBG-SEND] tcp_send: tcp_xmit_track FAILED\n");
-        return -1;
-    }
+    /* Phase 17.5.2: tcp_xmit_track() below queues this segment into c->rtx
+     * -- pending, with its own seq/data/RTO -- REGARDLESS of whether the
+     * immediate tcp_xmit() attempt inside it actually succeeded. tcp_tick()
+     * already retries a pending segment on RTO (TCP_RTO_MS, doubling, up to
+     * TCP_MAX_RETX attempts) -- that machinery exists specifically to
+     * recover a transient send failure, the same as it recovers ordinary
+     * packet loss on the wire. This used to instead surface that first
+     * attempt's return value straight to the caller as a hard failure,
+     * *without* advancing snd_nxt -- turning an ordinary, already-queued,
+     * about-to-be-retried segment into an immediate, unretried error one
+     * layer up, for no reason a real TCP send() should ever fail outright:
+     * a send() succeeding has only ever meant "queued for delivery," not
+     * "delivered." If the underlying problem is NOT transient, repeated
+     * RTO failures still correctly close the connection via TCP_MAX_RETX,
+     * just after a real retry attempt instead of on the very first one. */
+    tcp_xmit_track(c, TCP_PSH | TCP_ACK, c->tcb.snd_nxt, data, (unsigned)len);
     c->tcb.snd_nxt += (uint32_t)len;            /* data consumes sequence space */
     return (int)len;
 }
@@ -292,16 +291,23 @@ void tcp_tick(void)
         if (!c->used)
             continue;
 
+        /* A RST (tcp_input()'s TCP_RST handling) or any other path that
+         * tears the connection down doesn't itself clear rtx.pending --
+         * without this check, a segment queued before the teardown kept
+         * being blindly retransmitted on a connection that's already
+         * CLOSED (or otherwise no longer live), spamming a peer that has
+         * long since forgotten this connection existed. */
+        if (c->rtx.pending && c->tcb.state == TCP_CLOSED) {
+            c->rtx.pending = 0;
+            continue;
+        }
+
         /* Retransmit the outstanding segment if its RTO elapsed. */
         if (c->rtx.pending && now - c->rtx.last_ms >= c->rtx.rto_ms) {
             if (c->rtx.retries >= TCP_MAX_RETX) {       /* give up */
-                kprintf("[DBG-RTO] conn=%d GIVE UP after %u retries, seq=%u len=%u flags=0x%x "
-                        "-- state -> CLOSED\n", i, c->rtx.retries, c->rtx.seq, c->rtx.len, c->rtx.flags);
                 c->rtx.pending = 0;
                 c->tcb.state = TCP_CLOSED;
             } else {
-                kprintf("[DBG-RTO] conn=%d RETRANSMIT #%u seq=%u len=%u flags=0x%x rto_ms=%u\n",
-                        i, c->rtx.retries + 1, c->rtx.seq, c->rtx.len, c->rtx.flags, c->rtx.rto_ms);
                 tcp_xmit(c, c->rtx.flags, c->rtx.seq, c->tcb.rcv_nxt,
                          c->rtx.data, c->rtx.len);
                 c->rtx.last_ms = now;
@@ -405,8 +411,6 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
     uint32_t ack   = ntohl(h->ack);
 
     if (flags & TCP_RST) {                       /* peer refused / reset */
-        kprintf("[DBG-RST] RST received! seq=%u ack=%u state_was=%s rx_total=%u\n",
-                seq, ack, tcp_state_name(c->tcb.state), c->rx_total);
         stats.resets++;
         c->tcb.state = TCP_CLOSED;
         return;

@@ -129,7 +129,7 @@ def write_trust_header(path, root_der):
     open(path, "w").write("\n".join(out) + "\n")
 
 
-def start_server(port, certfile, keyfile, result, body_len):
+def start_server(port, certfile, keyfile, result, body_len, wait_s):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
@@ -218,6 +218,24 @@ def start_server(port, certfile, keyfile, result, body_len):
                     tls.sendall(h2_frame(H2_TYPE_DATA, flags, hstream, chunk))
                 resp["data_frames_sent"] = nframes
                 result["responses"].append(resp)
+
+            # sendall() returning only means the OS queued the bytes -- at
+            # this crypto-bound throughput Aurora is still slowly receiving
+            # and acking them for a long time afterward. Closing right here
+            # would leave that queued data stranded against an already-torn-
+            # down socket: any further incoming packet from Aurora (a
+            # WINDOW_UPDATE ack) gets an immediate RST ("no such connection"),
+            # which then makes Aurora's own next write fail outright -- not
+            # a real Aurora bug, but an artifact of this test's own server
+            # closing too early (found the hard way during this phase).
+            # Keep draining whatever Aurora sends back until it goes idle.
+            tls.settimeout(max(wait_s - 20, 30))
+            try:
+                while True:
+                    d = tls.recv(4096)
+                    if not d: break
+            except (socket.timeout, OSError):
+                pass
         except (socket.timeout, OSError, ssl.SSLError) as e:
             result["error"] = str(e)
         try: tls.close()
@@ -280,7 +298,7 @@ def run_qemu(serial_path, typed_cmd, wait_s):
 def run_one_size(label, body_len, wait_s, work):
     serial = os.path.join(work, "serial.log")
     result = {}
-    srv = start_server(443, run_one_size.pem, run_one_size.key, result, body_len)
+    srv = start_server(443, run_one_size.pem, run_one_size.key, result, body_len, wait_s)
     try:
         t0 = time.time()
         log = run_qemu(serial, "httpsget --alpn --repeat 2 10.0.2.2 /big %d" % int(time.time()), wait_s)
