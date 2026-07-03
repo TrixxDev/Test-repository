@@ -25,15 +25,17 @@
 #include <stddef.h>
 
 /* Static table indices (RFC 7541 Appendix A) this client actually uses.
- * The table has 61 entries in total; only the ones a minimal HTTP/2
- * request needs are named here -- a decode-side phase (17.2/17.3) would
- * need the rest. */
-#define HPACK_IDX_AUTHORITY    1   /* :authority (no value in the table) */
-#define HPACK_IDX_METHOD_GET   2   /* :method: GET */
-#define HPACK_IDX_METHOD_POST  3   /* :method: POST */
-#define HPACK_IDX_PATH_ROOT    4   /* :path: / */
-#define HPACK_IDX_SCHEME_HTTPS 7   /* :scheme: https */
-#define HPACK_IDX_USER_AGENT  58   /* user-agent (no value in the table) */
+ * The table has 61 entries in total; only the ones this send-side encoder
+ * needs are named here -- the decode side (17.2.2's hpack_table.c) has the
+ * full table. */
+#define HPACK_IDX_AUTHORITY      1   /* :authority (no value in the table) */
+#define HPACK_IDX_METHOD_GET     2   /* :method: GET */
+#define HPACK_IDX_METHOD_POST    3   /* :method: POST */
+#define HPACK_IDX_PATH_ROOT      4   /* :path: / */
+#define HPACK_IDX_SCHEME_HTTPS   7   /* :scheme: https */
+#define HPACK_IDX_CONTENT_LENGTH 28  /* content-length (no value in the table) */
+#define HPACK_IDX_CONTENT_TYPE   31  /* content-type (no value in the table) */
+#define HPACK_IDX_USER_AGENT    58   /* user-agent (no value in the table) */
 
 /* Append one HPACK prefixed integer (RFC 7541 §5.1) to `out` at `*pos`
  * (capped at `cap`). `prefix_bits` is how many low bits of the first byte

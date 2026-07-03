@@ -720,11 +720,20 @@ static int h2_synthesize_header_block(char *out, int cap, const hpack_header_fie
     return n;
 }
 
-/* Send stream 1's request (Phase 17.1.3's h2_send_request(), extended) and
- * this time actually read the full response -- Phase 17.3. Always a GET to
- * u->host/u->path: carrying an arbitrary method/body over h2 is explicitly
- * out of this phase's scope (see docs/SECURITY.md, Step 17.3), the same way
- * it always has been for this h2 code path.
+/* Send stream 1's request (Phase 17.1.3's h2_send_request(), extended --
+ * Phase 17.4.1 generalizes it from a hardcoded GET to any of the 16.5
+ * --method verbs, with a request body for the body-bearing ones) and read
+ * the full response -- Phase 17.3.
+ *
+ * `method` is sent as-is (matching the userspace client's own
+ * KNOWN_METHODS, 16.5); `body`/`bodylen` (0/0 for a bodyless request) and
+ * `content_type` (NULL defaults to application/x-www-form-urlencoded,
+ * mirroring build_request()'s own HTTP/1.1 default) follow the HEADERS
+ * frame as one DATA frame with END_STREAM set -- h2_build_headers()
+ * itself clears END_STREAM on the HEADERS frame whenever bodylen > 0, so
+ * the two frames' framing always agrees. Still just one DATA frame: the
+ * 4096-byte POST_BODY_MAX cap comfortably fits in a single frame (well
+ * under H2_FRAME_PAYLOAD_MAX), so there's no need to split it.
  *
  * Reads frames on stream 1 until the server's own END_STREAM arrives (on a
  * body-less HEADERS, or the final DATA frame) or the connection closes.
@@ -754,23 +763,35 @@ static int h2_synthesize_header_block(char *out, int cap, const hpack_header_fie
  * own contract, a malformed header block is unrecoverable for the rest of
  * this connection, so -1 here always means "give up on it entirely," not
  * "retry this one request"). */
-static int h2_fetch(session_slot *slot, const struct url *u)
+static int h2_fetch(session_slot *slot, const struct url *u,
+                    const char *method, const uint8_t *body, int bodylen, const char *content_type)
 {
-    resp_reset("GET");
+    resp_reset(method);
 
     static const char *ua = "Aurora-httpsget/0.3";
-    uint8_t hdrbuf[1024];
-    int hn = h2_build_headers(hdrbuf, sizeof hdrbuf, 1,
-                              "GET", (size_t)strlen("GET"),
+    const char *ct = bodylen > 0 ? (content_type ? content_type : "application/x-www-form-urlencoded") : 0;
+    size_t ctlen = ct ? strlen(ct) : 0;
+
+    uint8_t reqbuf[H2_FRAME_HEADER_LEN + 1024 + H2_FRAME_HEADER_LEN + POST_BODY_MAX];
+    int rn = h2_build_headers(reqbuf, sizeof reqbuf, 1,
+                              method, (size_t)strlen(method),
                               u->host, (size_t)strlen(u->host),
                               u->path, (size_t)strlen(u->path),
-                              ua, (size_t)strlen(ua));
-    if (hn < 0) { fprintf(2, "[httpsget] h2: could not build the HEADERS frame\n"); return -1; }
+                              ua, (size_t)strlen(ua),
+                              ct, ctlen, (size_t)(bodylen > 0 ? bodylen : 0));
+    if (rn < 0) { fprintf(2, "[httpsget] h2: could not build the HEADERS frame\n"); return -1; }
 
-    int sl = tls_conn_send_app(&slot->conn, hdrbuf, (size_t)hn, g_scratch, sizeof g_scratch);
-    if (sl < 0) { fprintf(2, "[httpsget] h2: could not seal the HEADERS frame\n"); return -1; }
+    if (bodylen > 0) {
+        int dn = h2_data_build(reqbuf + rn, sizeof reqbuf - (size_t)rn, 1, body, (size_t)bodylen, 1 /* end_stream */);
+        if (dn < 0) { fprintf(2, "[httpsget] h2: could not build the request body's DATA frame\n"); return -1; }
+        rn += dn;
+    }
+
+    int sl = tls_conn_send_app(&slot->conn, reqbuf, (size_t)rn, g_scratch, sizeof g_scratch);
+    if (sl < 0) { fprintf(2, "[httpsget] h2: could not seal the request\n"); return -1; }
     if (write_all(slot->fd, g_scratch, sl) != 0) { fprintf(2, "[httpsget] h2: write failed\n"); return -1; }
-    printf("[httpsget] h2: HEADERS frame sent (stream 1, GET %s)\n", u->path);
+    printf("[httpsget] h2: HEADERS%s frame sent (stream 1, %s %s)\n",
+          bodylen > 0 ? "+DATA" : "", method, u->path);
 
     h2_frame_reader_init(&g_h2_reader);
     int got_headers = 0, stream_ended = 0;
@@ -1082,18 +1103,19 @@ static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
 {
     int closed = 0;
 
-    /* Phase 17.3: an h2-negotiated connection speaks HTTP/2 framing, not
-     * HTTP/1.1 request-line text -- h2_fetch() is this branch's entire
-     * request+response cycle (always a GET, see its own comment for why).
-     * It fills g_hr/g_resp/g_body via the same resp_feed() the HTTP/1.1
-     * path below uses, so the shared tail after this if/else (staleness
-     * check, Set-Cookie scan, *out fill) applies unchanged to an h2
-     * response too -- the caller (fetch()/fetch_one()) never needs to know
-     * which path actually ran. `method`/`body`/`bodylen`/`content_type`/
-     * `auth_header`/`auth_len` are intentionally unused here -- carrying
-     * them over h2 is out of this phase's scope. */
+    /* Phase 17.3/17.4.1: an h2-negotiated connection speaks HTTP/2 framing,
+     * not HTTP/1.1 request-line text -- h2_fetch() is this branch's entire
+     * request+response cycle, now honoring `method`/`body`/`bodylen`/
+     * `content_type` the same way the HTTP/1.1 path below does (17.4.1
+     * generalizes it from a hardcoded GET). It fills g_hr/g_resp/g_body via
+     * the same resp_feed() the HTTP/1.1 path uses, so the shared tail after
+     * this if/else (staleness check, Set-Cookie scan, *out fill) applies
+     * unchanged to an h2 response too -- the caller (fetch()/fetch_one())
+     * never needs to know which path actually ran. `auth_header`/
+     * `auth_len` are still intentionally unused here -- an Authorization
+     * header over h2 is a natural follow-up, not attempted yet. */
     if (slot->origin.https && slot->is_h2) {
-        int rc = h2_fetch(slot, u);
+        int rc = h2_fetch(slot, u, method, body, bodylen, content_type);
         if (rc < 0) return -1;
         closed = rc;
     } else {

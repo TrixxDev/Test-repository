@@ -9,11 +9,24 @@ static int eq_lit(const char *s, size_t len, const char *lit)
     return i == len;
 }
 
+/* Decimal ASCII text for `v` into `out` (no leading zeros, "0" for zero).
+ * Freestanding -- no snprintf/itoa in this directory's convention. */
+static size_t put_udec(char *out, size_t v)
+{
+    if (v == 0) { out[0] = '0'; return 1; }
+    char tmp[20]; size_t tn = 0;
+    while (v > 0) { tmp[tn++] = (char)('0' + v % 10); v /= 10; }
+    for (size_t i = 0; i < tn; i++) out[i] = tmp[tn - 1 - i];
+    return tn;
+}
+
 int h2_build_headers(uint8_t *out, size_t cap, uint32_t stream_id,
                      const char *method, size_t method_len,
                      const char *authority, size_t authority_len,
                      const char *path, size_t path_len,
-                     const char *user_agent, size_t user_agent_len)
+                     const char *user_agent, size_t user_agent_len,
+                     const char *content_type, size_t content_type_len,
+                     size_t body_len)
 {
     if (cap < H2_FRAME_HEADER_LEN) return -1;
     size_t pos = H2_FRAME_HEADER_LEN;   /* room for the frame header, filled in at the end */
@@ -50,9 +63,21 @@ int h2_build_headers(uint8_t *out, size_t cap, uint32_t stream_id,
         if (hpack_put_literal_indexed_name(out, cap, &pos, HPACK_IDX_USER_AGENT, user_agent, user_agent_len) != 0) return -1;
     }
 
+    /* Content-Type/Content-Length (Phase 17.4.1) -- only when a body
+     * follows. Content-Length is always derived from `body_len` itself,
+     * the same way build_request()'s own HTTP/1.1 Content-Length always is
+     * -- never a separately-passed value that could drift from the DATA
+     * frame(s) the caller actually sends. */
+    if (body_len > 0) {
+        if (hpack_put_literal_indexed_name(out, cap, &pos, HPACK_IDX_CONTENT_TYPE, content_type, content_type_len) != 0) return -1;
+        char lenbuf[20];
+        size_t lenlen = put_udec(lenbuf, body_len);
+        if (hpack_put_literal_indexed_name(out, cap, &pos, HPACK_IDX_CONTENT_LENGTH, lenbuf, lenlen) != 0) return -1;
+    }
+
     size_t payload_len = pos - H2_FRAME_HEADER_LEN;
-    h2_frame_header h = { (uint32_t)payload_len, H2_TYPE_HEADERS,
-                          (uint8_t)(H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM), stream_id };
+    uint8_t flags = H2_FLAG_END_HEADERS | (body_len == 0 ? H2_FLAG_END_STREAM : 0);
+    h2_frame_header h = { (uint32_t)payload_len, H2_TYPE_HEADERS, flags, stream_id };
     if (h2_write_frame_header(out, cap, &h) < 0) return -1;
     return (int)pos;
 }

@@ -371,7 +371,7 @@ int main(void)
         {
             int n = h2_build_headers(out, sizeof out, 1,
                                      "GET", 3, "www.example.com", 15,
-                                     "/", 1, 0, 0);
+                                     "/", 1, 0, 0, 0, 0, 0);
             check_int("GET / builds", n > 0, 1);
             h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
             check_int("GET /: frame type is HEADERS", h.type, H2_TYPE_HEADERS);
@@ -388,7 +388,7 @@ int main(void)
         {
             const char *ua = "Aurora-httpsget/0.3";
             int n = h2_build_headers(out, sizeof out, 3,
-                                     "GET", 3, "10.0.2.2", 8, "/page1", 6, ua, 19);
+                                     "GET", 3, "10.0.2.2", 8, "/page1", 6, ua, 19, 0, 0, 0);
             check_int("GET /page1 + user-agent builds", n > 0, 1);
             h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
             check_int("GET /page1: stream_id preserved (3)", (int)h.stream_id, 3);
@@ -400,7 +400,7 @@ int main(void)
         /* POST /submit -- :method POST is also a static-table indexed value (index 3). */
         {
             int n = h2_build_headers(out, sizeof out, 1,
-                                     "POST", 4, "example.org", 11, "/submit", 7, 0, 0);
+                                     "POST", 4, "example.org", 11, "/submit", 7, 0, 0, 0, 0, 0);
             check_int("POST /submit builds", n > 0, 1);
             h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
             check_hex("POST /submit payload matches the hand-derived HPACK bytes",
@@ -413,7 +413,7 @@ int main(void)
          * using GET's index 2 for the name, literal value "PUT"). */
         {
             int n = h2_build_headers(out, sizeof out, 1,
-                                     "PUT", 3, "example.org", 11, "/item", 5, 0, 0);
+                                     "PUT", 3, "example.org", 11, "/item", 5, 0, 0, 0, 0, 0);
             check_int("PUT /item builds", n > 0, 1);
             h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
             check_hex("PUT /item payload matches the hand-derived HPACK bytes",
@@ -425,9 +425,56 @@ int main(void)
         {
             uint8_t small[10];
             int n = h2_build_headers(small, sizeof small, 1,
-                                     "GET", 3, "www.example.com", 15, "/", 1, 0, 0);
+                                     "GET", 3, "www.example.com", 15, "/", 1, 0, 0, 0, 0, 0);
             check_int("HEADERS build rejects an undersized buffer", n, -1);
         }
+    }
+
+    printf("HTTP/2 HEADERS frame with a request body (Phase 17.4.1):\n");
+    {
+        /* POST /submit to example.org with a 13-byte body -- exercises the
+         * new Content-Type/Content-Length headers (both literal-indexed-name,
+         * both needing a multi-byte index continuation: 31 and 28 are past
+         * the 4-bit prefix's max of 15) and END_STREAM being CLEAR on the
+         * HEADERS frame (a DATA frame carries the body). The expected hex
+         * was computed programmatically (a small from-scratch Python HPACK
+         * encoder mirroring hpack_put_int()'s own algorithm), not
+         * hand-derived -- the same discipline applied to every hex vector
+         * in this file, applied here to a longer, more error-prone one. */
+        const char *ct = "application/x-www-form-urlencoded";
+        const char *body = "field1=value1";
+        uint8_t out[256];
+        int n = h2_build_headers(out, sizeof out, 1,
+                                 "POST", 4, "example.org", 11, "/submit", 7, 0, 0,
+                                 ct, strlen(ct), strlen(body));
+        check_int("POST /submit with a body builds", n > 0, 1);
+        h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
+        check_int("POST with body: END_HEADERS set", (h.flags & H2_FLAG_END_HEADERS) != 0, 1);
+        check_int("POST with body: END_STREAM is CLEAR (DATA carries the body)", (h.flags & H2_FLAG_END_STREAM) != 0, 0);
+        check_hex("POST with body: payload matches the programmatically-computed HPACK bytes",
+                  out + H2_FRAME_HEADER_LEN, (int)h.length,
+                  "8387010b6578616d706c652e6f726704072f7375626d69740f10216170706c69636174696f6e2f782d7777772d666f726d2d75726c656e636f6465640f0d023133");
+
+        /* the DATA frame carrying the body itself -- END_STREAM set here instead. */
+        uint8_t dout[64];
+        int dn = h2_data_build(dout, sizeof dout, 1, (const uint8_t*)body, strlen(body), 1);
+        check_int("POST body DATA frame builds", dn > 0, 1);
+        h2_frame_header dh; h2_parse_frame_header(dout, (size_t)dn, &dh);
+        check_int("POST body DATA frame: type is DATA", dh.type, H2_TYPE_DATA);
+        check_int("POST body DATA frame: END_STREAM set", (dh.flags & H2_FLAG_END_STREAM) != 0, 1);
+        check_int("POST body DATA frame: length matches the body", (int)dh.length, (int)strlen(body));
+        check_int("POST body DATA frame: bytes match", memcmp(dout + H2_FRAME_HEADER_LEN, body, strlen(body)) == 0, 1);
+
+        /* a bodyless request (GET, body_len=0) must still set END_STREAM
+         * and add no Content-Type/Content-Length -- unchanged from before
+         * this phase. */
+        int n2 = h2_build_headers(out, sizeof out, 1,
+                                  "GET", 3, "www.example.com", 15, "/", 1, 0, 0, 0, 0, 0);
+        h2_frame_header h2out; h2_parse_frame_header(out, (size_t)n2, &h2out);
+        check_int("bodyless GET: END_STREAM still set", (h2out.flags & H2_FLAG_END_STREAM) != 0, 1);
+        check_hex("bodyless GET: payload unchanged from Phase 17.1.3 (no Content-Type/Length added)",
+                  out + H2_FRAME_HEADER_LEN, (int)h2out.length,
+                  "8287010f7777772e6578616d706c652e636f6d84");
     }
 
     printf("HPACK Huffman decoding (RFC 7541 Appendix B / Appendix C.4, Phase 17.2.1):\n");
