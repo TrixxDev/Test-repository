@@ -435,7 +435,24 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
         fin = 1;
         stats.fins++;
     }
-    if (c->tcb.rcv_nxt != before)
+    /* Phase 17.5.2: RFC 793/5681 require an immediate ACK for a segment that
+     * carries data or a FIN even when it does NOT advance rcv_nxt -- a
+     * duplicate (already-received data retransmitted because our earlier ack
+     * for it was never sent), a genuinely out-of-order segment, or one that
+     * arrived in order but didn't fit the current window (the `rxring_free`
+     * check above). Before this fix the condition below was only
+     * `c->tcb.rcv_nxt != before`, so all three of those cases got ZERO
+     * acknowledgment -- a real sender has no way to learn "you already have
+     * this" or "here is my real window" short of its own retransmit timer.
+     * Large-response stress testing reproduced this directly: a real TCP
+     * sender (Linux, not a hand-rolled test peer) retransmitted an
+     * already-received segment several times in a row with Aurora
+     * completely silent in response, stalling the whole connection --
+     * `tsk_read()`'s idle-read timeout then fired and got misread as a
+     * clean peer close, silently truncating the response. Sending a current
+     * ACK for every data/FIN-bearing segment, not just ones that advance
+     * rcv_nxt, is what actually breaks that stall. */
+    if (c->tcb.rcv_nxt != before || (plen > 0 && receiving) || (flags & TCP_FIN))
         tcp_xmit(c, TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
 
     int our_fin_acked = (c->tcb.snd_una == c->tcb.snd_nxt);
