@@ -155,6 +155,8 @@ int net_send_frame(const void *data, unsigned len)
     }
     if (!done) {
         stats.tx_errors++;                      /* device never completed the buffer */
+        kprintf("[DBG-TX] net_send_frame FAILED (spin exhausted) tx_errors=%u tx_packets=%u len=%u\n",
+                stats.tx_errors, stats.tx_packets, len);
         return -1;
     }
     stats.tx_packets++;
