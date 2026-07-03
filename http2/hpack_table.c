@@ -161,7 +161,15 @@ int hpack_table_get(const hpack_dyn_table *t, unsigned index,
         return 0;
     }
     unsigned dyn_index = index - 62;
-    if ((int)dyn_index >= t->count) return -1;
+    /* Phase 17.5.1 fuzzing finding: comparing against a *signed* cast of
+     * t->count let an index whose dyn_index overflowed INT_MAX (any
+     * legitimately-encoded HPACK integer, RFC 7541 §5.1, up to UINT32_MAX
+     * is "valid" as far as hpack_get_int() is concerned) turn negative and
+     * silently pass this bounds check, corrupting `t->entries[dyn_index]`
+     * into a massive out-of-bounds array access. t->count is always
+     * non-negative (0..HPACK_DYN_MAX_ENTRIES), so comparing entirely in
+     * unsigned arithmetic is both correct and just as cheap. */
+    if (dyn_index >= (unsigned)t->count) return -1;
     const hpack_dyn_entry *e = &t->entries[dyn_index];
     *name = t->arena + e->name_off; *name_len = e->name_len;
     *value = t->arena + e->value_off; *value_len = e->value_len;

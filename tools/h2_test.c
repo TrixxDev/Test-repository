@@ -56,17 +56,30 @@ static void check_int(const char *name, int got, int want)
     }
 }
 
-static void tohex(const uint8_t *b, int n, char *out)
+/* Phase 17.5.1 sanitizer finding: this used to take no capacity at all and
+ * trust every caller's fixed-size buffer was big enough -- a real stack
+ * buffer overflow since 17.2.2 (the 98-byte C.5.3 vector needs 197 bytes;
+ * the caller's buffer was 64), silently present until ASan's redzones
+ * caught it here. Returns 0, or -1 if `outcap` is too small -- fail
+ * loudly, matching every other bounds check in this codebase, rather than
+ * silently truncating or (as before) not checking at all. */
+static int tohex(const uint8_t *b, int n, char *out, int outcap)
 {
     static const char *h = "0123456789abcdef";
+    if (n * 2 + 1 > outcap) return -1;
     for (int i = 0; i < n; i++) { out[i*2] = h[b[i] >> 4]; out[i*2+1] = h[b[i] & 15]; }
     out[n*2] = 0;
+    return 0;
 }
 
 static void check_hex(const char *name, const uint8_t *got, int n, const char *want)
 {
-    char hex[64];
-    tohex(got, n, hex);
+    char hex[256];
+    if (tohex(got, n, hex, sizeof hex) != 0) {
+        printf("  FAIL  %s\n        got  <%d bytes, too long for the check's own hex[] buffer>\n        want %s\n", name, n, want);
+        failures++;
+        return;
+    }
     if (strcmp(hex, want) == 0) {
         printf("  PASS  %s\n", name);
     } else {

@@ -97,6 +97,7 @@ Run the vectors: `make crypto-test`.
 | **17.4.1** | **HTTP/2 request bodies — full 16.5 `--method` parity over h2** — `h2_build_headers()` (`http2/headers.c`) gains `content_type`/`body_len` parameters: when `body_len > 0`, it adds Content-Type and Content-Length (both "Literal Header Field without Indexing" against an indexed NAME, matching this encoder's own static-table-only convention since 17.1.3) and clears END_STREAM on the HEADERS frame — a DATA frame (`h2_data_build()`, already existing from 17.1.2) now follows, carrying the body with END_STREAM on it instead. Content-Length is always derived from `body_len` itself (never a separately-trusted value that could drift from what's actually sent), the same discipline `build_request()`'s own HTTP/1.1 Content-Length already follows. `h2_fetch()` (`user/httpsget.c`) now honors the real `method`/`body`/`bodylen`/`content_type` `fetch_request()` already threads through for HTTP/1.1, instead of hardcoding GET — bringing every one of 16.5's `--method` verbs (GET/HEAD/OPTIONS/DELETE/POST/PUT/PATCH) to h2, not just the three body-bearing ones. Still one DATA frame per request (`POST_BODY_MAX`, 4096 bytes, comfortably fits under `H2_FRAME_PAYLOAD_MAX`) and still one stream per connection — reusing an h2 connection across requests, and an Authorization header over h2, remain explicit follow-ups, not attempted here | `make h2-test` (11 new cases): a POST with a 13-byte body, checked against hex bytes computed by a small from-scratch Python HPACK encoder mirroring `hpack_put_int()`'s own algorithm (this project's established discipline of never hand-deriving a hex vector when a short, independently-checkable script can compute one instead), confirming END_STREAM is clear on HEADERS and the Content-Type/Content-Length bytes are exactly right; the paired DATA frame built separately and checked byte-for-byte; a bodyless GET re-checked byte-for-byte against 17.1.3's own original vector, proving zero behavioral drift for the unchanged case. `tools/h2_post_qemu.py` (new — mirroring how 16.1's own POST support got its own dedicated `post_qemu.py` rather than an ever-growing shared script): `httpsget --alpn --method POST` against a real frame-level server confirms END_STREAM is clear on the request's HEADERS frame, HPACK-decodes it (this script's own independent decoder) to confirm a real Content-Type and the exact real Content-Length arrived, confirms END_STREAM is set on the DATA frame that follows and that its payload is the exact real body bytes, and confirms Aurora's read path still completes correctly (`status=200` reached) right after having just sent a body-bearing request on the same stream — proving the two directions don't interfere. All 18 checks pass. Full existing host suite and the full 17-script QEMU regression sweep (16 prior scripts plus this new one) all pass unaffected | ✅ |
 | **17.4.2** | **HTTP/2 connection reuse — sequential streams, no multiplexing** — an h2 connection is no longer closed after its one response. `session_slot` gains `next_h2_stream` (reset to 1 by `fetch_begin()` on every fresh h2 connection, `+= 2` after each `h2_fetch()` call — RFC 7540 §5.1.1: client-initiated stream IDs are odd and strictly increasing), so a second request on the same origin opens stream 3, not another stream 1; `h2_dyn_table` (already per-connection since 17.3) now genuinely spans more than one request too. The forced synthesized `Connection: close` line is gone — `g_hr.keep_alive` is now set directly from `h2_fetch()`'s own return value (did this stream's END_STREAM actually arrive), since HTTP/1.1's own keep-alive computation doesn't map onto h2 (h2 framing needs no Content-Length the way that computation assumes one always exists). `reusable()` gained a `content_length < 0` fast path returning reusable-with-no-size-check: the `FETCH_REUSE_MAX_BODY` cap exists to weigh "is draining the rest of a big HTTP/1.1 body worth it just to reuse the connection" — a question that doesn't apply to h2, where `h2_fetch()` always reads a response to its real end (END_STREAM) as part of getting it AT ALL, so the "cost" the cap is weighing was already paid regardless (this path is provably unreachable for HTTP/1.1, since `http_parse()` itself never sets `keep_alive` true when `content_length` is -1, so zero behavior change there). A latent data-loss bug in `h2_fetch()`'s read loop was also fixed: it used to stop draining a decrypted TLS record the instant the current stream's `END_STREAM` arrived mid-buffer, silently discarding any trailing bytes (harmless before this phase, since the connection was always closed moments later anyway; a real bug once it lives on to carry a second request) — fixed by draining every decrypted chunk fully regardless, only skipping *acting* on frames once the stream is already known complete. The EXISTING `reusable()`/`slot_close()` logic in `fetch()`/`fetch_one()` needed no changes at all — it's just being told the truth about h2 now instead of a hardcoded "never." Still one active stream at a time, in sequence, never multiplexed | `tools/h2_reuse_qemu.py` (new): `httpsget --alpn 10.0.2.2 /a /b` against a real frame-level server that accepts exactly ONE TCP connection for both requests, confirms the second request opens stream 3 (not another stream 1) on that same connection, and — the strongest possible proof of dynamic-table continuity — answers the *second* response using pure "Indexed Header Field" references (RFC 7541 §6.1, zero literal bytes) into dynamic-table entries the *first* response added via incremental indexing, decodable only if `h2_dyn_table` genuinely survived between the two requests. All 20 checks pass: exactly one connection, correct stream IDs, both distinct response bodies received intact, Aurora's own log showing "reusing open connection" (not a second handshake), and both requests reaching `status=200`. Full existing host suite and the complete 18-script QEMU regression sweep (this phase changes `reusable()`, shared with the HTTP/1.1 keep-alive path, so `keepalive_qemu.py` was re-verified with particular care) all pass unaffected | ✅ |
 | **17.4.3** | **Minimal HTTP/2 flow control — one active stream's worth** (RFC 7540 §6.9, new `http2/window_update.c`) — the last piece needed for a response over ~32 KB to complete without stalling. `h2_fetch()` now tracks two receive windows, both starting at the RFC 7540 §6.5.2 default `SETTINGS_INITIAL_WINDOW_SIZE` (65535, in effect since Aurora's own SETTINGS stays empty): `session_slot.h2_conn_recv_window` (connection-level, spanning every request on this connection, mirroring `next_h2_stream`/`h2_dyn_table`) and a stream-level one (a local variable, fresh per request). Every DATA frame's FULL payload length — padding included, per RFC 7540 §6.9.1 — decrements both; either going negative means the server sent more than Aurora ever authorized, treated as the protocol violation it is (request aborted). Once either drops to or below half its initial value, `h2_maybe_send_window_update()` sends a real WINDOW_UPDATE topping it back to 65535 — without this, the server would eventually and correctly stop sending, believing Aurora's advertised window was exhausted, with no way for Aurora to say otherwise. Incoming WINDOW_UPDATE frames from the server (connection- or stream-scoped) are recognized and validated (`h2_window_update_parse()`, rejecting a malformed 4-byte payload or the RFC-forbidden zero increment) but deliberately not acted on: Aurora's own request bodies (`POST_BODY_MAX`, 4096 bytes) always fit under the default window regardless of anything the server advertises, so gating sends on it would add real complexity for a wait that can never actually happen. No `SETTINGS_INITIAL_WINDOW_SIZE` parsing needed either — that setting only affects the *sender's* side of a given direction, and Aurora's own receive-side accounting is governed entirely by its own (unmodified, default) advertised value, never the peer's | `make h2-test` (15 new cases): `h2_window_update_build()`/`h2_window_update_parse()` round-tripping a connection-level and a stream-level frame, the reserved top bit (RFC 7540 §6.9: "MUST be ignored on receipt") not corrupting the 31-bit increment, and rejection of a zero increment, an out-of-31-bit-range increment, an undersized output buffer, and a payload that isn't exactly 4 bytes. `tools/h2_flowctl_qemu.py` (new): `httpsget --alpn 10.0.2.2 /big` against a real frame-level server answering with a 200000-byte body — deliberately far past the default window, forced into 13 separate DATA frames by the 16384-byte `H2_FRAME_PAYLOAD_MAX` cap — confirms the server receives BOTH a connection-level (stream 0) and a stream-level (stream 1) WINDOW_UPDATE from Aurora, more than one of each kind sent over the transfer, every received increment RFC-plausible, and — the real proof nothing was silently dropped at the flow-control layer — Aurora's own log reporting exactly `200000 body bytes` received. All 14 checks pass on the first run. Full existing host suite and the complete 19-script QEMU regression sweep all pass unaffected | ✅ |
+| **17.5.1** | **HTTP/2 hardening: fuzzing + sanitizer-enabled host testing — opens the "17.5 Hardening" series** — no new RFC surface; the goal is finding real bugs in what's already built, not adding more of it. New `tools/h2_fuzz.c`: a deterministic (fixed-seed, reproducible) fuzz harness feeding random and deliberately malformed bytes into every `http2/` decode entry point a network peer's bytes can reach — the HPACK header-block decoder (including forced-Huffman-bit string literals), the generic frame reader, DATA frame parsing, SETTINGS payload-length validation, WINDOW_UPDATE parsing, and Huffman decode directly — checking not just "did it crash" but that every documented output invariant still holds (a decoded count never exceeds the capacity it was given; a returned pointer always falls inside the buffer it's supposed to point into). New `make h2-fuzz` (fast plain build, many iterations) and `make h2-fuzz-san`/`make h2-test-san` (GCC `-fsanitize=address,undefined` — specifically GCC, not clang, since clang's own sanitizer runtime isn't installed in this environment — applied to the fuzz harness and, as a standing regression target, the *existing* fixed-vector `h2-test` suite too) | **Two real bugs found and fixed, both before this phase's own commit landed anywhere:** (1) A genuine out-of-bounds read in `hpack_table_get()` (`http2/hpack_table.c`) — `if ((int)dyn_index >= t->count)` cast an `unsigned` value to `int` for the comparison; an HPACK index whose `dyn_index` (index − 62) exceeded `INT_MAX` (any value up to `UINT32_MAX` is a legitimately-encoded RFC 7541 §5.1 integer as far as the decoder's own overflow check is concerned) wrapped to a *negative* `int`, silently passing the bounds check and indexing `t->entries[]` with a massive out-of-range value — a real, network-triggerable memory-safety bug a malicious or simply buggy HTTP/2 server could hit with an ordinary-looking HEADERS frame. Fixed by comparing entirely in unsigned arithmetic (`dyn_index >= (unsigned)t->count`), which is both correct for every possible `index` value and exactly as cheap. (2) A stack buffer overflow in the TEST HARNESS itself — `tools/h2_test.c`'s `check_hex()` used a fixed `hex[64]` with no capacity check at all; the 98-byte hex vector from 17.2.2's own Appendix C.5.3 test needs 197 bytes, silently overflowing the stack on every `h2-test` run since that commit, undetected because nothing observable happened to depend on the corrupted bytes until ASan's stack redzones caught it here. Fixed by widening the buffer and giving `tohex()` an explicit capacity parameter it now actually checks — fail loudly, the same discipline the production code has followed all along, that this one helper had quietly skipped. Verified: `make h2-fuzz` (6 targets × 200,000 iterations, re-run across 6 independent seeds — 1, 42, 1337, 0xdeadbeef, 0xc0ffee, 999999999 — for over 18 million total operations) all pass after the fix; `make h2-fuzz-san`/`make h2-test-san` (GCC ASan+UBSan, multiple seeds) pass clean; the complete existing host suite and 19-script QEMU regression sweep re-verified unaffected by the `hpack_table_get()` fix (a strict rejection of previously-mishandled out-of-range indices no legitimate response would ever use) | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -3353,6 +3354,101 @@ across sequential requests, and now flow control for responses of any
 realistic size. Multiplexing, PRIORITY, CONTINUATION, and PUSH_PROMISE
 remain deliberately out of scope -- genuine "HTTP/2 v2" territory, not
 needed for what this phase set out to prove.
+
+## Step 17.5.1 — HTTP/2 hardening: fuzzing + sanitizer-enabled host testing
+
+17.4.3 closed the last functional gap in "an HTTP/2 client practically
+usable for real fetches." This phase opens a deliberately different kind
+of series: not new RFC surface, but *evidence* that what's already built
+actually holds up against input nobody hand-wrote. Every host test in
+this project so far -- `h2-test` included -- checks known-good and
+known-bad inputs the author chose. That's necessary, but it's a narrow
+slice of "everything a real network peer could possibly send," and this
+project's own history (the gzip/CRC32/inflate KATs in 15.10, a hand-
+counted user-agent length in 17.1.3) already shows hand-chosen test
+inputs miss things. Fuzzing and sanitizers are the tools for the part
+hand-written tests structurally can't cover.
+
+**`tools/h2_fuzz.c`** feeds random bytes -- some pure noise, some nudged
+toward shapes likely to reach deeper code paths (a fraction of HPACK
+blocks are biased toward the "Literal with Incremental Indexing, Huffman
+bit set" shape, since uniformly random bytes mostly land on Indexed
+Header Field and never reach the Huffman decoder at all) -- into six
+targets: `hpack_decode_headers()`, the generic frame reader, `h2_data_parse()`,
+`h2_settings_payload_valid()`, `h2_window_update_parse()`, and
+`hpack_huffman_decode()` directly. A fixed default seed makes every run
+reproducible; a failure prints the exact input bytes and the seed to
+reproduce it, matching this project's own standing "never make a bug
+report you can't hand someone else" discipline. Every call is checked
+against its own documented output invariants, not just "did it survive"
+-- a function that reads out of bounds without a sanitizer watching, or
+that reports a byte count larger than the buffer it just filled, is
+exactly the class of bug a plain crash-only fuzzer would walk right past.
+
+**Sanitizers, and why GCC specifically.** `make h2-fuzz-san` and the new
+`make h2-test-san` (the *existing* fixed-vector suite, rebuilt the same
+way -- a nearly-free way to point far stronger instrumentation at tests
+that already exist) both compile with `-fsanitize=address,undefined`.
+This environment's `clang` has no sanitizer runtime library installed
+(linking fails outright), while GCC's is present and works -- so, uniquely
+among every host target in this Makefile, these two specifically invoke
+`gcc`, not `$(CC)`. AddressSanitizer's stack/heap redzones and
+UndefinedBehaviorSanitizer's runtime checks catch classes of bug that
+"the program didn't crash" simply cannot rule out.
+
+**Two real bugs, found within minutes of the harness actually running:**
+
+1. **A genuine out-of-bounds read in `hpack_table_get()`**
+   (`http2/hpack_table.c`) -- and a security-relevant one, since it's
+   directly reachable from any HPACK-decoded HEADERS frame a real server
+   sends. The bounds check read `if ((int)dyn_index >= t->count) return -1;`.
+   `dyn_index` is `index - 62` (`unsigned`); RFC 7541 §5.1's own prefixed-
+   integer encoding lets an index be anything up to `UINT32_MAX` without
+   `hpack_get_int()`'s own overflow guard ever objecting -- there's
+   nothing structurally wrong with a large index arriving on the wire.
+   When `dyn_index` exceeds `INT_MAX`, casting it to `int` wraps to a
+   *negative* number (implementation-defined in C, but universal
+   two's-complement reinterpretation on every real platform) -- and a
+   negative number is never `>= t->count`, so the bounds check silently
+   passed, and `t->entries[dyn_index]` was read with `dyn_index` still
+   holding its true, enormous, unsigned value. GDB confirmed the exact
+   crash from the fuzzer's very first failing case: `hpack_table_get()`
+   dereferencing memory far outside `t->entries[]`. Fixed by comparing
+   entirely in unsigned arithmetic instead -- `dyn_index >= (unsigned)t->count`
+   -- correct for literally every possible `index`, and no more expensive
+   than the buggy version. This is exactly the outcome fuzzing exists to
+   find: a real, network-triggerable memory-safety defect that eighteen
+   prior phases of hand-written host tests and QEMU acceptance tests,
+   run against real (if scripted) HTTP/2 servers, never happened to
+   trigger, because no hand-chosen test vector ever contained an index
+   anywhere near two billion.
+2. **A stack buffer overflow in the test harness itself**, caught the
+   moment `h2-test` was rebuilt under sanitizers. `tools/h2_test.c`'s
+   `check_hex()` had used a bare `char hex[64]` with no capacity check
+   since the very first version of this file (17.1.1); the 98-byte hex
+   vector 17.2.2's own Appendix C.5.3 test introduced needs 197 bytes to
+   render, silently overflowing the stack by 133 bytes on *every single*
+   `h2-test` run since that commit -- passing every time regardless,
+   since nothing observable ever happened to depend on whatever stack
+   memory got clobbered, until ASan's redzones finally noticed. Fixed by
+   widening the buffer and giving the underlying `tohex()` an explicit
+   capacity parameter it now actually enforces, failing loudly (a `FAIL`
+   line, not silent corruption) instead of trusting every caller's buffer
+   was big enough. A reminder that "the test suite has passed for five
+   phases in a row" and "the test suite is memory-safe" are not the same
+   claim, and this project's own tools/ directory is not exempt from the
+   scrutiny its production code gets.
+
+Verified:
+- `make h2-fuzz`: all 6 targets, 200,000 iterations each, re-run across 6
+  independent seeds (over 18 million total operations) -- all pass after
+  the fix, none did before it.
+- `make h2-fuzz-san` / `make h2-test-san`: GCC ASan+UBSan, multiple seeds
+  -- clean.
+- The complete existing host suite and the full 19-script QEMU regression
+  sweep, re-verified against the `hpack_table_get()` fix specifically
+  (a strict rejection of an out-of-range index no legitimate server
+  response would ever produce) -- unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

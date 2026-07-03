@@ -265,6 +265,42 @@ h2-test:
 	$(CC) -O2 -Ihttp2 tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c -o /tmp/aurora_h2_test
 	/tmp/aurora_h2_test
 
+# Host-side HTTP/2 fuzz harness (Phase 17.5.1): random/malformed bytes into
+# every http2/ decode entry point, checking both "never crashes" and
+# "output invariants always hold" (see tools/h2_fuzz.c's own header comment).
+# Fast plain build, many iterations -- a quick sweep, not the strong check
+# below.
+.PHONY: h2-fuzz
+h2-fuzz:
+	$(CC) -O2 -Ihttp2 tools/h2_fuzz.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c -o /tmp/aurora_h2_fuzz
+	/tmp/aurora_h2_fuzz
+
+# Same fuzz harness, built with GCC's AddressSanitizer + UndefinedBehavior-
+# Sanitizer (clang's own sanitizer runtime isn't installed in this
+# environment, so this specifically uses gcc, unlike every other host
+# target here) -- far stronger per-call checking (out-of-bounds reads/
+# writes, use of uninitialized values, signed overflow, ...) at the cost of
+# real per-iteration overhead, so fewer iterations by default. Override
+# with `make h2-fuzz-san ITERS=2000000` for a longer, still-sanitized run.
+SEED  ?= 0x4155524f
+ITERS ?= 20000
+.PHONY: h2-fuzz-san
+h2-fuzz-san:
+	gcc -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ihttp2 tools/h2_fuzz.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c -o /tmp/aurora_h2_fuzz_san
+	/tmp/aurora_h2_fuzz_san $(SEED) $(ITERS)
+
+# The EXISTING fixed-vector h2-test suite, rebuilt with the same GCC
+# sanitizers -- catches memory-safety bugs a passing/failing PASS-count
+# alone can't reveal (this is exactly how Phase 17.5.1 found tools/
+# h2_test.c's own check_hex() stack buffer overflow, silently present
+# since 17.2.2's 98-byte C.5.3 vector: the test PASSED every run, since
+# nothing observable depended on the corrupted stack bytes, until ASan's
+# redzones caught it here).
+.PHONY: h2-test-san
+h2-test-san:
+	gcc -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ihttp2 tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c -o /tmp/aurora_h2_test_san
+	/tmp/aurora_h2_test_san
+
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
 .PHONY: x509-test
 x509-test:
