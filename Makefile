@@ -73,7 +73,7 @@ TLS_U_SRC := crypto/sha256.c crypto/sha384.c crypto/hmac_sha256.c crypto/hkdf.c 
              x509/asn1.c x509/x509.c x509/verify_cert.c \
              compress/crc32.c compress/inflate.c compress/gzip.c \
              http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c \
-             http2/hpack_table.c http2/hpack_decode.c
+             http2/hpack_table.c http2/hpack_decode.c http2/window_update.c
 TLS_U_OBJ := $(TLS_U_SRC:.c=.tlsu.o)
 
 %.tlsu.o: %.c
@@ -262,7 +262,7 @@ gzip-test:
 # and full header-block decode).
 .PHONY: h2-test
 h2-test:
-	$(CC) -O2 -Ihttp2 tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c -o /tmp/aurora_h2_test
+	$(CC) -O2 -Ihttp2 tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c -o /tmp/aurora_h2_test
 	/tmp/aurora_h2_test
 
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).

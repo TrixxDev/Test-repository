@@ -96,6 +96,7 @@ Run the vectors: `make crypto-test`.
 | **17.3** | **The first genuinely complete HTTP/2 response** — pure integration, no new protocol capability: `h2_fetch()` (`user/httpsget.c`, replacing 17.1.3's `h2_send_request()`) reads stream 1 to completion, HPACK-decoding the response HEADERS (against `session_slot`'s own persistent per-connection `hpack_dyn_table`) and translating the decoded field list into an HTTP/1.1-shaped status-line-plus-headers text block (`h2_synthesize_header_block()`), fed together with every DATA frame's payload through the EXISTING `resp_feed()` — the same function an HTTP/1.1 response's bytes already flow through. `fetch_one()` needed zero changes: a `fetch_result_t` is a `fetch_result_t` regardless of which wire protocol produced it, exactly the "the upper layer never needs to know" goal this phase was scoped around. A synthesized `Connection: close` line makes the *existing* keep-alive computation come out false for every h2 response, so the *existing* `reusable()`/`slot_close()` logic in `fetch()`/`fetch_one()` already closes an h2 connection after its one response, with no h2-specific code of its own — Phase 17.3 deliberately keeps to one client stream, no multiplexing, and no PRIORITY/PUSH_PROMISE/CONTINUATION/flow-control handling beyond what finishing that one stream needs; carrying a method/body other than GET over h2 is equally out of scope. `h2_text_safe()` rejects any decoded name/value containing CR/LF (or, for a name, `:`) before it's spliced into the synthesized text — the HTTP response-splitting equivalent for this translation step, since Aurora's own HPACK decoder validates wire *syntax*, not HTTP header *semantics* | Writing the QEMU test caught a real integration bug pre-commit: the first draft had `h2_fetch()` return directly with `FETCH_OK`, which skipped `fetch_request()`'s own Set-Cookie-scanning tail (shared code, positioned *after* the HTTP/1.1-vs-h2 branch) entirely — an h2 response's cookies were silently never stored. Fixed by having `h2_fetch()` return only a `closed` flag and letting the *existing* shared tail (staleness check, Set-Cookie scan via `http_find_header()`, `*out` fill) run unchanged for both paths — the same reuse discipline the rest of this phase applies everywhere else, this time caught by a real acceptance test rather than by inspection. `tools/h2_handshake_qemu.py` (extended a fourth time, now covering 17.1.1 through 17.3 in one script) sends a real response: a HEADERS frame using "Literal with Incremental Indexing" for `:status`/`content-type`/`set-cookie` (indexed names, literal values — exercising real dynamic-table growth, not just the 17.2.2 host tests' own vectors) plus one fully literal header, then three DATA frames covering every item on the roadmap's own DATA checklist in one response — a sequence of frames, a zero-length one, padding, and `END_STREAM` on the last. All 25 checks pass: the real page content and the real `:status: 200` reach Aurora's own printed output (`status=200`, the actual HTML body text, `200 OK over Aurora TCP->TLS1.3->HTTP`), the decoded Set-Cookie is stored, and the connection closes cleanly afterward with nothing further sent — the first HTTP/2 response Aurora has ever fully understood. Full existing host suite and the complete 16-script QEMU regression sweep (this phase changes shared code in `fetch_request()`, not just adds new files, so every existing script was re-run, not assumed unaffected) all pass with byte-identical HTTP/1.1 behavior | ✅ |
 | **17.4.1** | **HTTP/2 request bodies — full 16.5 `--method` parity over h2** — `h2_build_headers()` (`http2/headers.c`) gains `content_type`/`body_len` parameters: when `body_len > 0`, it adds Content-Type and Content-Length (both "Literal Header Field without Indexing" against an indexed NAME, matching this encoder's own static-table-only convention since 17.1.3) and clears END_STREAM on the HEADERS frame — a DATA frame (`h2_data_build()`, already existing from 17.1.2) now follows, carrying the body with END_STREAM on it instead. Content-Length is always derived from `body_len` itself (never a separately-trusted value that could drift from what's actually sent), the same discipline `build_request()`'s own HTTP/1.1 Content-Length already follows. `h2_fetch()` (`user/httpsget.c`) now honors the real `method`/`body`/`bodylen`/`content_type` `fetch_request()` already threads through for HTTP/1.1, instead of hardcoding GET — bringing every one of 16.5's `--method` verbs (GET/HEAD/OPTIONS/DELETE/POST/PUT/PATCH) to h2, not just the three body-bearing ones. Still one DATA frame per request (`POST_BODY_MAX`, 4096 bytes, comfortably fits under `H2_FRAME_PAYLOAD_MAX`) and still one stream per connection — reusing an h2 connection across requests, and an Authorization header over h2, remain explicit follow-ups, not attempted here | `make h2-test` (11 new cases): a POST with a 13-byte body, checked against hex bytes computed by a small from-scratch Python HPACK encoder mirroring `hpack_put_int()`'s own algorithm (this project's established discipline of never hand-deriving a hex vector when a short, independently-checkable script can compute one instead), confirming END_STREAM is clear on HEADERS and the Content-Type/Content-Length bytes are exactly right; the paired DATA frame built separately and checked byte-for-byte; a bodyless GET re-checked byte-for-byte against 17.1.3's own original vector, proving zero behavioral drift for the unchanged case. `tools/h2_post_qemu.py` (new — mirroring how 16.1's own POST support got its own dedicated `post_qemu.py` rather than an ever-growing shared script): `httpsget --alpn --method POST` against a real frame-level server confirms END_STREAM is clear on the request's HEADERS frame, HPACK-decodes it (this script's own independent decoder) to confirm a real Content-Type and the exact real Content-Length arrived, confirms END_STREAM is set on the DATA frame that follows and that its payload is the exact real body bytes, and confirms Aurora's read path still completes correctly (`status=200` reached) right after having just sent a body-bearing request on the same stream — proving the two directions don't interfere. All 18 checks pass. Full existing host suite and the full 17-script QEMU regression sweep (16 prior scripts plus this new one) all pass unaffected | ✅ |
 | **17.4.2** | **HTTP/2 connection reuse — sequential streams, no multiplexing** — an h2 connection is no longer closed after its one response. `session_slot` gains `next_h2_stream` (reset to 1 by `fetch_begin()` on every fresh h2 connection, `+= 2` after each `h2_fetch()` call — RFC 7540 §5.1.1: client-initiated stream IDs are odd and strictly increasing), so a second request on the same origin opens stream 3, not another stream 1; `h2_dyn_table` (already per-connection since 17.3) now genuinely spans more than one request too. The forced synthesized `Connection: close` line is gone — `g_hr.keep_alive` is now set directly from `h2_fetch()`'s own return value (did this stream's END_STREAM actually arrive), since HTTP/1.1's own keep-alive computation doesn't map onto h2 (h2 framing needs no Content-Length the way that computation assumes one always exists). `reusable()` gained a `content_length < 0` fast path returning reusable-with-no-size-check: the `FETCH_REUSE_MAX_BODY` cap exists to weigh "is draining the rest of a big HTTP/1.1 body worth it just to reuse the connection" — a question that doesn't apply to h2, where `h2_fetch()` always reads a response to its real end (END_STREAM) as part of getting it AT ALL, so the "cost" the cap is weighing was already paid regardless (this path is provably unreachable for HTTP/1.1, since `http_parse()` itself never sets `keep_alive` true when `content_length` is -1, so zero behavior change there). A latent data-loss bug in `h2_fetch()`'s read loop was also fixed: it used to stop draining a decrypted TLS record the instant the current stream's `END_STREAM` arrived mid-buffer, silently discarding any trailing bytes (harmless before this phase, since the connection was always closed moments later anyway; a real bug once it lives on to carry a second request) — fixed by draining every decrypted chunk fully regardless, only skipping *acting* on frames once the stream is already known complete. The EXISTING `reusable()`/`slot_close()` logic in `fetch()`/`fetch_one()` needed no changes at all — it's just being told the truth about h2 now instead of a hardcoded "never." Still one active stream at a time, in sequence, never multiplexed | `tools/h2_reuse_qemu.py` (new): `httpsget --alpn 10.0.2.2 /a /b` against a real frame-level server that accepts exactly ONE TCP connection for both requests, confirms the second request opens stream 3 (not another stream 1) on that same connection, and — the strongest possible proof of dynamic-table continuity — answers the *second* response using pure "Indexed Header Field" references (RFC 7541 §6.1, zero literal bytes) into dynamic-table entries the *first* response added via incremental indexing, decodable only if `h2_dyn_table` genuinely survived between the two requests. All 20 checks pass: exactly one connection, correct stream IDs, both distinct response bodies received intact, Aurora's own log showing "reusing open connection" (not a second handshake), and both requests reaching `status=200`. Full existing host suite and the complete 18-script QEMU regression sweep (this phase changes `reusable()`, shared with the HTTP/1.1 keep-alive path, so `keepalive_qemu.py` was re-verified with particular care) all pass unaffected | ✅ |
+| **17.4.3** | **Minimal HTTP/2 flow control — one active stream's worth** (RFC 7540 §6.9, new `http2/window_update.c`) — the last piece needed for a response over ~32 KB to complete without stalling. `h2_fetch()` now tracks two receive windows, both starting at the RFC 7540 §6.5.2 default `SETTINGS_INITIAL_WINDOW_SIZE` (65535, in effect since Aurora's own SETTINGS stays empty): `session_slot.h2_conn_recv_window` (connection-level, spanning every request on this connection, mirroring `next_h2_stream`/`h2_dyn_table`) and a stream-level one (a local variable, fresh per request). Every DATA frame's FULL payload length — padding included, per RFC 7540 §6.9.1 — decrements both; either going negative means the server sent more than Aurora ever authorized, treated as the protocol violation it is (request aborted). Once either drops to or below half its initial value, `h2_maybe_send_window_update()` sends a real WINDOW_UPDATE topping it back to 65535 — without this, the server would eventually and correctly stop sending, believing Aurora's advertised window was exhausted, with no way for Aurora to say otherwise. Incoming WINDOW_UPDATE frames from the server (connection- or stream-scoped) are recognized and validated (`h2_window_update_parse()`, rejecting a malformed 4-byte payload or the RFC-forbidden zero increment) but deliberately not acted on: Aurora's own request bodies (`POST_BODY_MAX`, 4096 bytes) always fit under the default window regardless of anything the server advertises, so gating sends on it would add real complexity for a wait that can never actually happen. No `SETTINGS_INITIAL_WINDOW_SIZE` parsing needed either — that setting only affects the *sender's* side of a given direction, and Aurora's own receive-side accounting is governed entirely by its own (unmodified, default) advertised value, never the peer's | `make h2-test` (15 new cases): `h2_window_update_build()`/`h2_window_update_parse()` round-tripping a connection-level and a stream-level frame, the reserved top bit (RFC 7540 §6.9: "MUST be ignored on receipt") not corrupting the 31-bit increment, and rejection of a zero increment, an out-of-31-bit-range increment, an undersized output buffer, and a payload that isn't exactly 4 bytes. `tools/h2_flowctl_qemu.py` (new): `httpsget --alpn 10.0.2.2 /big` against a real frame-level server answering with a 200000-byte body — deliberately far past the default window, forced into 13 separate DATA frames by the 16384-byte `H2_FRAME_PAYLOAD_MAX` cap — confirms the server receives BOTH a connection-level (stream 0) and a stream-level (stream 1) WINDOW_UPDATE from Aurora, more than one of each kind sent over the transfer, every received increment RFC-plausible, and — the real proof nothing was silently dropped at the flow-control layer — Aurora's own log reporting exactly `200000 body bytes` received. All 14 checks pass on the first run. Full existing host suite and the complete 19-script QEMU regression sweep all pass unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -3257,6 +3258,101 @@ still-wrong implementation fail loudly:
   complete 18-script QEMU regression sweep -- with particular attention
   to `keepalive_qemu.py`, since this phase edits `reusable()`, code
   shared with HTTP/1.1's own keep-alive path -- all pass unaffected.
+
+## Step 17.4.3 — minimal HTTP/2 flow control (one active stream's worth)
+
+Every earlier h2 phase had an unstated assumption baked in: the response
+would be small enough to arrive before anyone noticed flow control wasn't
+implemented at all. RFC 7540 §6.9's default window -- 65535 bytes, both
+per-stream and per-connection -- is generous for a status line and a
+short JSON body, but a real page (or, more mundanely, this project's own
+`docs/SECURITY.md`) clears it easily. Without a receiver replenishing its
+window, a spec-compliant server simply stops sending once it believes the
+window is exhausted -- correctly, from its side -- and a client that never
+says otherwise just hangs. This phase closes that gap, and closes the
+17.4 series the roadmap laid out: request bodies (17.4.1), connection
+reuse (17.4.2), and now flow control complete "an HTTP/2 client
+practically usable for real fetches," not just capable of a demo.
+
+**Two windows, one stream.** RFC 7540 §6.9 tracks flow control at two
+scopes simultaneously: one shared window for the whole connection, and
+one independent window per stream. `session_slot.h2_conn_recv_window`
+holds the connection-level one -- reset to `H2_INITIAL_WINDOW_SIZE`
+(65535) only when `fetch_begin()` establishes a fresh h2 connection,
+alongside `h2_dyn_table`/`next_h2_stream`, so it correctly spans however
+many sequential requests 17.4.2 lets that connection carry. The
+stream-level window doesn't need slot-level persistence -- RFC 7540
+itself resets it fresh for every new stream -- so it's just a local
+variable in `h2_fetch()`, reinitialized on entry.
+
+**Why no `SETTINGS_INITIAL_WINDOW_SIZE` parsing was needed.** This
+setting, when a peer sends it, only ever describes *that peer's own*
+receive-side window for the direction pointed *at* them -- it doesn't
+tell the other side what window to use for receiving. Aurora's own
+advertised window (the one this phase's whole `h2_conn_recv_window`/
+stream-window accounting exists to enforce and replenish) is governed
+entirely by what Aurora itself put in *its own* SETTINGS frame -- which
+has stayed empty since 17.1.1, meaning the RFC 7540 §6.5.2 default
+always applies. The server's own advertised window (via its SETTINGS)
+would matter if Aurora needed to gate *its own sends* on it -- but as the
+next paragraph explains, that never happens here, so there was nothing
+to parse.
+
+**Deliberately not gating sends.** Incoming WINDOW_UPDATE frames from the
+server are fully recognized and validated (`h2_window_update_parse()`
+rejects a payload that isn't exactly 4 bytes, or the zero increment RFC
+7540 §6.9 calls out as a required rejection), printed as a diagnostic --
+but the numeric value is never used to decide whether Aurora is "allowed"
+to send its own request body yet. `POST_BODY_MAX` caps every request
+body Aurora can construct at 4096 bytes, and the RFC 7540 §6.5.2 default
+window (65535) is more than 16x that -- there is no real server
+configuration where Aurora's own tiny body would ever need to wait for
+room. Building genuine send-side gating (tracking a "how much can I send
+right now" counter, blocking or retrying when it's insufficient) would be
+real, non-trivial complexity in service of a wait that can provably never
+happen -- exactly what the project's own "no fallbacks for scenarios that
+can't happen" discipline argues against building.
+
+**A concrete failure this phase makes real instead of theoretical.** A
+window going negative -- the server having sent more DATA than Aurora
+ever authorized -- is treated as a hard protocol violation, aborting the
+request, the same "fail loudly on a peer exceeding what it was told"
+posture already applied throughout `http2/`'s decode paths (HPACK, frame
+size, DATA padding). Silently tolerating it would mean accepting an
+accounting Aurora itself can no longer trust for the rest of the
+connection.
+
+Verified two ways:
+- **Host (`make h2-test`)**: 15 new cases for `http2/window_update.c` --
+  `h2_window_update_build()`/`h2_window_update_parse()` round-tripping
+  both a connection-level (stream 0) and a stream-level frame, the
+  reserved top bit (RFC 7540 §6.9: "MUST be ignored on receipt") not
+  corrupting the 31-bit increment when a peer sets it, and rejection of a
+  zero increment, an out-of-31-bit-range increment, an undersized output
+  buffer, and a payload that isn't exactly 4 bytes.
+- **QEMU (`tools/h2_flowctl_qemu.py`, new)**: `httpsget --alpn 10.0.2.2
+  /big` against a real, independent, from-scratch Python HTTP/2 server
+  answering with a 200000-byte body -- forced by the 16384-byte
+  `H2_FRAME_PAYLOAD_MAX` cap into 13 separate DATA frames, comfortably
+  clearing the default 65535-byte window multiple times over. The server
+  confirms it received BOTH a connection-level and a stream-level
+  WINDOW_UPDATE from Aurora, more than one of each over the transfer, and
+  every increment RFC-plausible; Aurora's own log reports receiving
+  exactly `200000 body bytes` -- the real proof nothing was silently
+  dropped or stalled at the flow-control layer, since a bug here would
+  either hang the fetch (server stops sending, nothing else ever arrives)
+  or under-report the byte count (data quietly lost). All 14 checks
+  passed on the first run. Full existing host suite and the complete
+  19-script QEMU regression sweep all pass unaffected.
+
+With 17.4.3, Aurora's own roadmap for "a practically usable HTTP/2
+client" is complete: ALPN, the connection-establishment handshake, a
+generic frame reader, full HPACK (static table, Huffman, dynamic table),
+GET through PATCH/DELETE/HEAD with real request bodies, connection reuse
+across sequential requests, and now flow control for responses of any
+realistic size. Multiplexing, PRIORITY, CONTINUATION, and PUSH_PROMISE
+remain deliberately out of scope -- genuine "HTTP/2 v2" territory, not
+needed for what this phase set out to prove.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 

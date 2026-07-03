@@ -13,6 +13,7 @@
 #include "huffman.h"
 #include "hpack_table.h"
 #include "hpack_decode.h"
+#include "window_update.h"
 
 static int failures;
 
@@ -761,6 +762,48 @@ int main(void)
             check_int("hpack_table_get(62): name matches", name_len == 6 && memcmp(name, "x-test", 6) == 0, 1);
             check_int("hpack_table_get(63) (one past the only entry) is rejected", hpack_table_get(&t, 63, &name, &name_len, &value, &value_len), -1);
         }
+    }
+
+    printf("HTTP/2 WINDOW_UPDATE frame (RFC 7540 SS6.9, Phase 17.4.3):\n");
+    {
+        uint8_t buf[H2_FRAME_HEADER_LEN + 4];
+
+        /* build: connection-level (stream_id 0), a mid-size increment */
+        int n = h2_window_update_build(buf, sizeof buf, 0, 32768);
+        check_int("connection-level WINDOW_UPDATE builds", n > 0, 1);
+        h2_frame_header h; h2_parse_frame_header(buf, (size_t)n, &h);
+        check_int("WINDOW_UPDATE: type is WINDOW_UPDATE", h.type, H2_TYPE_WINDOW_UPDATE);
+        check_int("WINDOW_UPDATE: stream_id is 0 (connection-level)", (int)h.stream_id, 0);
+        check_int("WINDOW_UPDATE: length is 4", (int)h.length, 4);
+        uint32_t got;
+        check_int("WINDOW_UPDATE: round-trips through parse", h2_window_update_parse(buf + H2_FRAME_HEADER_LEN, 4, &got), 0);
+        check_int("WINDOW_UPDATE: parsed increment matches", (int)got, 32768);
+
+        /* build: stream-level, a small increment */
+        n = h2_window_update_build(buf, sizeof buf, 7, 1);
+        h2_parse_frame_header(buf, (size_t)n, &h);
+        check_int("stream-level WINDOW_UPDATE: stream_id preserved", (int)h.stream_id, 7);
+        h2_window_update_parse(buf + H2_FRAME_HEADER_LEN, 4, &got);
+        check_int("stream-level WINDOW_UPDATE: increment of 1 round-trips", (int)got, 1);
+
+        /* the reserved top bit (RFC 7540 SS6.9: "MUST be ignored on receipt")
+         * must not corrupt the 31-bit increment when a peer sets it. */
+        uint8_t reserved_set[4] = { 0x80, 0x00, 0x10, 0x00 };   /* reserved bit + increment 0x1000 */
+        check_int("reserved bit on the wire doesn't corrupt the increment",
+                  h2_window_update_parse(reserved_set, 4, &got), 0);
+        check_int("reserved bit on the wire: increment still correct", (int)got, 0x1000);
+
+        /* malformed / out-of-range rejection */
+        check_int("WINDOW_UPDATE build rejects a zero increment", h2_window_update_build(buf, sizeof buf, 0, 0), -1);
+        check_int("WINDOW_UPDATE build rejects an increment past the 31-bit range",
+                  h2_window_update_build(buf, sizeof buf, 0, 0x80000000u), -1);
+        check_int("WINDOW_UPDATE build rejects an undersized buffer", h2_window_update_build(buf, 5, 0, 1), -1);
+        uint8_t zero_increment[4] = { 0, 0, 0, 0 };
+        check_int("WINDOW_UPDATE parse rejects a zero increment (RFC 7540 SS6.9 MUST)",
+                  h2_window_update_parse(zero_increment, 4, &got), -1);
+        uint8_t wrong_len[3] = { 0, 0, 1 };
+        check_int("WINDOW_UPDATE parse rejects a payload that isn't exactly 4 bytes",
+                  h2_window_update_parse(wrong_len, 3, &got), -1);
     }
 
     printf(failures ? "\nHTTP/2 FRAME TEST: %d FAILURE(S)\n" : "\nHTTP/2 FRAME TEST: ALL PASS\n", failures);

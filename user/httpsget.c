@@ -112,6 +112,22 @@
  * sequence, never multiplexed; multiplexing, PRIORITY, CONTINUATION, and
  * PUSH_PROMISE remain out of scope.
  *
+ * Flow control (Phase 17.4.3, RFC 7540 §6.9, new `http2/window_update.c`):
+ * `h2_fetch()` tracks its own receive windows -- one connection-level
+ * (`session_slot.h2_conn_recv_window`, spanning every request on this
+ * connection) and one stream-level (reset fresh per request) -- both
+ * decremented by a DATA frame's full payload length (padding included)
+ * and topped back up with a real WINDOW_UPDATE once either drops below
+ * half its initial value. Without this, a response over roughly 32 KB
+ * would eventually stall: the server would stop sending, correctly
+ * believing Aurora's advertised window was exhausted, and Aurora would
+ * have no way to tell it otherwise. Incoming WINDOW_UPDATE frames from the
+ * server are recognized and validated but not acted on -- Aurora's own
+ * request bodies always fit under the default window regardless of
+ * anything the server advertises, so there's nothing to wait for on the
+ * send side. Still only ever one stream's worth of window math at a time,
+ * matching everything else about this client's h2 support.
+ *
  * The end-to-end acceptance program: the SAME freestanding TLS/x509/crypto stack,
  * driven over Aurora's OWN network stack (DNS -> TCP -> TLS 1.3 -> HTTP/1.1),
  * fetching a real web page. Deliberately dumb and diagnostic — no HTTP/2, no
@@ -217,6 +233,7 @@
 #include "headers.h"
 #include "hpack_table.h"
 #include "hpack_decode.h"
+#include "window_update.h"
 
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
@@ -336,6 +353,17 @@ typedef struct {
                                      * strictly increasing). Reset to 1 by fetch_begin() every
                                      * time a fresh h2 connection is established, same as
                                      * h2_dyn_table above. */
+    int32_t     h2_conn_recv_window;   /* Phase 17.4.3: Aurora's own connection-level flow-
+                                        * control receive window (RFC 7540 §6.9) -- how many
+                                        * more DATA payload bytes, across every stream on this
+                                        * connection, the server may send before Aurora needs
+                                        * to top it back up with a WINDOW_UPDATE. Spans every
+                                        * request on this connection (unlike the per-stream
+                                        * window, which resets each request -- a local variable
+                                        * in h2_fetch(), not a slot field), so it's reset to
+                                        * H2_INITIAL_WINDOW_SIZE by fetch_begin() only when a
+                                        * fresh h2 connection is established, same as
+                                        * h2_dyn_table/next_h2_stream above. */
 } session_slot;
 static session_slot g_slots[TLS_SESSION_SLOTS];
 static uint64_t     g_slot_clock;
@@ -657,6 +685,21 @@ static int resp_done(void) { return g_target >= 0 && g_total >= g_target; }
                                     * body can legitimately take many more read()s/frames
                                     * than the two-frame handshake ever needs */
 
+/* Flow control (Phase 17.4.3, RFC 7540 §6.9). RFC 7540 §6.5.2's default
+ * SETTINGS_INITIAL_WINDOW_SIZE -- what's in effect, for BOTH the
+ * connection and every stream, as long as Aurora's own SETTINGS frame
+ * stays empty (17.1.1). This is the window Aurora itself is responsible
+ * for keeping topped up on the RECEIVE side (it's Aurora's own advertised
+ * allowance, governing how much the SERVER may send Aurora); the server's
+ * own advertised window (governing how much Aurora may send the server)
+ * doesn't need tracking here -- see h2_fetch()'s own comment on why. */
+#define H2_INITIAL_WINDOW_SIZE 65535
+/* Top up once less than half the initial window remains -- simple,
+ * conservative, and (per the roadmap) deliberately not per-stream-
+ * weighted or SETTINGS_INITIAL_WINDOW_SIZE-aware; one active stream at a
+ * time makes that unnecessary. */
+#define H2_WINDOW_UPDATE_THRESHOLD (H2_INITIAL_WINDOW_SIZE / 2)
+
 /* Exact (case-sensitive) match -- RFC 7540 §8.1.2 requires an h2 peer to
  * send header field names already lowercased, so this never needs to be
  * case-insensitive the way http.c's own ci_starts() has to be for
@@ -765,6 +808,29 @@ static int h2_synthesize_header_block(char *out, int cap, const hpack_header_fie
     return n;
 }
 
+/* Send a WINDOW_UPDATE for `stream_id` (0 for the connection) if `*window`
+ * has dropped to or below H2_WINDOW_UPDATE_THRESHOLD, topping it back up
+ * to H2_INITIAL_WINDOW_SIZE -- Phase 17.4.3. A no-op (returns 0 without
+ * sending anything) while there's still plenty of room. Returns -1 on a
+ * build/transport failure (diagnostic already printed). */
+static int h2_maybe_send_window_update(session_slot *slot, uint32_t stream_id, int32_t *window)
+{
+    if (*window > H2_WINDOW_UPDATE_THRESHOLD) return 0;
+
+    uint32_t increment = (uint32_t)(H2_INITIAL_WINDOW_SIZE - *window);
+    uint8_t buf[H2_FRAME_HEADER_LEN + 4];
+    int n = h2_window_update_build(buf, sizeof buf, stream_id, increment);
+    if (n < 0) { fprintf(2, "[httpsget] h2: could not build a WINDOW_UPDATE\n"); return -1; }
+
+    int sl = tls_conn_send_app(&slot->conn, buf, (size_t)n, g_scratch, sizeof g_scratch);
+    if (sl < 0) { fprintf(2, "[httpsget] h2: could not seal a WINDOW_UPDATE\n"); return -1; }
+    if (write_all(slot->fd, g_scratch, sl) != 0) { fprintf(2, "[httpsget] h2: write failed sending a WINDOW_UPDATE\n"); return -1; }
+
+    printf("[httpsget] h2: WINDOW_UPDATE sent (stream %u, +%u)\n", (unsigned)stream_id, (unsigned)increment);
+    *window = H2_INITIAL_WINDOW_SIZE;
+    return 0;
+}
+
 /* Send one request (Phase 17.1.3's h2_send_request(), extended -- 17.4.1
  * generalizes it from a hardcoded GET to any of the 16.5 --method verbs
  * with a request body for the body-bearing ones; 17.4.2 generalizes it
@@ -797,9 +863,22 @@ static int h2_synthesize_header_block(char *out, int cap, const hpack_header_fie
  * h2_data_parse()) are fed through resp_feed() the same way. This is
  * deliberately still just ONE active stream at a time, never multiplexed
  * (17.4.2 lets a connection carry a *sequence* of streams, not concurrent
- * ones), with no PRIORITY/PUSH_PROMISE/CONTINUATION/flow-control handling
- * beyond what's needed to read one stream to completion -- "HTTP/2 v2"
- * territory this phase intentionally leaves alone.
+ * ones), with no PRIORITY/PUSH_PROMISE/CONTINUATION handling -- "HTTP/2
+ * v2" territory this phase intentionally leaves alone.
+ *
+ * Flow control (Phase 17.4.3, RFC 7540 §6.9): every DATA frame's FULL
+ * payload length (padding included) decrements both `slot`'s own
+ * connection-level receive window and this call's own stream-level one;
+ * either going negative means the server sent more than Aurora ever
+ * authorized, a protocol violation this function refuses to tolerate.
+ * Whichever window drops to half its initial value gets a WINDOW_UPDATE
+ * topping it back up (h2_maybe_send_window_update()) -- without this, a
+ * real response over ~32 KB would eventually stall the server waiting for
+ * room Aurora never told it existed. Incoming WINDOW_UPDATE frames from
+ * the server are recognized and validated but not acted on: Aurora's own
+ * request bodies (POST_BODY_MAX, 4096 bytes) always fit under the RFC
+ * 7540 §6.9.2 default window (65535) regardless of anything the server
+ * says, so there's never a real need to wait for send-side room.
  *
  * Fills g_hr/g_resp/g_body exactly like the HTTP/1.1 path's own read loop
  * does (via the same resp_feed()), but does NOT fill `out`, scan for
@@ -825,6 +904,8 @@ static int h2_fetch(session_slot *slot, const struct url *u,
 
     uint32_t stream_id = slot->next_h2_stream;
     slot->next_h2_stream += 2;
+    int32_t stream_recv_window = H2_INITIAL_WINDOW_SIZE;   /* Phase 17.4.3 -- fresh per stream,
+                                                            * unlike slot->h2_conn_recv_window */
 
     static const char *ua = "Aurora-httpsget/0.3";
     const char *ct = bodylen > 0 ? (content_type ? content_type : "application/x-www-form-urlencoded") : 0;
@@ -884,6 +965,21 @@ static int h2_fetch(session_slot *slot, const struct url *u,
                         fprintf(2, "[httpsget] h2: server sent GOAWAY while reading the response\n");
                         return -1;
                     }
+
+                    if (fh.type == H2_TYPE_WINDOW_UPDATE && (fh.stream_id == 0 || fh.stream_id == stream_id)) {
+                        uint32_t increment;
+                        if (h2_window_update_parse(payload, payload_len, &increment) != 0) {
+                            fprintf(2, "[httpsget] h2: malformed WINDOW_UPDATE\n");
+                            return -1;
+                        }
+                        /* Acknowledged, not acted on -- see this function's
+                         * own doc comment for why Aurora never needs to wait
+                         * on one of these for its own small request bodies. */
+                        printf("[httpsget] h2: WINDOW_UPDATE received (stream %u, +%u)\n",
+                              (unsigned)fh.stream_id, (unsigned)increment);
+                        continue;
+                    }
+
                     if (fh.stream_id != stream_id) continue;   /* not our stream -- irrelevant */
                     if (fh.type == H2_TYPE_RST_STREAM) {
                         fprintf(2, "[httpsget] h2: server reset stream %u\n", (unsigned)stream_id);
@@ -915,15 +1011,38 @@ static int h2_fetch(session_slot *slot, const struct url *u,
                         if (fh.flags & H2_FLAG_END_STREAM) stream_ended = 1;
                     } else if (fh.type == H2_TYPE_DATA) {
                         if (!got_headers) { fprintf(2, "[httpsget] h2: DATA before HEADERS on stream %u\n", (unsigned)stream_id); return -1; }
+
+                        /* RFC 7540 §6.9.1: the FULL frame payload counts
+                         * against flow control, padding included -- not
+                         * just the de-padded "real" data bytes
+                         * h2_data_parse() extracts below. */
+                        slot->h2_conn_recv_window -= (int32_t)payload_len;
+                        stream_recv_window -= (int32_t)payload_len;
+                        if (slot->h2_conn_recv_window < 0 || stream_recv_window < 0) {
+                            fprintf(2, "[httpsget] h2: server exceeded the flow-control window\n");
+                            return -1;
+                        }
+
                         const uint8_t *data; size_t data_len;
                         if (h2_data_parse(payload, payload_len, fh.flags, &data, &data_len) != 0) {
                             fprintf(2, "[httpsget] h2: malformed DATA frame\n"); return -1;
                         }
                         resp_feed(data, (int)data_len);
-                        if (fh.flags & H2_FLAG_END_STREAM) stream_ended = 1;
+
+                        int this_frame_ends_stream = (fh.flags & H2_FLAG_END_STREAM) != 0;
+                        /* No point topping up a stream's own window once
+                         * it's about to close -- only the connection-level
+                         * window still matters after that (it outlives this
+                         * stream, carrying whatever request comes next). */
+                        if (!this_frame_ends_stream &&
+                            h2_maybe_send_window_update(slot, stream_id, &stream_recv_window) < 0)
+                            return -1;
+                        if (h2_maybe_send_window_update(slot, 0, &slot->h2_conn_recv_window) < 0)
+                            return -1;
+                        if (this_frame_ends_stream) stream_ended = 1;
                     }
-                    /* anything else on our stream (WINDOW_UPDATE, PRIORITY, ...)
-                     * is silently skipped -- 17.3's deliberately minimal scope. */
+                    /* anything else on our stream (PRIORITY, ...) is
+                     * silently skipped -- 17.3's deliberately minimal scope. */
                 }
             }
         }
@@ -1147,6 +1266,7 @@ static int fetch_begin(session_slot *slot, const struct url *u, uint64_t now)
                     if (h2_handshake(slot) != 0) { close(slot->fd); return -1; }
                     hpack_table_init(&slot->h2_dyn_table, HPACK_DYN_ARENA_SIZE);
                     slot->next_h2_stream = 1;
+                    slot->h2_conn_recv_window = H2_INITIAL_WINDOW_SIZE;
                     slot->is_h2 = 1;
                 }
             } else {
