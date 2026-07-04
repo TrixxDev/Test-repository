@@ -1,6 +1,7 @@
 #include "serial.h"
 #include "io.h"
 #include "isr.h"
+#include "console.h"
 
 #define COM1 0x3F8
 #define SBUF_SIZE 256
@@ -44,6 +45,7 @@ static void sbuf_push(char c)
         sbuf[stail] = c;
         stail = next;
     }
+    console_notify();
 }
 
 static void on_serial(registers_t *regs)
@@ -53,16 +55,14 @@ static void on_serial(registers_t *regs)
         sbuf_push((char)inb(COM1));
 }
 
+/* Non-blocking peek. Caller must already hold interrupts off (see
+ * drivers/console.c's console_getchar()). */
 int serial_trygetchar(void)
 {
-    __asm__ volatile("cli");
-    if (shead == stail) {
-        __asm__ volatile("sti");
+    if (shead == stail)
         return -1;
-    }
     char c = sbuf[shead];
     shead = (shead + 1) % SBUF_SIZE;
-    __asm__ volatile("sti");
     return (unsigned char)c;
 }
 

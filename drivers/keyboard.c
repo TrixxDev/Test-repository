@@ -1,11 +1,12 @@
-/* PS/2 keyboard driver: scancode set 1 -> ASCII, echo, and an input buffer that
- * blocking readers (stdin) can wait on. */
+/* PS/2 keyboard driver: scancode set 1 -> ASCII, echo, and an input buffer
+ * console_read() (drivers/console.c) polls alongside the serial command
+ * channel. */
 #include "keyboard.h"
 #include "isr.h"
 #include "io.h"
 #include "kio.h"
 #include "keys.h"
-#include "scheduler.h"
+#include "console.h"
 
 #define KBD_DATA_PORT 0x60
 #define KBD_STATUS    0x64
@@ -49,7 +50,6 @@ static char extended_key(uint8_t sc)
 
 static char     kbuf[KBUF_SIZE];
 static volatile int khead, ktail;
-static thread_t *waiter;
 
 static void kbuf_push(char c)
 {
@@ -58,10 +58,7 @@ static void kbuf_push(char c)
         kbuf[ktail] = c;
         ktail = next;
     }
-    if (waiter) {
-        thread_wake(waiter);
-        waiter = NULL;
-    }
+    console_notify();
 }
 
 static void on_key(registers_t *regs)
@@ -118,38 +115,20 @@ static void on_key(registers_t *regs)
     }
 }
 
-/* Blocking read of one character from the keyboard buffer. */
-int keyboard_getchar(void)
-{
-    for (;;) {
-        __asm__ volatile("cli");
-        if (khead != ktail) {
-            char c = kbuf[khead];
-            khead = (khead + 1) % KBUF_SIZE;
-            __asm__ volatile("sti");
-            return (unsigned char)c;
-        }
-        waiter = thread_current();
-        thread_block();     /* yields with interrupts off; resumes on input */
-    }
-}
-
 void keyboard_install(void)
 {
     register_interrupt_handler(33, on_key);     /* IRQ1 -> vector 33 */
 }
 
 /* Non-blocking peek, used by console_read() to poll the keyboard alongside
- * the serial command channel without either source blocking the other. */
+ * the serial command channel. Caller must already hold interrupts off (this
+ * runs inside console_read()'s own cli/sti window so the two sources can be
+ * checked, and a wakeup registered, as one atomic step). */
 int keyboard_trygetchar(void)
 {
-    __asm__ volatile("cli");
-    if (khead == ktail) {
-        __asm__ volatile("sti");
+    if (khead == ktail)
         return -1;
-    }
     char c = kbuf[khead];
     khead = (khead + 1) % KBUF_SIZE;
-    __asm__ volatile("sti");
     return (unsigned char)c;
 }

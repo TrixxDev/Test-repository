@@ -11,5 +11,6 @@ void serial_write_char(char c);
  * Call once, after isr_install(). */
 void serial_install(void);
 
-/* Non-blocking: returns the next received byte, or -1 if none is buffered. */
+/* Non-blocking: returns the next received byte, or -1 if none is buffered.
+ * Caller must hold interrupts off (see drivers/console.c's console_getchar()). */
 int serial_trygetchar(void);
