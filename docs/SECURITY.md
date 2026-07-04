@@ -98,6 +98,7 @@ Run the vectors: `make crypto-test`.
 | **17.4.2** | **HTTP/2 connection reuse — sequential streams, no multiplexing** — an h2 connection is no longer closed after its one response. `session_slot` gains `next_h2_stream` (reset to 1 by `fetch_begin()` on every fresh h2 connection, `+= 2` after each `h2_fetch()` call — RFC 7540 §5.1.1: client-initiated stream IDs are odd and strictly increasing), so a second request on the same origin opens stream 3, not another stream 1; `h2_dyn_table` (already per-connection since 17.3) now genuinely spans more than one request too. The forced synthesized `Connection: close` line is gone — `g_hr.keep_alive` is now set directly from `h2_fetch()`'s own return value (did this stream's END_STREAM actually arrive), since HTTP/1.1's own keep-alive computation doesn't map onto h2 (h2 framing needs no Content-Length the way that computation assumes one always exists). `reusable()` gained a `content_length < 0` fast path returning reusable-with-no-size-check: the `FETCH_REUSE_MAX_BODY` cap exists to weigh "is draining the rest of a big HTTP/1.1 body worth it just to reuse the connection" — a question that doesn't apply to h2, where `h2_fetch()` always reads a response to its real end (END_STREAM) as part of getting it AT ALL, so the "cost" the cap is weighing was already paid regardless (this path is provably unreachable for HTTP/1.1, since `http_parse()` itself never sets `keep_alive` true when `content_length` is -1, so zero behavior change there). A latent data-loss bug in `h2_fetch()`'s read loop was also fixed: it used to stop draining a decrypted TLS record the instant the current stream's `END_STREAM` arrived mid-buffer, silently discarding any trailing bytes (harmless before this phase, since the connection was always closed moments later anyway; a real bug once it lives on to carry a second request) — fixed by draining every decrypted chunk fully regardless, only skipping *acting* on frames once the stream is already known complete. The EXISTING `reusable()`/`slot_close()` logic in `fetch()`/`fetch_one()` needed no changes at all — it's just being told the truth about h2 now instead of a hardcoded "never." Still one active stream at a time, in sequence, never multiplexed | `tools/h2_reuse_qemu.py` (new): `httpsget --alpn 10.0.2.2 /a /b` against a real frame-level server that accepts exactly ONE TCP connection for both requests, confirms the second request opens stream 3 (not another stream 1) on that same connection, and — the strongest possible proof of dynamic-table continuity — answers the *second* response using pure "Indexed Header Field" references (RFC 7541 §6.1, zero literal bytes) into dynamic-table entries the *first* response added via incremental indexing, decodable only if `h2_dyn_table` genuinely survived between the two requests. All 20 checks pass: exactly one connection, correct stream IDs, both distinct response bodies received intact, Aurora's own log showing "reusing open connection" (not a second handshake), and both requests reaching `status=200`. Full existing host suite and the complete 18-script QEMU regression sweep (this phase changes `reusable()`, shared with the HTTP/1.1 keep-alive path, so `keepalive_qemu.py` was re-verified with particular care) all pass unaffected | ✅ |
 | **17.4.3** | **Minimal HTTP/2 flow control — one active stream's worth** (RFC 7540 §6.9, new `http2/window_update.c`) — the last piece needed for a response over ~32 KB to complete without stalling. `h2_fetch()` now tracks two receive windows, both starting at the RFC 7540 §6.5.2 default `SETTINGS_INITIAL_WINDOW_SIZE` (65535, in effect since Aurora's own SETTINGS stays empty): `session_slot.h2_conn_recv_window` (connection-level, spanning every request on this connection, mirroring `next_h2_stream`/`h2_dyn_table`) and a stream-level one (a local variable, fresh per request). Every DATA frame's FULL payload length — padding included, per RFC 7540 §6.9.1 — decrements both; either going negative means the server sent more than Aurora ever authorized, treated as the protocol violation it is (request aborted). Once either drops to or below half its initial value, `h2_maybe_send_window_update()` sends a real WINDOW_UPDATE topping it back to 65535 — without this, the server would eventually and correctly stop sending, believing Aurora's advertised window was exhausted, with no way for Aurora to say otherwise. Incoming WINDOW_UPDATE frames from the server (connection- or stream-scoped) are recognized and validated (`h2_window_update_parse()`, rejecting a malformed 4-byte payload or the RFC-forbidden zero increment) but deliberately not acted on: Aurora's own request bodies (`POST_BODY_MAX`, 4096 bytes) always fit under the default window regardless of anything the server advertises, so gating sends on it would add real complexity for a wait that can never actually happen. No `SETTINGS_INITIAL_WINDOW_SIZE` parsing needed either — that setting only affects the *sender's* side of a given direction, and Aurora's own receive-side accounting is governed entirely by its own (unmodified, default) advertised value, never the peer's | `make h2-test` (15 new cases): `h2_window_update_build()`/`h2_window_update_parse()` round-tripping a connection-level and a stream-level frame, the reserved top bit (RFC 7540 §6.9: "MUST be ignored on receipt") not corrupting the 31-bit increment, and rejection of a zero increment, an out-of-31-bit-range increment, an undersized output buffer, and a payload that isn't exactly 4 bytes. `tools/h2_flowctl_qemu.py` (new): `httpsget --alpn 10.0.2.2 /big` against a real frame-level server answering with a 200000-byte body — deliberately far past the default window, forced into 13 separate DATA frames by the 16384-byte `H2_FRAME_PAYLOAD_MAX` cap — confirms the server receives BOTH a connection-level (stream 0) and a stream-level (stream 1) WINDOW_UPDATE from Aurora, more than one of each kind sent over the transfer, every received increment RFC-plausible, and — the real proof nothing was silently dropped at the flow-control layer — Aurora's own log reporting exactly `200000 body bytes` received. All 14 checks pass on the first run. Full existing host suite and the complete 19-script QEMU regression sweep all pass unaffected | ✅ |
 | **17.5.1** | **HTTP/2 hardening: fuzzing + sanitizer-enabled host testing — opens the "17.5 Hardening" series** — no new RFC surface; the goal is finding real bugs in what's already built, not adding more of it. New `tools/h2_fuzz.c`: a deterministic (fixed-seed, reproducible) fuzz harness feeding random and deliberately malformed bytes into every `http2/` decode entry point a network peer's bytes can reach — the HPACK header-block decoder (including forced-Huffman-bit string literals), the generic frame reader, DATA frame parsing, SETTINGS payload-length validation, WINDOW_UPDATE parsing, and Huffman decode directly — checking not just "did it crash" but that every documented output invariant still holds (a decoded count never exceeds the capacity it was given; a returned pointer always falls inside the buffer it's supposed to point into). New `make h2-fuzz` (fast plain build, many iterations) and `make h2-fuzz-san`/`make h2-test-san` (GCC `-fsanitize=address,undefined` — specifically GCC, not clang, since clang's own sanitizer runtime isn't installed in this environment — applied to the fuzz harness and, as a standing regression target, the *existing* fixed-vector `h2-test` suite too) | **Two real bugs found and fixed, both before this phase's own commit landed anywhere:** (1) A genuine out-of-bounds read in `hpack_table_get()` (`http2/hpack_table.c`) — `if ((int)dyn_index >= t->count)` cast an `unsigned` value to `int` for the comparison; an HPACK index whose `dyn_index` (index − 62) exceeded `INT_MAX` (any value up to `UINT32_MAX` is a legitimately-encoded RFC 7541 §5.1 integer as far as the decoder's own overflow check is concerned) wrapped to a *negative* `int`, silently passing the bounds check and indexing `t->entries[]` with a massive out-of-range value — a real, network-triggerable memory-safety bug a malicious or simply buggy HTTP/2 server could hit with an ordinary-looking HEADERS frame. Fixed by comparing entirely in unsigned arithmetic (`dyn_index >= (unsigned)t->count`), which is both correct for every possible `index` value and exactly as cheap. (2) A stack buffer overflow in the TEST HARNESS itself — `tools/h2_test.c`'s `check_hex()` used a fixed `hex[64]` with no capacity check at all; the 98-byte hex vector from 17.2.2's own Appendix C.5.3 test needs 197 bytes, silently overflowing the stack on every `h2-test` run since that commit, undetected because nothing observable happened to depend on the corrupted bytes until ASan's stack redzones caught it here. Fixed by widening the buffer and giving `tohex()` an explicit capacity parameter it now actually checks — fail loudly, the same discipline the production code has followed all along, that this one helper had quietly skipped. Verified: `make h2-fuzz` (6 targets × 200,000 iterations, re-run across 6 independent seeds — 1, 42, 1337, 0xdeadbeef, 0xc0ffee, 999999999 — for over 18 million total operations) all pass after the fix; `make h2-fuzz-san`/`make h2-test-san` (GCC ASan+UBSan, multiple seeds) pass clean; the complete existing host suite and 19-script QEMU regression sweep re-verified unaffected by the `hpack_table_get()` fix (a strict rejection of previously-mishandled out-of-range indices no legitimate response would ever use) | ✅ |
+| **17.5.2** | **HTTP/2 hardening: stress & interoperability — closes the "17.5 Hardening" series** — five independent stress dimensions, each with its own QEMU test against a real frame-level (or, for interop, genuinely independent) server: (1) large responses — `user/httpsget.c` gains `--repeat N` (loops `fetch_one()` N times over the same path on one connection — Aurora's own shell caps a typed command at `ARG_MAX`, 16 tokens, so "one path argument per request" cannot reach "hundreds"), used for 1/5/20 MB single-stream responses (`tools/h2_large_qemu.py`); (2) `tools/h2_longlived_qemu.py` — 300 sequential requests over one reused connection, stream IDs reaching 599, the HPACK dynamic table surviving hundreds of insert/evict cycles; (3) `tools/h2_hpack_stress_qemu.py` — a ~3000-byte single header value, 40 `Set-Cookie` headers in one response, three back-to-back Dynamic Table Size Updates in one header block, and 40 fields whose cumulative size forces eviction *within* a single block rather than gradually across many; (4) `tools/h2_goaway_qemu.py` — GOAWAY arriving instead of the server's own SETTINGS, and GOAWAY arriving mid-response after HEADERS plus an incomplete DATA frame; (5) `tools/h2_nginx_interop_qemu.py` — a real, unmodified `nginx` (Ubuntu's stock package, `--with-http_v2_module`, launched from its own throwaway config, never touching the system's default site) as the first peer in this whole project that isn't a hand-rolled Python script | **Three real bugs found, none of them hypothetical — each one only surfaced because this phase pushed past what any prior phase's hand-chosen scenario happened to exercise:** (1) **A genuine TCP protocol bug** (`net/tcp.c`'s `tcp_input()`): a duplicate, out-of-order, or window-rejected segment got ZERO acknowledgment — the ACK-send condition was only `if (c->tcb.rcv_nxt != before)`, true exclusively when a segment actually advanced the receive sequence. RFC 793/5681 require an immediate current ACK in all three cases regardless; without one, a real kernel TCP sender (Linux, not a hand-rolled test peer) has no signal that Aurora already has a segment it retransmitted, and can stall the connection indefinitely waiting for feedback that never comes. First surfaced as a dead stall at ~340 KB into a large response — a size no test before this phase had ever attempted (17.4.3's own flow-control test topped out at 200 KB). Fixed by sending a current ACK for any data- or FIN-bearing segment, not only ones that advance `rcv_nxt`. A related but independent defect in the same area was fixed alongside it: `tcp_tick()` kept blindly retransmitting a still-`pending` segment on a connection that had already gone `TCP_CLOSED` (a RST doesn't itself clear `rtx.pending`) — harmless before, but pointless and it kept spamming a peer that had long since forgotten the connection existed. (2) **Cookies never actually flowed both directions over HTTP/2.** `http2/headers.c`'s `h2_build_headers()` had no cookie parameter at all — a session cookie learned from an h2 response's own `Set-Cookie` (stored correctly the whole time, via the exact same `resp_feed()`/`cookie_jar_set()` path HTTP/1.1 uses) was simply never sent back on a *later* h2 request, even one reusing the very connection that set it; cookie persistence silently only worked in one direction. Found while designing this phase's own "many cookies" HPACK-stress scenario, not by inspection. Fixed: `http2/hpack.h` gains `HPACK_IDX_COOKIE` (static table index 32); `h2_build_headers()` takes an optional cookie value, encoded exactly like `user-agent` (a literal, never dynamically indexed — this encoder never indexes a value that varies per request rather than describing the connection itself); `h2_fetch()` builds it from the cookie jar via `cookie_jar_build_header()`, identically to `build_request()`'s own HTTP/1.1 Cookie header. Verified end to end by `h2_hpack_stress_qemu.py`'s own `/echo` step: 40 cookies set by one response, `COOKIE_JAR_N` (32) forcing real LRU eviction, and the *real* Cookie header on a later real request (decoded by the test's own from-scratch parser) shown to contain exactly the 32 survivors and none of the 8 evicted. (3) **A test-harness bug that looked like a protocol bug until measured.** After fixing (1), a *different* failure appeared further into large-response testing: an outbound WINDOW_UPDATE write failing outright. Root cause was in the test's OWN Python server, not Aurora: `tls.sendall()` returning only means the OS queued the bytes in its own send buffer, not that the peer received them — at this environment's measured real throughput (~1.2-1.5 KB/s; Aurora's own from-scratch ChaCha20-Poly1305 record decryption on an emulated i686 CPU is the bottleneck, not the network), Aurora is still slowly receiving and acking a large response for a long time after `sendall()` returns. The test's server was closing the socket immediately afterward, stranding that still-in-flight data against an already-torn-down socket — any further packet from Aurora (a routine WINDOW_UPDATE ack) got an immediate "no such connection" RST from the peer OS, which then made Aurora's own next write fail outright. Diagnosed by direct measurement (a throughput probe, and a background investigation agent that traced the exact TCP sequence numbers involved) after an initial wrong hypothesis (a data race in `tcp_xmit()`'s shared static buffer) was tried, re-tested, and found NOT to fix the symptom — the wrong fix was reverted rather than kept on the theory that it might help. Fixed in the test's own server: keep draining (as real H2 frames, not raw discarded bytes — a second bug in the fix's own first draft) whatever Aurora sends back until it goes idle, before closing. Given the ~1.2-1.5 KB/s throughput ceiling this phase measured, 5 MB and 20 MB were tested with a single fetch each rather than `--repeat 2`'s double-fetch (which 1 MB alone still uses) — the "no leak on repeat" property that would have proven is already established twice over: once at 1 MB here, and independently at full connection-reuse scale by item 2's own 300-request run. Verified: all five QEMU tests pass — 1/5/20 MB (`h2_large_qemu.py`), 300 requests (`h2_longlived_qemu.py`), all HPACK-stress scenarios including the cookie round-trip (`h2_hpack_stress_qemu.py`), both GOAWAY scenarios (`h2_goaway_qemu.py`), and real nginx interop (`h2_nginx_interop_qemu.py`); the full existing host suite, `h2-fuzz`, and a broad QEMU regression sweep (including `keepalive_qemu.py`, since the `net/tcp.c` fix touches code shared by every TCP connection Aurora ever makes, not just h2) all re-verified unaffected | ✅ |
 
 With X25519 done the **cryptographic** toolbox for a TLS 1.3 ChaCha20-Poly1305
 client is complete — hash, MAC, HKDF, AEAD, record layer, and now key agreement.
@@ -3449,6 +3450,189 @@ Verified:
   sweep, re-verified against the `hpack_table_get()` fix specifically
   (a strict rejection of an out-of-range index no legitimate server
   response would ever produce) -- unaffected.
+
+## Step 17.5.2 — HTTP/2 hardening: stress & interoperability
+
+17.5.1 proved fuzzing pays for itself by finding a real bug within
+minutes. This phase asks a different question: does everything already
+built hold up not against random bytes, but against genuinely large
+scale, genuinely long-lived state, and genuinely independent
+implementations nobody on this project wrote? Five sub-items, each with
+its own QEMU test, closing out the "17.5 Hardening" series.
+
+**Item 1 -- large responses (1/5/20 MB).** The biggest response any test
+had ever attempted was 200 KB (17.4.3's own flow-control test). Reaching
+"hundreds of typed path arguments" or "one huge fetch" ran straight into a
+shell limit that had nothing to do with HTTP/2 at all: `user/sh.c`'s
+`tokenize()` caps a typed command at `ARG_MAX` (16) tokens, so "one path
+argument per fetch" cannot scale past a handful of requests regardless of
+`httpsget`'s own `MAX_PATHS`. `httpsget.c` gains `--repeat N`: one short
+typed command loops `fetch_one()` N times over the same path, reusing
+whatever connection the first iteration opened exactly the way repeating
+that path N times in `argv` already would -- no new fetch logic, just a
+way to reach a large N without a large `argv`.
+
+**Item 2 -- long-lived connections.** `tools/h2_longlived_qemu.py`: 300
+sequential requests over ONE reused connection (`--repeat 300`), each
+response inserting one never-repeated dynamic-table entry so decoding
+request *N* only succeeds if every insertion and eviction before it (the
+dynamic table holds roughly 95 such entries before RFC 7541 §4.4 eviction
+starts) was tracked correctly -- and each response's connection-level
+window draining a little, crossing the replenishment threshold repeatedly
+across the run (17.4.3's own test only ever climbed to that threshold
+once, in one huge stream). All 18 checks pass: stream IDs reach 599,
+every response decodes correctly, multiple WINDOW_UPDATE cycles observed.
+
+**Item 3 -- HPACK stress.** `tools/h2_hpack_stress_qemu.py`, five
+scenarios over one connection: a ~3000-byte single custom header value
+(comfortably under `H2_HPACK_SCRATCH_MAX`'s 4096 bytes, but far past
+anything tested before); 40 `Set-Cookie` headers in one response; three
+Dynamic Table Size Update instructions back to back in one header block
+(RFC 7541 §6.3 explicitly permits this: shrink to 0, evicting everything,
+grow to 100, grow back to 4096, then prove the table still works with a
+literal-incremental insert); and 40 literal-incremental fields in one
+block whose cumulative size (~4120 bytes) exceeds the dynamic table's own
+4096-byte arena, forcing eviction *within a single decode call* rather
+than gradually across many requests, a dimension item 2's own test
+doesn't cover. Designing the cookie scenario is what surfaced this
+phase's second real bug (below).
+
+**Item 4 -- negative tests.** `tools/h2_goaway_qemu.py`: GOAWAY sent
+instead of the server's own SETTINGS (exercising `h2_handshake()`'s own
+check) and GOAWAY sent mid-response, after HEADERS plus one deliberately
+incomplete DATA frame with no END_STREAM (exercising `h2_fetch()`'s own
+check). Both already printed a diagnostic and returned -1 per code
+inspection and per 17.5.1's own fuzzing of the decode functions in
+isolation -- neither simulates a live, multi-frame protocol *exchange*
+the way a real, adversarial server does, so this test verifies it against
+one. Both scenarios: Aurora exits promptly (proven by the shell's own
+`[exit N]` line appearing well inside the wait budget, not just "QEMU's
+timeout eventually fired") with a nonzero status and no crash.
+
+**Item 5 -- real-server interoperability.** `tools/h2_nginx_interop_qemu.py`:
+a real, unmodified `nginx` (Ubuntu's stock package, `apt-get install
+nginx`, built with `--with-http_v2_module`; launched from its own
+throwaway config in a tempdir, never touching the system's default site
+or logs, killed on exit) -- the first peer in this entire project that
+isn't a hand-rolled Python script controlling both ends of the wire.
+Fetches a small text file and a 300000-byte binary file over one reused
+connection. Apache/Caddy/Envoy/nghttp2 were out of scope for this pass
+(none installs via a plain `apt-get install` in this environment; each
+would need a PPA, snap, or a from-source build) -- nginx alone still
+answers the question this item exists for.
+
+**Three real bugs found, none of them hypothetical:**
+
+1. **A genuine TCP protocol bug** (`net/tcp.c`'s `tcp_input()`): the
+   ACK-send condition was only `if (c->tcb.rcv_nxt != before)` -- true
+   exclusively when a segment actually advanced the receive sequence. A
+   duplicate segment (already-received data retransmitted because
+   Aurora's own earlier ack for it never went out), a genuinely
+   out-of-order segment, or an in-order segment that didn't fit the
+   current window all got ZERO acknowledgment. RFC 793/5681 require an
+   immediate current ACK in every one of those cases -- without it, a
+   real sender has no way to learn "you already have this" or "here is my
+   real window" short of its own retransmit timer, and the connection can
+   stall indefinitely from the receiver's side. First surfaced as a dead
+   stall at ~340 KB into a large-response test -- past 200 KB, the
+   largest size any prior phase had ever attempted, and past whatever
+   threshold this exact interaction needed to actually manifest. Captured
+   directly: a real kernel TCP sender (Linux, via a Python test server,
+   not a hand-rolled test peer) retransmitting an already-received
+   segment several times in a row with Aurora completely silent in
+   response. Fixed by sending a current ACK for any data- or FIN-bearing
+   segment, not only ones that advance `rcv_nxt`. A related, independent
+   defect in the same area was fixed alongside it: `tcp_tick()` kept
+   blindly retransmitting a still-`pending` segment on a connection
+   that had already gone `TCP_CLOSED` (a RST doesn't itself clear
+   `rtx.pending`) -- harmless before, but pointless, and it kept spamming
+   a peer that had long since forgotten the connection existed. (An
+   initial hypothesis for a *different*, later symptom -- a data race on
+   `tcp_xmit()`'s shared static segment buffer, "fixed" with a `cli`/`sti`
+   critical section -- was tried, re-tested, found not to change the
+   outcome at all, and reverted; see bug 3 below for what the real cause
+   turned out to be. Recorded here as a reminder that a plausible-sounding
+   fix is not a verified one until the test that exposed the bug actually
+   passes because of it.)
+2. **Cookies never actually flowed both directions over HTTP/2.**
+   `http2/headers.c`'s `h2_build_headers()` had no cookie parameter at
+   all. A session cookie learned from an h2 response's own `Set-Cookie`
+   was stored correctly the entire time -- via the exact same
+   `resp_feed()`/`cookie_jar_set()` tail HTTP/1.1 responses already use,
+   shared code, nothing h2-specific to get wrong there -- but was simply
+   never sent back on a *later* h2 request, even one reusing the very
+   connection that set it. Cookie persistence silently worked in only one
+   direction over h2, since Phase 17.3 first made a real h2 GET possible,
+   and nothing before this phase ever tested a second h2 request that
+   depended on a cookie the first one set. Found while designing this
+   phase's own "many cookies" HPACK-stress scenario, not by code
+   inspection. Fixed: `http2/hpack.h` gains `HPACK_IDX_COOKIE` (static
+   table index 32, RFC 7541 Appendix A); `h2_build_headers()` takes an
+   optional cookie value, encoded exactly like `user-agent` already is --
+   a literal with an indexed name, never dynamically indexed, matching
+   this encoder's existing rule of never indexing a value that varies per
+   request rather than describing the connection/page itself;
+   `h2_fetch()` builds it from the cookie jar via
+   `cookie_jar_build_header()`, identically to `build_request()`'s own
+   HTTP/1.1 Cookie header, and now takes `now` for the jar's expiry
+   checks. Verified precisely, not just "a cookie arrived": the HPACK-
+   stress test's `/echo` step sets 40 distinct cookies from one response
+   (`COOKIE_JAR_N`, 32, forcing real LRU eviction of the 8 set first),
+   then decodes the *real* third request's own HEADERS frame and confirms
+   its Cookie header contains exactly the 32 survivors and none of the 8
+   evicted -- both the fix and the jar's eviction math proven against the
+   real wire encoding in one check.
+3. **A test-harness bug that looked like a protocol bug until measured.**
+   After fixing bug 1, a *different* failure appeared further into
+   large-response testing: an outbound WINDOW_UPDATE write failing
+   outright, well past where the original stall used to happen. This one
+   was in the test's OWN Python server, not in Aurora: `tls.sendall()`
+   returning only means the OS queued the bytes into its own send
+   buffer, not that Aurora received them. Direct measurement during this
+   same investigation put Aurora's real throughput at roughly 1.2-1.5
+   KB/s -- Aurora's own from-scratch ChaCha20-Poly1305 record decryption
+   running on an emulated i686 CPU is the bottleneck, not the
+   (effectively localhost) QEMU network -- meaning Aurora is still slowly
+   receiving and acknowledging a large response for a long time after
+   `sendall()` already returned. The test's server closed its socket
+   immediately afterward anyway, stranding that still-in-flight data
+   against an already-torn-down socket; any further packet Aurora sent
+   (an entirely routine WINDOW_UPDATE ack) got an immediate "no such
+   connection" RST from the peer OS, which then made Aurora's own next
+   write fail outright -- from Aurora's side, indistinguishable from a
+   real bug. Diagnosed by direct measurement (a standalone throughput
+   probe, and a background investigation agent that traced the exact TCP
+   sequence numbers in the RST) only after an *initial* wrong hypothesis
+   (bug 1's own `cli`/`sti` attempt, above) was tried, re-tested, and
+   shown NOT to change the outcome. Fixed in the test's own server: keep
+   draining whatever Aurora sends back -- parsed as real H2 frames, not
+   raw discarded bytes, a second, smaller bug caught in the fix's own
+   first draft when it silently stopped counting WINDOW_UPDATE cycles for
+   any single-fetch (`--repeat 1`) test -- until Aurora goes idle, before
+   closing. Given the ~1.2-1.5 KB/s ceiling this measurement established,
+   5 MB and 20 MB were tested with a single fetch each rather than
+   `--repeat 2`'s double-fetch (which 1 MB alone still uses, completing
+   in ~40 minutes; 5 MB and 20 MB at double-fetch would have cost roughly
+   2.5 and 10+ hours respectively) for a property -- no leak/stale-state
+   drift across repeated fetches on one connection -- already proven
+   twice over: once at 1 MB here, and independently, at full
+   connection-reuse scale, by item 2's own 300-request run.
+
+Verified:
+- `tools/h2_large_qemu.py`: 1 MB (`--repeat 2`), 5 MB, and 20 MB, all ALL
+  PASS -- exact byte counts, correct stream IDs, multiple WINDOW_UPDATE
+  cycles at every size, no leak/drift between the two 1 MB fetches.
+- `tools/h2_longlived_qemu.py`: 300 sequential requests, ALL PASS.
+- `tools/h2_hpack_stress_qemu.py`: all five scenarios (big header, many
+  cookies + real cookie-over-h2 round-trip, triple Dynamic Table Size
+  Update, intra-block mass eviction), ALL PASS.
+- `tools/h2_goaway_qemu.py`: both scenarios (handshake-time and
+  mid-response GOAWAY), ALL PASS.
+- `tools/h2_nginx_interop_qemu.py`: real nginx, ALL PASS.
+- Full existing host suite, `make h2-fuzz`, and a broad QEMU regression
+  sweep -- explicitly including `keepalive_qemu.py`, since the
+  `net/tcp.c` fix touches code shared by every TCP connection Aurora
+  makes, HTTP/1.1 included, not just h2 -- all re-verified unaffected.
 
 ## Step 14.x.6/14.x.7 — secure HTTPS proven END-TO-END inside QEMU
 
