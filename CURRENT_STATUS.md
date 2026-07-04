@@ -91,7 +91,8 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 | 10.2 | **Aurora system menu** (in the windowserver): About / Settings / Close All Windows / Shut Down (`halt` syscall); launches apps via the menu | v1.1.1 | ✅ live-confirmed (`make demo-menu`) |
 | 10.3 | **Settings**: Desktop pane (wallpaper + accent → `/disk/settings.cfg`, live `WM_RELOAD_SETTINGS`, persists) + System pane (`sysinfo`) | v1.1.2 | ✅ live-confirmed (`make demo-settings`) |
 | 10.4 | Clipboard (`WM_CLIPBOARD_*`) — cross-process copy/paste | — | ⏳ NEXT (last of v1.1) |
-| 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) | — | ⏳ after the desktop milestone |
+| 8B | Ethernet/IP stack (virtio-net, ARP → IPv4 → UDP → TCP → DNS) **+ a full from-scratch TLS 1.3 / X.509 / HTTP(S) client, through HTTP/2** — this whole arc ran ahead of the desktop track and is tracked in detail in [docs/SECURITY.md](docs/SECURITY.md) (phases 11-17.5.2), not here | — | ✅ (HTTP/2 declared feature-complete, API frozen, as of 17.5.2) |
+| 18.0 | **Kernel I/O & Scheduling (new track, opened once 17.5.2 closed the HTTP/2 arc): serial (COM1) RX** — `drivers/serial.c` gains an IRQ4 handler + ring buffer; `drivers/console.c` merges it with the keyboard so QEMU test scripts can type shell commands as raw bytes over a socket-backed serial chardev instead of scancode-injecting through the monitor's `sendkey` (slow, one key per `~0.12s`, a shift-key map needed per script). Found and fixed a real bug along the way: the first version polled both sources in a busy loop instead of blocking, leaving the reading thread `READY` and stealing scheduler time from other threads instead of stepping out of the run queue — fixed by giving both keyboard and serial IRQ handlers a shared `console_notify()` that wakes one blocked waiter, the same pattern the keyboard driver used alone before | — | ✅ `tools/qemu_serial.py`; `h2_reuse_qemu.py` migrated as proof (20/20 checks) |
 | 10.1 | Aurora Assistant (userspace `aurorad`) + more desktop apps | — | ⏳ later |
 
 ## Verified behaviors
@@ -213,6 +214,12 @@ image re-parse; the real `kernel/gfx.c`/`desktop.c`/`wm.c` rendered to PNGs).
 - Graceful shutdown: init asks the logger to stop, force-kills survivors
   (netd), and reaps everything.
 - Clean teardown: address spaces, kernel stacks, PCBs reclaimed.
+- Serial command channel (18.0): COM1 RX (IRQ4) feeds the same console input
+  stream as the keyboard, so a QEMU test can connect to a socket-backed serial
+  chardev and type a shell command as raw bytes — no scancode injection, no
+  shift-key map, no per-character delay. Verified live (a raw socket sending
+  `id\n`/`help\n` got back exactly the expected shell output) and via
+  `tools/h2_reuse_qemu.py` migrated to the new channel, still 20/20 checks.
 
 > Phases 0–7 behaviors were exercised interactively in QEMU. The Phase 8A
 > behaviors above are verified by clean cross-builds and a host-side simulation

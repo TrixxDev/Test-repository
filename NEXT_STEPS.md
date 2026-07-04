@@ -146,16 +146,48 @@ Deferred until the desktop feels real (per the agreed priority): client-side
 shared-memory surfaces, animations, and the network stack. The current
 `app → IPC → windowserver → framebuffer` path is enough for the first windows.
 
-## Phase 8B — Networking (Branch A, deferred until after the desktop)
+## Phase 8B — Networking — DONE, ran ahead of this doc
 
-Still the right design (userspace `netd`, `app → IPC → netd → driver → hw`), but
-intentionally **after** the visual stack for a desktop-first OS.
+This section originally deferred networking until after the desktop and scoped
+TLS/HTTPS out entirely. In practice the network/security arc (virtio-net → ARP
+→ IPv4 → UDP/TCP → DNS/DHCP, then a from-scratch TLS 1.3 + X.509 + HTTP(S)
+client through HTTP/2) ran as its own track and is now feature-complete —
+tracked phase by phase in [docs/SECURITY.md](docs/SECURITY.md), not here. HTTP/2
+was declared "practically complete, API frozen" at phase 17.5.2, closing that
+arc and opening the 18.x track below. This doc (and [CURRENT_STATUS.md](CURRENT_STATUS.md))
+were not kept current during that arc; treat docs/SECURITY.md as authoritative
+for anything past phase ~10.
 
-- [ ] NIC driver: **virtio-net** (preferred over rtl8139 — simpler, faster, less
-  legacy cruft).
-- [ ] ARP → IPv4 → UDP → TCP → DNS, in that order, behind the existing socket
-  API. TCP will likely take longer than the whole loopback phase.
-- [ ] HTTP only after the above. Out of scope: TLS, HTTPS, IPv6, DHCP, Wi-Fi.
+## Phase 18.x — Kernel I/O & Scheduling (opened after 17.5.2 closed HTTP/2)
+
+The bugs found while hardening HTTP/2 (17.5.1/17.5.2) stopped being "RFC X not
+implemented" and started being two already-correct mechanisms interacting
+badly (a missing duplicate ACK, cookies not flowing back over h2, a test
+harness closing a socket before a slow peer finished reading). That's a sign
+the web-client stack is mature enough that the next real gains are in the
+kernel's execution model, not another protocol.
+
+- [x] **18.0 — Serial command channel for tests.** `drivers/serial.c` gains
+  RX (IRQ4) merged into the console alongside the keyboard, so QEMU tests type
+  commands as raw bytes over a socket-backed serial chardev instead of
+  scancode-injecting through the monitor's `sendkey`. See
+  [CURRENT_STATUS.md](CURRENT_STATUS.md)'s phase table and
+  `tools/qemu_serial.py`.
+- [ ] **18.1 — Wait queues + sleep/wakeup.** Generalize the single-waiter
+  block/wake pattern (keyboard, serial, pipes, sockets each roll their own
+  today) into one real primitive multiple threads can wait on.
+- [ ] **18.2 — Non-blocking I/O model.** `O_NONBLOCK` + `EAGAIN`/`EWOULDBLOCK`/
+  `EINTR` — today there's no way to distinguish "no data yet" from EOF or a
+  timeout; this has no real meaning without 18.1 underneath it, so the two
+  are one contract, not two sequential phases.
+- [ ] **18.3 — `poll()`/`select()`-style multi-source wait**, built on 18.1/18.2.
+- [ ] **18.4 — TCP sliding window + out-of-order reassembly** (`net/tcp.c`
+  currently tracks one outstanding segment at a time) — depends on 18.1 to
+  do cleanly, without a busy-loop architecture.
+- [ ] **18.5 — ChaCha20-Poly1305 optimization.** Deliberately last: 17.5.2
+  measured this project's from-scratch record decryption at ~1.2-1.5 KB/s on
+  emulated i686, but fixing TCP/blocking-I/O first may shift where the real
+  bottleneck actually is.
 
 ## Phase 10 — Desktop apps & Aurora Assistant
 
