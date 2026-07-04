@@ -8,7 +8,7 @@
 
 #define STACK_SIZE 8192
 
-enum { TS_READY, TS_BLOCKED, TS_ZOMBIE };
+enum { TS_READY, TS_BLOCKED, TS_SLEEPING, TS_ZOMBIE };
 
 struct thread {
     uint32_t esp;           /* saved kernel stack pointer (must stay first) */
@@ -23,6 +23,18 @@ struct thread {
     uint32_t user_stack;
     struct thread *next;
     struct thread *prev;
+    struct thread *wq_next; /* Phase 18.1: next waiter in the wait_queue_t it's
+                              * blocked on, or NULL. A thread is on at most one
+                              * wait queue at a time -- a separate link from
+                              * next/prev, which is the scheduler's own ring
+                              * and never changes membership when a thread
+                              * blocks. */
+    wait_queue_t *wq_owner; /* which wait_queue_t wq_next belongs to, or NULL.
+                              * Lets thread_free() self-remove a thread that's
+                              * killed while still parked on a queue -- without
+                              * this, freeing it would leave that queue's chain
+                              * holding a dangling pointer, a use-after-free
+                              * the next time something wakes the queue. */
 };
 
 extern void switch_task(uint32_t *old_esp_out, uint32_t new_esp);
@@ -42,6 +54,7 @@ static volatile int enabled;
 static struct { thread_t *t; uint32_t wake; int used; } sleepers[MAX_SLEEPERS];
 
 static void scheduler_tick(void);   /* PIT hook: wake due sleepers, then schedule */
+static void sleepers_cancel(thread_t *t);   /* cancel t's pending sleepers[] deadline, if any */
 
 /* First thing a freshly created user thread runs (in ring 0). */
 static void user_thread_start(void)
@@ -106,6 +119,8 @@ static thread_t *alloc_thread(uint32_t pd_phys, uint32_t start_eip)
     t->state      = TS_READY;
     t->proc       = NULL;
     t->start_arg  = NULL;
+    t->wq_next    = NULL;
+    t->wq_owner   = NULL;
     t->esp        = build_stack(t->kstack, start_eip);
     return t;
 }
@@ -195,6 +210,76 @@ void thread_wake(thread_t *t)
         t->state = TS_READY;
 }
 
+/* ---- Phase 18.1: wait queues -- the one shared blocking primitive ---- */
+
+void wait_queue_init(wait_queue_t *wq)
+{
+    wq->head = wq->tail = NULL;
+}
+
+/* Unlinks `t` from `wq` if it's on it. O(n) in the queue's own length, which
+ * in practice is tiny (a handful of threads at most) -- simplicity over a
+ * doubly-linked list nobody needs yet. */
+static void wait_queue_remove(wait_queue_t *wq, thread_t *t)
+{
+    thread_t **p = &wq->head;
+    thread_t *prev = NULL;
+    while (*p) {
+        if (*p == t) {
+            *p = t->wq_next;
+            if (t == wq->tail)
+                wq->tail = prev;
+            t->wq_next = NULL;
+            t->wq_owner = NULL;
+            return;
+        }
+        prev = *p;
+        p = &(*p)->wq_next;
+    }
+}
+
+void wait_enqueue(wait_queue_t *wq)
+{
+    /* Caller holds interrupts off (same lost-wakeup contract as thread_block()). */
+    current->wq_next = NULL;
+    current->wq_owner = wq;
+    if (wq->tail)
+        wq->tail->wq_next = current;
+    else
+        wq->head = current;
+    wq->tail = current;
+    current->state = TS_BLOCKED;
+    schedule();
+}
+
+void wait_wake_one(wait_queue_t *wq)
+{
+    thread_t *t = wq->head;
+    if (!t)
+        return;
+    wq->head = t->wq_next;
+    if (!wq->head)
+        wq->tail = NULL;
+    t->wq_next = NULL;
+    t->wq_owner = NULL;
+    sleepers_cancel(t);       /* a wait_event_timeout() waiter's backstop, if any */
+    thread_wake(t);
+}
+
+void wait_wake_all(wait_queue_t *wq)
+{
+    thread_t *t = wq->head;
+    while (t) {
+        thread_t *next = t->wq_next;
+        t->wq_next = NULL;
+        t->wq_owner = NULL;
+        sleepers_cancel(t);
+        thread_wake(t);
+        t = next;
+    }
+    wq->head = wq->tail = NULL;
+}
+
 /* PIT tick hook (IRQ0, interrupts off): wake any sleeper whose deadline has
  * passed, then run the normal preemptive scheduler. Signed compare so the tick
  * counter can wrap safely. */
@@ -209,25 +294,80 @@ static void scheduler_tick(void)
     schedule();
 }
 
-void thread_sleep_ticks(uint32_t nticks)
+/* Registers `t` to be woken at `pit_ticks() + nticks`, or degrades to a
+ * plain yield if the (small, fixed) table is full. Shared by
+ * thread_sleep_ticks() (pure duration sleep) and wait_event_timeout()
+ * (a wait queue with a timeout backstop). Caller sets `t`'s state and calls
+ * schedule() itself -- this only arms the deadline. */
+static int sleepers_arm(thread_t *t, uint32_t nticks)
 {
-    if (nticks == 0)
-        nticks = 1;
-    __asm__ volatile("cli");
     int slot = -1;
     for (int i = 0; i < MAX_SLEEPERS; i++)
         if (!sleepers[i].used) { slot = i; break; }
-    if (slot < 0) {                 /* table full: degrade to a plain yield */
+    if (slot < 0)
+        return -1;
+    sleepers[slot].t    = t;
+    sleepers[slot].wake = pit_ticks() + (nticks ? nticks : 1);
+    sleepers[slot].used = 1;
+    return slot;
+}
+
+/* Cancels `t`'s pending deadline, if any -- called whenever `t` is woken by
+ * something other than the timeout itself, so a stale entry can't fire a
+ * spurious wake later (or, worse, once `t` has been freed and its memory
+ * reused for a different thread). */
+static void sleepers_cancel(thread_t *t)
+{
+    for (int i = 0; i < MAX_SLEEPERS; i++)
+        if (sleepers[i].used && sleepers[i].t == t)
+            sleepers[i].used = 0;
+}
+
+void thread_sleep_ticks(uint32_t nticks)
+{
+    __asm__ volatile("cli");
+    if (sleepers_arm(current, nticks) < 0) {   /* table full: degrade to a plain yield */
         __asm__ volatile("sti");
         schedule();
         return;
     }
-    sleepers[slot].t    = current;
-    sleepers[slot].wake = pit_ticks() + nticks;
-    sleepers[slot].used = 1;
-    current->state = TS_BLOCKED;
+    current->state = TS_SLEEPING;
     schedule();                     /* switch away; the tick hook wakes us */
     __asm__ volatile("sti");
+}
+
+int wait_event_timeout(wait_queue_t *wq, uint32_t timeout_ms)
+{
+    /* Caller holds interrupts off (same contract as wait_enqueue()). */
+    if (timeout_ms == 0) {
+        wait_enqueue(wq);
+        return 1;
+    }
+    if (sleepers_arm(current, timeout_ms / 10) < 0)
+        return 0;               /* timer table full -- don't risk an unbounded wait */
+
+    current->wq_next = NULL;
+    current->wq_owner = wq;
+    if (wq->tail)
+        wq->tail->wq_next = current;
+    else
+        wq->head = current;
+    wq->tail = current;
+    current->state = TS_BLOCKED;
+    schedule();
+
+    /* Resumed. wait_wake_one()/wait_wake_all() unlink from wq AND cancel the
+     * sleepers[] slot before waking; the PIT tick hook's deadline does
+     * neither -- it only clears the slot. So still being on wq means the
+     * timeout fired first, not a real wake. */
+    int still_queued = 0;
+    for (thread_t *t = wq->head; t; t = t->wq_next)
+        if (t == current) { still_queued = 1; break; }
+    if (still_queued) {
+        wait_queue_remove(wq, current);
+        return 0;
+    }
+    return 1;
 }
 
 void thread_zombie_and_yield(void)
@@ -253,6 +393,13 @@ void thread_zombie_and_yield(void)
 void thread_free(thread_t *t)
 {
     __asm__ volatile("cli");
+    /* A forcibly killed thread (sys_kill) can be freed while still parked on
+     * a wait queue (e.g. blocked in a socket read). Without this, that
+     * queue's chain would keep a dangling pointer to freed memory, a
+     * use-after-free the next time something wakes it. */
+    if (t->wq_owner)
+        wait_queue_remove(t->wq_owner, t);
+    sleepers_cancel(t);
     t->prev->next = t->next;
     t->next->prev = t->prev;
     nthreads--;

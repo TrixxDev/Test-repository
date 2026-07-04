@@ -4,24 +4,25 @@
 #include "kio.h"
 #include "scheduler.h"
 
-/* One waiter: only one thread (the shell's read(0, ...)) ever blocks here at
- * a time. Woken by either driver's IRQ handler via console_notify(), the
- * same single-waiter pattern keyboard.c used before Phase 18.0 -- now
- * shared because two independent interrupt sources feed the same console. */
-static thread_t *waiter;
+/* Phase 18.1.4: the first migration off a hand-rolled single-waiter field
+ * onto the shared kernel wait_queue_t (kernel/scheduler.h) -- proof that the
+ * general primitive is a correct, drop-in replacement for exactly the
+ * pattern Phase 18.0 hand-rolled here (and that keyboard.c/serial.c's IRQ
+ * handlers, unchanged, wake it correctly through the same console_notify()
+ * they already call). Multiple waiters would now also work correctly (only
+ * one ever exists in practice today: the shell's read(0, ...)), which the
+ * old single-`thread_t *` field could not have supported. */
+static wait_queue_t console_wq = WAIT_QUEUE_INIT;
 
 void console_notify(void)
 {
-    if (waiter) {
-        thread_wake(waiter);
-        waiter = NULL;
-    }
+    wait_wake_one(&console_wq);
 }
 
 /* Blocks until a byte arrives from either the keyboard or the serial command
  * channel (Phase 18.0), whichever is first. Both sources are checked in one
  * interrupts-off window so a byte that arrives between the check and
- * thread_block() can't be missed (lost wakeup): keyboard_trygetchar() and
+ * wait_enqueue() can't be missed (lost wakeup): keyboard_trygetchar() and
  * serial_trygetchar() assume the caller already holds interrupts off. Serial
  * bytes are echoed here (the keyboard driver already echoes its own locally)
  * so a byte typed over serial is visible in the same log a QEMU test reads
@@ -42,8 +43,7 @@ static int console_getchar(void)
                 kputchar((char)c);
             return c;
         }
-        waiter = thread_current();
-        thread_block();     /* yields with interrupts off; resumes on input */
+        wait_enqueue(&console_wq);   /* yields with interrupts off; resumes on input */
     }
 }
 

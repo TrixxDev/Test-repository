@@ -37,6 +37,40 @@ void thread_sleep_ticks(uint32_t nticks);
 void thread_zombie_and_yield(void);  /* mark current ZOMBIE and switch away */
 void thread_free(thread_t *t);       /* unlink + free a non-running thread */
 
+/* Phase 18.1: the one blocking primitive every subsystem that waits for an
+ * external event (console/serial input, a pipe, a socket, later the
+ * filesystem) is meant to share, instead of each hand-rolling its own single
+ * "thread_t *waiter" field. A queue is just a FIFO of blocked threads; a
+ * thread belongs to at most one at a time. */
+typedef struct wait_queue {
+    thread_t *head;
+    thread_t *tail;
+} wait_queue_t;
+
+#define WAIT_QUEUE_INIT { 0, 0 }
+void wait_queue_init(wait_queue_t *wq);
+
+/* Adds the current thread to `wq` and blocks it (yields; never returns until
+ * woken). Caller must hold interrupts off across checking its own wait
+ * condition and calling this, exactly like thread_block()'s contract --
+ * otherwise a wakeup between the check and the enqueue is lost. Returns
+ * with interrupts still off. */
+void wait_enqueue(wait_queue_t *wq);
+
+/* Wake the oldest waiter on `wq` (FIFO) / every waiter on `wq`, if any.
+ * Same convention as thread_wake(): safe to call from any IRQ handler as-is
+ * (interrupt gates already run with IF=0), or from normal thread context
+ * wrapped in your own cli/sti. */
+void wait_wake_one(wait_queue_t *wq);
+void wait_wake_all(wait_queue_t *wq);
+
+/* Like wait_enqueue(), but also gives up after `timeout_ms` milliseconds if
+ * nobody woke it first (0 means wait forever, same as wait_enqueue()).
+ * Returns 1 if woken via wait_wake_one()/wait_wake_all(), 0 if it timed out
+ * (in which case it has already removed itself from `wq`). Same
+ * interrupts-off contract as wait_enqueue(). */
+int wait_event_timeout(wait_queue_t *wq, uint32_t timeout_ms);
+
 thread_t *thread_current(void);
 void  thread_set_proc(thread_t *t, void *proc);
 void *thread_get_proc(thread_t *t);
