@@ -115,7 +115,7 @@ def start_server(port, certfile, keyfile, on_request):
     return raw
 
 
-def run_qemu(serial_path, typed_cmd):
+def run_qemu(serial_path, typed_cmd, wait_s=180):
     tmp = tempfile.mkdtemp(); mon = os.path.join(tmp, "m.sock")
     if os.path.exists(serial_path): os.remove(serial_path)
     q = ["qemu-system-i386", "-kernel", "aurora.elf", "-m", "64M",
@@ -134,12 +134,14 @@ def run_qemu(serial_path, typed_cmd):
         km = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", ":": "shift-semicolon"}
         for ch in typed_cmd:
             s.sendall(("sendkey " + km.get(ch, ch) + "\n").encode()); time.sleep(0.12)
-        # Scenario 3 does two full TLS 1.3 handshakes (origins A and B)
-        # before settling -- confirmed by hand (same run, longer wait,
-        # completes cleanly) to occasionally need more than the usual 25s
-        # budget under emulation, the same margin session_cache_qemu.py
-        # needed for the same reason.
-        s.sendall(b"sendkey ret\n"); time.sleep(40)
+        # A full TLS 1.3 handshake's asymmetric crypto (X25519 ECDHE, cert
+        # verify) on this project's from-scratch, unaccelerated i686 crypto
+        # is the dominant cost here, not response size -- confirmed by hand
+        # (single-handshake scenarios reliably need well over the old 40s
+        # budget on this environment, comfortably under 180s). Scenario 3
+        # does TWO full handshakes (origins A and B) before settling, so it
+        # gets a larger budget at its own call site below.
+        s.sendall(b"sendkey ret\n"); time.sleep(wait_s)
         s.sendall(b"quit\n"); time.sleep(0.3); s.close()
     finally:
         p.terminate()
@@ -217,7 +219,8 @@ def main():
             return canned("200 OK", "landed on B", "close")
         handler_a["fn"] = on_a
         handler_b["fn"] = on_b
-        log3 = run_qemu(serial, "httpsget --auth-bearer secret999 10.0.2.2 /hop %d" % int(time.time()))
+        log3 = run_qemu(serial, "httpsget --auth-bearer secret999 10.0.2.2 /hop %d" % int(time.time()),
+                        wait_s=300)   # two full handshakes (origin A, then B)
         srv.close(); srv = None
         srvB.close(); srvB = None
 

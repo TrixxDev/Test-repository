@@ -138,12 +138,11 @@ def run_qemu(serial_path, typed_cmd):
             s.sendall(("sendkey " + km.get(ch, ch) + "\n").encode()); time.sleep(0.12)
         # Two full TLS 1.3 handshakes (origins A and B) plus a PSK-capable
         # third leg all happen before this command's output settles -- more
-        # crypto than any other single-command QEMU test in this suite, and
-        # slow enough under emulation that the usual 25s budget occasionally
-        # cuts the log off mid-run (confirmed by hand: identical run, longer
-        # wait, completes cleanly). 45s gives real margin without slowing
-        # the common case much.
-        s.sendall(b"sendkey ret\n"); time.sleep(45)
+        # crypto than any other single-command QEMU test in this suite. A
+        # single handshake's own asymmetric crypto can already take well
+        # over 100s on this project's unaccelerated i686 crypto under
+        # emulation, so two-plus needs considerably more than the old 45s.
+        s.sendall(b"sendkey ret\n"); time.sleep(350)
         s.sendall(b"quit\n"); time.sleep(0.3); s.close()
     finally:
         p.terminate()

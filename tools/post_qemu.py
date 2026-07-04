@@ -146,7 +146,10 @@ def run_qemu(serial_path, typed_cmd):
         km = {" ": "spc", ".": "dot", "/": "slash", "=": "equal", "&": "shift-7", "-": "minus"}
         for ch in typed_cmd:
             s.sendall(("sendkey " + km.get(ch, ch) + "\n").encode()); time.sleep(0.12)
-        s.sendall(b"sendkey ret\n"); time.sleep(25)
+        # One full TLS 1.3 handshake plus a keep-alive-reused redirect --
+        # the handshake's asymmetric crypto on this project's unaccelerated
+        # i686 crypto can take well over the old 25s budget under emulation.
+        s.sendall(b"sendkey ret\n"); time.sleep(180)
         s.sendall(b"quit\n"); time.sleep(0.3); s.close()
     finally:
         p.terminate()

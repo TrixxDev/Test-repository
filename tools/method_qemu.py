@@ -162,11 +162,12 @@ def run_qemu(serial_path, typed_cmd, wait_s=25):
             return ch
         for ch in typed_cmd:
             s.sendall(("sendkey " + key_for(ch) + "\n").encode()); time.sleep(0.12)
-        # A normal single-request scenario needs no more than the usual 25s;
-        # deliberately NOT bumped for scenario 3 (HEAD) -- if the hang-
-        # prevention fix were missing, that scenario should time out within
-        # this same ordinary budget and fail visibly, not be masked by a
-        # generously long wait.
+        # PUT/DELETE pass a larger wait_s below -- a full TLS 1.3 handshake's
+        # asymmetric crypto on this project's unaccelerated i686 crypto can
+        # take well over the default 25s. Scenario 3 (HEAD) deliberately
+        # keeps the default: if the hang-prevention fix were missing, it
+        # should time out within this same ordinary budget and fail
+        # visibly, not be masked by a generously long wait.
         s.sendall(b"sendkey ret\n"); time.sleep(wait_s)
         s.sendall(b"quit\n"); time.sleep(0.3); s.close()
     finally:
@@ -202,7 +203,8 @@ def main():
             observed.append((m, p, h, b))
             return canned("200 OK", "put ok", "close")
         handler["fn"] = on_put
-        log1 = run_qemu(serial, "httpsget --method PUT 10.0.2.2 /item newvalue123 %d" % int(time.time()))
+        log1 = run_qemu(serial, "httpsget --method PUT 10.0.2.2 /item newvalue123 %d" % int(time.time()),
+                        wait_s=180)   # a full TLS 1.3 handshake's asymmetric crypto dominates here
 
         put_req = observed[0] if observed else None
         checks = [
@@ -220,7 +222,8 @@ def main():
             observed2.append((m, p, h, b))
             return canned("200 OK", "deleted", "close")
         handler["fn"] = on_delete
-        log2 = run_qemu(serial, "httpsget --method DELETE 10.0.2.2 /item123 %d" % int(time.time()))
+        log2 = run_qemu(serial, "httpsget --method DELETE 10.0.2.2 /item123 %d" % int(time.time()),
+                        wait_s=180)
 
         del_req = observed2[0] if observed2 else None
         checks += [

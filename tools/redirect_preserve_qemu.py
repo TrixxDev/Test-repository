@@ -155,9 +155,10 @@ def run_qemu(serial_path, typed_cmd):
         for ch in typed_cmd:
             s.sendall(("sendkey " + km.get(ch, ch) + "\n").encode()); time.sleep(0.12)
         # A four-hop chain (one full handshake plus three keep-alive-reused
-        # requests) is more round trips than most single-command tests in
-        # this suite; 35s gives comfortable margin under emulation.
-        s.sendall(b"sendkey ret\n"); time.sleep(35)
+        # requests) -- the single handshake's own asymmetric crypto on this
+        # project's unaccelerated i686 crypto can take well over the old
+        # 35s budget under emulation.
+        s.sendall(b"sendkey ret\n"); time.sleep(180)
         s.sendall(b"quit\n"); time.sleep(0.3); s.close()
     finally:
         p.terminate()

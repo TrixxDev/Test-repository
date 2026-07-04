@@ -241,9 +241,10 @@ def run_qemu(serial_path, typed_cmd):
         for ch in typed_cmd:
             s.sendall(("sendkey " + key_for(ch) + "\n").encode()); time.sleep(0.12)
         # /upload -> /upload2 is a same-origin 307, so this is one full TLS
-        # handshake plus one keep-alive-reused request -- comparable to
-        # redirect_preserve_qemu.py's lighter chain, 35s gives margin.
-        s.sendall(b"sendkey ret\n"); time.sleep(35)
+        # handshake plus one keep-alive-reused request. The handshake's own
+        # asymmetric crypto on this project's unaccelerated i686 crypto can
+        # take well over the old 35s budget under emulation.
+        s.sendall(b"sendkey ret\n"); time.sleep(180)
         s.sendall(b"quit\n"); time.sleep(0.3); s.close()
     finally:
         p.terminate()
