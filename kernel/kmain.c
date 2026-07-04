@@ -86,6 +86,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     kprintf("[boot] interrupts...\n");     isr_install();
     kprintf("[boot] PIT timer...\n");      pit_install(100);
     kprintf("[boot] keyboard...\n");       keyboard_install();
+    kprintf("[boot] serial RX...\n");      serial_install();
     kprintf("[boot] PS/2 mouse...\n");     mouse_install(cmdline_has_word(mb, "abs"));
 
     kprintf("[boot] physical memory...\n");

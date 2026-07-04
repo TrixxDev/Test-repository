@@ -1,7 +1,9 @@
 #include "serial.h"
 #include "io.h"
+#include "isr.h"
 
 #define COM1 0x3F8
+#define SBUF_SIZE 256
 
 void serial_init(void)
 {
@@ -26,4 +28,46 @@ void serial_write_char(char c)
     while (!transmit_empty())
         ;
     outb(COM1, (uint8_t)c);
+}
+
+/* ---- RX: command channel ----
+ * A ring buffer filled by the IRQ4 handler; console_read() (drivers/console.c)
+ * polls it non-blockingly alongside the keyboard so either source can supply
+ * shell input. */
+static char sbuf[SBUF_SIZE];
+static volatile int shead, stail;
+
+static void sbuf_push(char c)
+{
+    int next = (stail + 1) % SBUF_SIZE;
+    if (next != shead) {
+        sbuf[stail] = c;
+        stail = next;
+    }
+}
+
+static void on_serial(registers_t *regs)
+{
+    (void)regs;
+    while (inb(COM1 + 5) & 0x01)      /* Data Ready */
+        sbuf_push((char)inb(COM1));
+}
+
+int serial_trygetchar(void)
+{
+    __asm__ volatile("cli");
+    if (shead == stail) {
+        __asm__ volatile("sti");
+        return -1;
+    }
+    char c = sbuf[shead];
+    shead = (shead + 1) % SBUF_SIZE;
+    __asm__ volatile("sti");
+    return (unsigned char)c;
+}
+
+void serial_install(void)
+{
+    register_interrupt_handler(36, on_serial);   /* IRQ4 -> vector 36 */
+    outb(COM1 + 1, 0x01);                        /* enable "data available" IRQ */
 }

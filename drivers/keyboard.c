@@ -138,3 +138,18 @@ void keyboard_install(void)
 {
     register_interrupt_handler(33, on_key);     /* IRQ1 -> vector 33 */
 }
+
+/* Non-blocking peek, used by console_read() to poll the keyboard alongside
+ * the serial command channel without either source blocking the other. */
+int keyboard_trygetchar(void)
+{
+    __asm__ volatile("cli");
+    if (khead == ktail) {
+        __asm__ volatile("sti");
+        return -1;
+    }
+    char c = kbuf[khead];
+    khead = (khead + 1) % KBUF_SIZE;
+    __asm__ volatile("sti");
+    return (unsigned char)c;
+}

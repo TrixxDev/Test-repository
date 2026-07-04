@@ -1,6 +1,29 @@
 #include "console.h"
 #include "keyboard.h"
+#include "serial.h"
 #include "kio.h"
+#include "scheduler.h"
+
+/* Blocks until a byte arrives from either the keyboard or the serial command
+ * channel (Phase 18.0), whichever is first. Neither driver's buffer can
+ * starve the other since both are polled non-blockingly each pass. Serial
+ * bytes are echoed here (the keyboard driver already echoes its own locally)
+ * so a byte typed over serial is visible in the same log a QEMU test reads
+ * back from that same serial port. */
+static int console_getchar(void)
+{
+    for (;;) {
+        int c = keyboard_trygetchar();
+        if (c >= 0)
+            return c;
+        c = serial_trygetchar();
+        if (c >= 0) {
+            kputchar((char)c);
+            return c;
+        }
+        schedule();
+    }
+}
 
 static int console_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf)
 {
@@ -8,7 +31,7 @@ static int console_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *
     (void)off;
     uint32_t n = 0;
     while (n < size) {
-        int c = keyboard_getchar();
+        int c = console_getchar();
         buf[n++] = (uint8_t)c;
         if (c == '\n')
             break;

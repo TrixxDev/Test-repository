@@ -35,6 +35,7 @@ openssl, the cross toolchain. Run from the repo root:
 python3 tools/h2_reuse_qemu.py
 """
 import os, socket, ssl, struct, subprocess, sys, tempfile, threading, time, shutil
+from qemu_serial import run_qemu_serial
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -302,42 +303,9 @@ def start_server(port, certfile, keyfile, result):
     return raw
 
 
-def run_qemu(serial_path, typed_cmd, wait_s=35):
-    tmp = tempfile.mkdtemp(); mon = os.path.join(tmp, "m.sock")
-    if os.path.exists(serial_path): os.remove(serial_path)
-    q = ["qemu-system-i386", "-kernel", "aurora.elf", "-m", "64M",
-         "-drive", "file=disk.img,format=raw,if=ide", "-display", "none",
-         "-serial", "file:" + serial_path, "-monitor", "unix:%s,server,nowait" % mon,
-         "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
-         "-no-reboot", "-no-shutdown"]
-    p = subprocess.Popen(q, cwd=ROOT, stderr=subprocess.DEVNULL)
-    try:
-        s = None
-        for _ in range(80):
-            try:
-                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(mon); break
-            except OSError: time.sleep(0.1)
-        time.sleep(7)
-        km = {" ": "spc", ".": "dot", "/": "slash", "-": "minus"}
-        def key_for(ch):
-            if ch in km: return km[ch]
-            if ch.isupper(): return "shift-" + ch.lower()
-            return ch
-        for ch in typed_cmd:
-            s.sendall(("sendkey " + key_for(ch) + "\n").encode()); time.sleep(0.12)
-        s.sendall(b"sendkey ret\n"); time.sleep(wait_s)
-        s.sendall(b"quit\n"); time.sleep(0.3); s.close()
-    finally:
-        p.terminate()
-        try: p.wait(timeout=3)
-        except subprocess.TimeoutExpired: p.kill()
-    return open(serial_path, errors="replace").read() if os.path.exists(serial_path) else ""
-
-
 def main():
     work = tempfile.mkdtemp(prefix="aurora-17x4x2-")
     prod = os.path.join(ROOT, "user/ca_roots.h")
-    serial = os.path.join(work, "serial.log")
     fails = 0
     srv = None
     try:
@@ -349,7 +317,7 @@ def main():
         result = {}
         srv = start_server(443, pem, key, result)
 
-        log = run_qemu(serial, "httpsget --alpn 10.0.2.2 /a /b %d" % int(time.time()))
+        log = run_qemu_serial("httpsget --alpn 10.0.2.2 /a /b %d" % int(time.time()), wait_s=35)
 
         reqs = result.get("requests", [])
         req1 = reqs[0] if len(reqs) > 0 else {}
