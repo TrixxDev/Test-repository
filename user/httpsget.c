@@ -921,7 +921,7 @@ static int h2_maybe_send_window_update(session_slot *slot, uint32_t stream_id, i
  * indistinguishable from a clean peer-initiated close and returned 0 --
  * silently handing the caller a truncated body as if it were the whole
  * response. */
-static int h2_fetch(session_slot *slot, const struct url *u,
+static int h2_fetch(session_slot *slot, const struct url *u, uint64_t now,
                     const char *method, const uint8_t *body, int bodylen, const char *content_type)
 {
     resp_reset(method);
@@ -935,12 +935,20 @@ static int h2_fetch(session_slot *slot, const struct url *u,
     const char *ct = bodylen > 0 ? (content_type ? content_type : "application/x-www-form-urlencoded") : 0;
     size_t ctlen = ct ? strlen(ct) : 0;
 
+    /* Phase 17.5.2: cookies learned from an EARLIER response (h2 or
+     * HTTP/1.1, same jar either way) are now actually sent back on an h2
+     * request too -- built exactly the way build_request()'s own HTTP/1.1
+     * Cookie header already is, previously only wired into that path. */
+    char cookie_hdr[512];
+    int cookie_len = cookie_jar_build_header(&g_cookies, u->host, u->path, u->https, now, cookie_hdr, sizeof cookie_hdr);
+
     uint8_t reqbuf[H2_FRAME_HEADER_LEN + 1024 + H2_FRAME_HEADER_LEN + POST_BODY_MAX];
     int rn = h2_build_headers(reqbuf, sizeof reqbuf, stream_id,
                               method, (size_t)strlen(method),
                               u->host, (size_t)strlen(u->host),
                               u->path, (size_t)strlen(u->path),
                               ua, (size_t)strlen(ua),
+                              cookie_len > 0 ? cookie_hdr : 0, cookie_len > 0 ? (size_t)cookie_len : 0,
                               ct, ctlen, (size_t)(bodylen > 0 ? bodylen : 0));
     if (rn < 0) { fprintf(2, "[httpsget] h2: could not build the HEADERS frame\n"); return -1; }
 
@@ -1358,7 +1366,7 @@ static int fetch_request(session_slot *slot, const struct url *u, uint64_t now,
      * here -- an Authorization header over h2 is a natural follow-up, not
      * attempted yet. */
     if (slot->origin.https && slot->is_h2) {
-        int rc = h2_fetch(slot, u, method, body, bodylen, content_type);
+        int rc = h2_fetch(slot, u, now, method, body, bodylen, content_type);
         if (rc < 0) return -1;
         closed = rc;
         g_hr.keep_alive = (rc == 1);

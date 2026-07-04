@@ -385,7 +385,7 @@ int main(void)
         {
             int n = h2_build_headers(out, sizeof out, 1,
                                      "GET", 3, "www.example.com", 15,
-                                     "/", 1, 0, 0, 0, 0, 0);
+                                     "/", 1, 0, 0, 0, 0, 0, 0, 0);
             check_int("GET / builds", n > 0, 1);
             h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
             check_int("GET /: frame type is HEADERS", h.type, H2_TYPE_HEADERS);
@@ -402,7 +402,7 @@ int main(void)
         {
             const char *ua = "Aurora-httpsget/0.3";
             int n = h2_build_headers(out, sizeof out, 3,
-                                     "GET", 3, "10.0.2.2", 8, "/page1", 6, ua, 19, 0, 0, 0);
+                                     "GET", 3, "10.0.2.2", 8, "/page1", 6, ua, 19, 0, 0, 0, 0, 0);
             check_int("GET /page1 + user-agent builds", n > 0, 1);
             h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
             check_int("GET /page1: stream_id preserved (3)", (int)h.stream_id, 3);
@@ -411,10 +411,31 @@ int main(void)
                       "8287010831302e302e322e3204062f70616765310f2b134175726f72612d68747470736765742f302e33");
         }
 
+        /* GET /page1 to 10.0.2.2, with a cookie but no user-agent (Phase
+         * 17.5.2) -- exercises HPACK_IDX_COOKIE (index 32), also a
+         * multi-byte index like user-agent's 58 above. Before this phase,
+         * h2_build_headers() had no cookie parameter at all: a session
+         * cookie learned from an earlier h2 response's Set-Cookie was
+         * never sent back on a later h2 request. The expected hex was
+         * computed programmatically (a small from-scratch Python HPACK
+         * encoder mirroring hpack_put_int()'s own algorithm), not
+         * hand-derived, the same discipline as every other vector here. */
+        {
+            const char *cookie = "session=abc123";
+            int n = h2_build_headers(out, sizeof out, 3,
+                                     "GET", 3, "10.0.2.2", 8, "/page1", 6, 0, 0,
+                                     cookie, strlen(cookie), 0, 0, 0);
+            check_int("GET /page1 + cookie builds", n > 0, 1);
+            h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
+            check_hex("GET /page1 + cookie payload matches the programmatically-computed HPACK bytes",
+                      out + H2_FRAME_HEADER_LEN, (int)h.length,
+                      "8287010831302e302e322e3204062f70616765310f110e73657373696f6e3d616263313233");
+        }
+
         /* POST /submit -- :method POST is also a static-table indexed value (index 3). */
         {
             int n = h2_build_headers(out, sizeof out, 1,
-                                     "POST", 4, "example.org", 11, "/submit", 7, 0, 0, 0, 0, 0);
+                                     "POST", 4, "example.org", 11, "/submit", 7, 0, 0, 0, 0, 0, 0, 0);
             check_int("POST /submit builds", n > 0, 1);
             h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
             check_hex("POST /submit payload matches the hand-derived HPACK bytes",
@@ -427,7 +448,7 @@ int main(void)
          * using GET's index 2 for the name, literal value "PUT"). */
         {
             int n = h2_build_headers(out, sizeof out, 1,
-                                     "PUT", 3, "example.org", 11, "/item", 5, 0, 0, 0, 0, 0);
+                                     "PUT", 3, "example.org", 11, "/item", 5, 0, 0, 0, 0, 0, 0, 0);
             check_int("PUT /item builds", n > 0, 1);
             h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
             check_hex("PUT /item payload matches the hand-derived HPACK bytes",
@@ -439,7 +460,7 @@ int main(void)
         {
             uint8_t small[10];
             int n = h2_build_headers(small, sizeof small, 1,
-                                     "GET", 3, "www.example.com", 15, "/", 1, 0, 0, 0, 0, 0);
+                                     "GET", 3, "www.example.com", 15, "/", 1, 0, 0, 0, 0, 0, 0, 0);
             check_int("HEADERS build rejects an undersized buffer", n, -1);
         }
     }
@@ -459,7 +480,7 @@ int main(void)
         const char *body = "field1=value1";
         uint8_t out[256];
         int n = h2_build_headers(out, sizeof out, 1,
-                                 "POST", 4, "example.org", 11, "/submit", 7, 0, 0,
+                                 "POST", 4, "example.org", 11, "/submit", 7, 0, 0, 0, 0,
                                  ct, strlen(ct), strlen(body));
         check_int("POST /submit with a body builds", n > 0, 1);
         h2_frame_header h; h2_parse_frame_header(out, (size_t)n, &h);
@@ -483,7 +504,7 @@ int main(void)
          * and add no Content-Type/Content-Length -- unchanged from before
          * this phase. */
         int n2 = h2_build_headers(out, sizeof out, 1,
-                                  "GET", 3, "www.example.com", 15, "/", 1, 0, 0, 0, 0, 0);
+                                  "GET", 3, "www.example.com", 15, "/", 1, 0, 0, 0, 0, 0, 0, 0);
         h2_frame_header h2out; h2_parse_frame_header(out, (size_t)n2, &h2out);
         check_int("bodyless GET: END_STREAM still set", (h2out.flags & H2_FLAG_END_STREAM) != 0, 1);
         check_hex("bodyless GET: payload unchanged from Phase 17.1.3 (no Content-Type/Length added)",

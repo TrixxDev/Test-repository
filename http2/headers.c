@@ -25,6 +25,7 @@ int h2_build_headers(uint8_t *out, size_t cap, uint32_t stream_id,
                      const char *authority, size_t authority_len,
                      const char *path, size_t path_len,
                      const char *user_agent, size_t user_agent_len,
+                     const char *cookie, size_t cookie_len,
                      const char *content_type, size_t content_type_len,
                      size_t body_len)
 {
@@ -61,6 +62,20 @@ int h2_build_headers(uint8_t *out, size_t cap, uint32_t stream_id,
      * the name, no value). */
     if (user_agent) {
         if (hpack_put_literal_indexed_name(out, cap, &pos, HPACK_IDX_USER_AGENT, user_agent, user_agent_len) != 0) return -1;
+    }
+
+    /* cookie (Phase 17.5.2) -- optional, always a literal, same shape as
+     * user-agent above. Before this, a session/auth cookie learned from an
+     * h2 response's own Set-Cookie (already stored correctly, see
+     * user/httpsget.c's resp_feed()/cookie_jar_set() path shared with
+     * HTTP/1.1) was never sent back on a LATER h2 request -- cookie
+     * persistence only worked in one direction over h2, even across a
+     * reused connection to the very same origin that set it. Not indexed
+     * into the dynamic table, matching :authority/:path just above: this
+     * encoder never dynamically indexes a value that varies per request
+     * rather than describing the connection/page itself. */
+    if (cookie && cookie_len > 0) {
+        if (hpack_put_literal_indexed_name(out, cap, &pos, HPACK_IDX_COOKIE, cookie, cookie_len) != 0) return -1;
     }
 
     /* Content-Type/Content-Length (Phase 17.4.1) -- only when a body

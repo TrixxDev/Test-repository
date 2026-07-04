@@ -1,7 +1,8 @@
-/* HTTP/2 HEADERS frame (RFC 7540 §6.2) — Phase 17.1.3, extended 17.4.1.
+/* HTTP/2 HEADERS frame (RFC 7540 §6.2) — Phase 17.1.3, extended 17.4.1, 17.5.2.
  *
  * Builds a real HTTP/2 request: the four required pseudo-headers (:method,
- * :scheme, :authority, :path -- RFC 7540 §8.1.2.3), a user-agent, and --
+ * :scheme, :authority, :path -- RFC 7540 §8.1.2.3), a user-agent, a cookie
+ * (Phase 17.5.2, optional -- see h2_build_headers()'s own comment), and --
  * when the request carries a body (Phase 17.4.1: POST/PUT/PATCH, matching
  * the userspace client's own --method support, 16.5) -- Content-Type and
  * Content-Length, all HPACK-compressed using ONLY the static table
@@ -16,8 +17,12 @@
  * :scheme (always "https" -- this client only ever reaches h2 over TLS, so
  * there is nothing to parameterize), :authority (`authority`/
  * `authority_len` -- the request's Host-equivalent), :path (`path`/
- * `path_len`), and user-agent (`user_agent`/`user_agent_len`; pass
- * `user_agent = NULL` to omit it).
+ * `path_len`), user-agent (`user_agent`/`user_agent_len`; pass
+ * `user_agent = NULL` to omit it), and cookie (`cookie`/`cookie_len`,
+ * Phase 17.5.2; pass `cookie = NULL` or `cookie_len = 0` to omit it --
+ * the caller builds this from the cookie jar itself, e.g. via
+ * cookie_jar_build_header(), the same way build_request()'s own HTTP/1.1
+ * Cookie header already does).
  *
  * `body_len` is the request body's length in bytes (0 for a bodyless
  * request -- GET/HEAD/OPTIONS/DELETE). When nonzero, `content_type`/
@@ -42,5 +47,6 @@ int h2_build_headers(uint8_t *out, size_t cap, uint32_t stream_id,
                      const char *authority, size_t authority_len,
                      const char *path, size_t path_len,
                      const char *user_agent, size_t user_agent_len,
+                     const char *cookie, size_t cookie_len,
                      const char *content_type, size_t content_type_len,
                      size_t body_len);

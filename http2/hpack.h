@@ -35,6 +35,7 @@
 #define HPACK_IDX_SCHEME_HTTPS   7   /* :scheme: https */
 #define HPACK_IDX_CONTENT_LENGTH 28  /* content-length (no value in the table) */
 #define HPACK_IDX_CONTENT_TYPE   31  /* content-type (no value in the table) */
+#define HPACK_IDX_COOKIE        32   /* cookie (no value in the table) */
 #define HPACK_IDX_USER_AGENT    58   /* user-agent (no value in the table) */
 
 /* Append one HPACK prefixed integer (RFC 7541 §5.1) to `out` at `*pos`
