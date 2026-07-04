@@ -6,6 +6,7 @@
 #include "inet.h"
 #include "perf.h"
 #include "string.h"
+#include "scheduler.h"
 
 struct tcp_hdr {
     uint16_t src_port;
@@ -55,6 +56,13 @@ struct conn {
     uint64_t  tw_deadline;      /* TIME_WAIT -> CLOSED moment */
     struct rtx rtx;
     int       used;
+    wait_queue_t rwq;           /* Phase 18.1.5: tsk_read() blocks here instead
+                                  * of busy-spinning on net_poll(); woken (as a
+                                  * latency optimization, not a correctness
+                                  * requirement -- see tcp_input()) whenever a
+                                  * segment changes anything a reader might
+                                  * care about. Zero-initialized, same as the
+                                  * rest of `conns[]`. */
 };
 
 static int test_drop_data;      /* test hook: drop the next data segment once */
@@ -257,6 +265,12 @@ int tcp_rx_total(int h)
     return c ? (int)c->rx_total : 0;
 }
 
+wait_queue_t *tcp_conn_waitq(int h)
+{
+    struct conn *c = conn_of(h);
+    return c ? &c->rwq : NULL;
+}
+
 int tcp_tx_idle(int h)
 {
     struct conn *c = conn_of(h);
@@ -413,6 +427,7 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
     if (flags & TCP_RST) {                       /* peer refused / reset */
         stats.resets++;
         c->tcb.state = TCP_CLOSED;
+        wait_wake_all(&c->rwq);      /* a blocked tsk_read() should notice promptly */
         return;
     }
 
@@ -522,4 +537,12 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
     default:
         break;
     }
+
+    /* Phase 18.1.5: wake a reader blocked in tsk_read()'s wait_event_timeout()
+     * as soon as this segment brought new data, a FIN, or any state change --
+     * covers the case where a DIFFERENT thread's net_poll() (not the blocked
+     * reader's own) is what actually delivered this segment. Not required for
+     * correctness (the reader's own short timeout re-polls regardless), just
+     * saves it up to that timeout's worth of latency. */
+    wait_wake_all(&c->rwq);
 }

@@ -6,6 +6,7 @@
 #include "inet.h"
 #include "kheap.h"
 #include "string.h"
+#include "scheduler.h"
 
 #define TCPSOCK_MSS 1400
 
@@ -103,8 +104,8 @@ void tcpsock_close(vfs_node_t *node)
     kfree(node);
 }
 
-/* recv: block (interrupts on so the GUI keeps running) until data arrives, the
- * peer closes (EOF -> 0), or the idle timeout elapses.
+/* recv: block until data arrives, the peer closes (EOF -> 0), or the idle
+ * timeout elapses.
  *
  * Phase 17.5.2 raised the idle timeout from 10s to 60s: large-response
  * stress testing found a real bug here, not just a size limit. A read()
@@ -118,13 +119,25 @@ void tcpsock_close(vfs_node_t *node)
  * own from-scratch TLS record decryption reproduced this reliably even
  * though the peer never stopped sending and the connection never actually
  * closed. 60s is still a real backstop against a truly wedged peer -- just
- * one that no longer fires during ordinary large-response traffic. */
+ * one that no longer fires during ordinary large-response traffic.
+ *
+ * Phase 18.1.5: this used to busy-spin calling net_poll() every iteration
+ * with no yield at all, since Aurora's network stack is cooperatively
+ * polled (net_poll() dispatches RX only when something explicitly calls it
+ * -- the virtio-net IRQ handler just acks the device, see drivers/virtio_net.c),
+ * not interrupt-driven. Blocking on the connection's own wait queue between
+ * attempts, with a short timeout, removes this thread from the scheduler's
+ * run queue entirely instead of burning its whole time slice every round --
+ * tcp_input() also wakes it early (a latency win, not a correctness
+ * requirement) whenever a DIFFERENT thread's net_poll() happens to deliver
+ * data for this connection first. */
 static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out)
 {
     (void)off;
     struct tcpsock *t = (struct tcpsock *)node->priv;
     if (!t || t->h < 0)
         return -1;
+    wait_queue_t *wq = tcp_conn_waitq(t->h);
     __asm__ volatile("sti");
     uint64_t dl = net_now_ms() + 60000;
     for (;;) {
@@ -138,6 +151,10 @@ static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out)
             return 0;                           /* peer closed and drained -> EOF */
         if (net_now_ms() >= dl)
             return 0;                           /* idle timeout -> EOF */
+        __asm__ volatile("cli");
+        if (wq)
+            wait_event_timeout(wq, 20);          /* short poll interval, may wake early */
+        __asm__ volatile("sti");
     }
 }
 

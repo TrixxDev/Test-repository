@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "syscall_abi.h"        /* struct tcp_stats (shared kernel/user ABI) */
+#include "scheduler.h"          /* wait_queue_t */
 
 /* Full RFC 793 state set; only CLOSED / SYN_SENT / ESTABLISHED are reached in
  * Phase 1. The rest are declared so later phases don't renumber the enum. */
@@ -70,6 +71,11 @@ int         tcp_recv(int h, void *buf, size_t cap);
 
 /* Total payload bytes received on connection `h` so far. */
 int         tcp_rx_total(int h);
+
+/* Phase 18.1.5: the wait queue tcp_input() wakes whenever a segment changes
+ * anything a blocked reader might care about (new data, FIN, RST, a state
+ * change) -- NULL for an invalid handle. */
+wait_queue_t *tcp_conn_waitq(int h);
 
 /* 1 if connection `h` has no unacknowledged segment outstanding (safe to send the
  * next one under the single-segment retransmit cache). */
