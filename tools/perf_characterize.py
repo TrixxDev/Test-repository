@@ -58,7 +58,14 @@ def run_qemu_two_lines(cmd1, cmd2, wait1, wait2, boot_wait=7):
     confusing, perfectly reproducible "leaf not yet valid" failure that
     had nothing to do with clocks, certs, or --profile at all; this
     function is the real fix, not a wider NOW_SKEW_S buffer.
+
+    wait1/wait2 are ceilings, not fixed sleeps: draining stops as soon as
+    a new "aurora> " prompt shows up (the command returned control to the
+    shell) and settles briefly to catch trailing output, rather than
+    always burning the whole budget -- at 1MB the real transfer took
+    ~206s but a fixed-wait version would still block for the full 1000s.
     """
+    PROMPT = b"aurora> "
     tmp = tempfile.mkdtemp()
     sock_path = os.path.join(tmp, "com1.sock")
     q = ["qemu-system-i386", "-kernel", "aurora.elf", "-m", "64M",
@@ -69,18 +76,26 @@ def run_qemu_two_lines(cmd1, cmd2, wait1, wait2, boot_wait=7):
     p = subprocess.Popen(q, cwd=ROOT, stderr=subprocess.DEVNULL)
     buf = b""
 
-    def drain_for(s, sock):
+    def drain(max_s, sock, early_exit=False):
         nonlocal buf
-        deadline = time.time() + s
-        sock.settimeout(0.5)
+        baseline = buf.count(PROMPT)
+        deadline = time.time() + max_s
+        settle_until = None
+        sock.settimeout(0.3)
         while time.time() < deadline:
             try:
                 chunk = sock.recv(65536)
             except socket.timeout:
-                continue
-            if not chunk:
-                break
-            buf += chunk
+                chunk = None
+            else:
+                if not chunk:
+                    break
+                buf += chunk
+            if early_exit and buf.count(PROMPT) > baseline:
+                if settle_until is None:
+                    settle_until = time.time() + 0.4
+                elif time.time() >= settle_until:
+                    return
 
     try:
         s = None
@@ -94,10 +109,12 @@ def run_qemu_two_lines(cmd1, cmd2, wait1, wait2, boot_wait=7):
         if s is None:
             raise RuntimeError("QEMU never opened its serial chardev socket")
         time.sleep(boot_wait)
+        drain(0.5, s)  # flush the boot banner's own prompt so it isn't
+                        # mistaken for cmd1's completion below
         s.sendall(cmd1.encode() + b"\n")
-        drain_for(wait1, s)
+        drain(wait1, s, early_exit=True)
         s.sendall(cmd2.encode() + b"\n")
-        drain_for(wait2, s)
+        drain(wait2, s, early_exit=True)
         s.close()
     finally:
         p.terminate()
