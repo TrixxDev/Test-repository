@@ -422,6 +422,15 @@ tcp-reassembly-test:
 	$(CC) -O2 -Iinclude -Inet -Ikernel -Iarch/i386 tools/tcp_reassembly_test.c net/tcp.c net/rxring.c -o /tmp/aurora_tcp_reassembly_test
 	/tmp/aurora_tcp_reassembly_test
 
+# Host-side TCP window management test (Phase 18.4.3): proves the receive
+# side advertises a genuinely full (0) window and reopens it promptly on
+# tcp_recv(), and that the send side actually throttles against a small
+# PEER-advertised window rather than only local ring/slot capacity.
+.PHONY: tcp-window-test
+tcp-window-test:
+	$(CC) -O2 -Iinclude -Inet -Ikernel -Iarch/i386 tools/tcp_window_test.c net/tcp.c net/rxring.c -o /tmp/aurora_tcp_window_test
+	/tmp/aurora_tcp_window_test
+
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
 SCREENSHOT := aurora_desktop.png
