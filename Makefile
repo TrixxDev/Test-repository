@@ -413,6 +413,15 @@ rxring-test:
 	$(CC) -O2 -Inet tools/rxring_test.c net/rxring.c -o /tmp/aurora_rxring_test
 	/tmp/aurora_rxring_test
 
+# Host-side TCP out-of-order reassembly test (Phase 18.4.2): drives the real
+# net/tcp.c tcp_input()/tcp_recv() with hand-crafted segments fed in a
+# deliberately scrambled order -- SLIRP can't be told to reorder packets on
+# the wire, so this is the only way to test it deterministically.
+.PHONY: tcp-reassembly-test
+tcp-reassembly-test:
+	$(CC) -O2 -Iinclude -Inet -Ikernel -Iarch/i386 tools/tcp_reassembly_test.c net/tcp.c net/rxring.c -o /tmp/aurora_tcp_reassembly_test
+	/tmp/aurora_tcp_reassembly_test
+
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display
 # needed) — a quick way to preview kernel/gfx.c + kernel/desktop.c.
 SCREENSHOT := aurora_desktop.png

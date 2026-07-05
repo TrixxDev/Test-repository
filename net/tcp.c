@@ -33,6 +33,24 @@ struct tcp_hdr {
 #define TCP_MAX_RETX  5             /* give up after this many resends */
 #define TCP_MAX_INFLIGHT 8          /* Phase 18.4.1: unacknowledged segments a
                                       * connection may have outstanding at once */
+#define TCP_MAX_OOO      8          /* Phase 18.4.2: out-of-order segments held
+                                      * pending the gap before them closing */
+#define TCP_OOO_SEG_MAX  1480       /* generous single-segment cap (a common
+                                      * peer MTU/MSS); a larger arrival is
+                                      * dropped rather than held -- rare, and
+                                      * the peer's own retransmit timer
+                                      * recovers it same as today */
+
+/* Phase 18.4.2: one segment that arrived ahead of what we've got
+ * contiguously (seq > rcv_nxt) -- held instead of dropped, so the peer
+ * doesn't have to blindly resend data we may already have once the gap
+ * before it closes. */
+struct ooo_seg {
+    uint8_t   data[TCP_OOO_SEG_MAX];
+    unsigned  len;
+    uint32_t  seq;
+    int       used;
+};
 
 /* Phase 18.4.1: one outstanding, sequence-consuming segment (SYN / data /
  * FIN) -- a pure ACK is never retransmitted. On RTO with no ACK, resent
@@ -66,6 +84,7 @@ struct conn {
                                          * from the front) */
     int       rtx_head;         /* index of the oldest unacked segment */
     int       rtx_count;        /* how many of rtx[] are currently used */
+    struct ooo_seg ooo[TCP_MAX_OOO];   /* Phase 18.4.2: held out-of-order arrivals */
     int       used;
     wait_queue_t rwq;           /* Phase 18.1.5: tsk_read() blocks here instead
                                   * of busy-spinning on net_poll(); woken (as a
@@ -536,17 +555,65 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
                      c->tcb.state == TCP_FIN_WAIT_2);
 
     uint32_t before = c->tcb.rcv_nxt;
-    if (plen > 0 && seq == c->tcb.rcv_nxt && receiving) {   /* in-order data only */
-        /* All-or-nothing: accept the segment only if it fits whole. One that
-         * doesn't fit is dropped *without* advancing rcv_nxt, so the peer
-         * retransmits once our window reopens -- never silently ACKed and lost
-         * (the old code advanced rcv_nxt by the full length even when it had
-         * truncated the copy). */
-        if (rxring_free(&c->rx) >= plen) {
-            rxring_push(&c->rx, payload, plen);
-            c->rx_total += plen;
-            c->tcb.rcv_nxt += plen;
+    if (plen > 0 && receiving) {
+        if (seq == c->tcb.rcv_nxt) {
+            /* All-or-nothing: accept the segment only if it fits whole. One
+             * that doesn't fit is dropped *without* advancing rcv_nxt, so the
+             * peer retransmits once our window reopens -- never silently
+             * ACKed and lost (the old code advanced rcv_nxt by the full
+             * length even when it had truncated the copy). */
+            if (rxring_free(&c->rx) >= plen) {
+                rxring_push(&c->rx, payload, plen);
+                c->rx_total += plen;
+                c->tcb.rcv_nxt += plen;
+
+                /* Phase 18.4.2: this segment may have closed the gap before
+                 * one or more segments we already held out of order --
+                 * splice them in too, cascading as each one closes the next
+                 * gap in turn. */
+                int spliced;
+                do {
+                    spliced = 0;
+                    for (int i = 0; i < TCP_MAX_OOO; i++) {
+                        struct ooo_seg *o = &c->ooo[i];
+                        if (!o->used || o->seq != c->tcb.rcv_nxt)
+                            continue;
+                        if (rxring_free(&c->rx) < o->len)
+                            break;         /* ring full; leave it queued for later */
+                        rxring_push(&c->rx, o->data, o->len);
+                        c->rx_total += o->len;
+                        c->tcb.rcv_nxt += o->len;
+                        o->used = 0;
+                        spliced = 1;
+                    }
+                } while (spliced);
+            }
+        } else if ((int32_t)(seq - c->tcb.rcv_nxt) > 0 && plen <= TCP_OOO_SEG_MAX) {
+            /* Genuinely ahead of what we've got contiguously (a gap exists
+             * before it) -- hold it instead of dropping it outright, so the
+             * peer doesn't have to blindly resend data we may already have
+             * buffered once the gap closes. */
+            int found = -1, free_slot = -1;
+            for (int i = 0; i < TCP_MAX_OOO; i++) {
+                if (c->ooo[i].used && c->ooo[i].seq == seq) { found = i; break; }
+                if (!c->ooo[i].used && free_slot < 0) free_slot = i;
+            }
+            if (found < 0 && free_slot >= 0) {
+                struct ooo_seg *o = &c->ooo[free_slot];
+                memcpy(o->data, payload, plen);
+                o->len  = plen;
+                o->seq  = seq;
+                o->used = 1;
+                stats.ooo_segments++;
+            }
+            /* else: a duplicate of one we already hold, or the holding area
+             * is full -- either way, drop it silently. The ACK below still
+             * tells the peer our real rcv_nxt, so its own retransmit timer
+             * recovers it, same as it always has for a segment we can't
+             * accept right now. */
         }
+        /* (seq behind rcv_nxt: an old duplicate, already fully accounted
+         * for -- nothing to store, just ACK it below as always.) */
         c->tcb.rcv_wnd = (uint16_t)rxring_free(&c->rx);   /* advertise true window */
     }
 
