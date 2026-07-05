@@ -178,6 +178,20 @@ struct kernel_prof {
     unsigned tcp_connect_iters;
     unsigned tcp_write_iters;
     unsigned tcp_close_iters;
+
+    /* Phase 18.5.5: receive-window trace. wnd_zero_events counts every time
+     * rcv_wnd (the ring's free space, advertised to the peer) hits exactly
+     * 0 -- the ring is completely full and the peer must stop sending until
+     * we read some of it back out. wnd_closed_us is the cumulative real
+     * time spent with the window at 0 across all such episodes (measured
+     * from the moment it closes in tcp_input() to the moment tcp_recv()'s
+     * reopening branch fires) -- wnd_closed_us/wnd_zero_events is the
+     * average stall length per episode, and wnd_closed_us against the
+     * scenario's own wall_us shows what fraction of the transfer the
+     * sender spent physically blocked on our own window, as opposed to
+     * anything else (RTT, its own pacing, ...). */
+    unsigned wnd_zero_events;
+    unsigned wnd_closed_us;
 };
 
 /* ---- directory enumeration (SYS_READDIR) ---- */

@@ -37,5 +37,6 @@ int main(void)
     printf("rx_irqs=%u rx_packets=%u rx_bytes=%u rx_dropped=%u rx_errors=%u\n",
            ns.rx_irqs, ns.rx_packets, ns.rx_bytes, ns.rx_dropped, ns.rx_errors);
     printf("tx_packets=%u tx_bytes=%u\n", ns.tx_packets, ns.tx_bytes);
+    printf("wnd_zero_events=%u wnd_closed_us=%u\n", p.wnd_zero_events, p.wnd_closed_us);
     return 0;
 }

@@ -94,6 +94,11 @@ struct conn {
                                   * segment changes anything a reader might
                                   * care about. Zero-initialized, same as the
                                   * rest of `conns[]`. */
+    uint64_t  wnd_zero_at;      /* Phase 18.5.5: perf_now_us() timestamp of the
+                                  * moment rcv_wnd last hit exactly 0 (the ring
+                                  * is full), 0 while the window isn't closed --
+                                  * lets tcp_recv()'s reopening branch measure
+                                  * how long the window actually stayed shut. */
 };
 
 static int test_drop_data;      /* test hook: drop the next data segment once */
@@ -296,10 +301,15 @@ int tcp_recv(int h, void *buf, size_t cap)
          * it resumes promptly instead of waiting on its persist timer. */
         unsigned was = c->tcb.rcv_wnd;
         c->tcb.rcv_wnd = (uint16_t)rxring_free(&c->rx);
-        if (was == 0 && c->tcb.rcv_wnd > 0 &&
-            (c->tcb.state == TCP_ESTABLISHED ||
-             c->tcb.state == TCP_FIN_WAIT_1 || c->tcb.state == TCP_FIN_WAIT_2))
-            tcp_xmit(c, TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
+        if (was == 0 && c->tcb.rcv_wnd > 0) {
+            if (c->wnd_zero_at != 0) {   /* Phase 18.5.5 */
+                g_kprof.wnd_closed_us += (unsigned)(perf_now_us() - c->wnd_zero_at);
+                c->wnd_zero_at = 0;
+            }
+            if (c->tcb.state == TCP_ESTABLISHED ||
+                c->tcb.state == TCP_FIN_WAIT_1 || c->tcb.state == TCP_FIN_WAIT_2)
+                tcp_xmit(c, TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);
+        }
     }
     return (int)n;
 }
@@ -623,6 +633,10 @@ static void tcp_input_impl(uint32_t src, const void *segment, size_t len)
         /* (seq behind rcv_nxt: an old duplicate, already fully accounted
          * for -- nothing to store, just ACK it below as always.) */
         c->tcb.rcv_wnd = (uint16_t)rxring_free(&c->rx);   /* advertise true window */
+        if (c->tcb.rcv_wnd == 0 && c->wnd_zero_at == 0) {   /* Phase 18.5.5 */
+            c->wnd_zero_at = perf_now_us();
+            g_kprof.wnd_zero_events++;
+        }
     }
 
     int fin = 0;
