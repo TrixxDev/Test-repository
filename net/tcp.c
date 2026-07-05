@@ -31,16 +31,22 @@ struct tcp_hdr {
 #define TCP_RTO_MS    1000          /* initial retransmit timeout (RFC 6298) */
 #define TCP_RTO_MAX   8000          /* backoff cap */
 #define TCP_MAX_RETX  5             /* give up after this many resends */
+#define TCP_MAX_INFLIGHT 8          /* Phase 18.4.1: unacknowledged segments a
+                                      * connection may have outstanding at once */
 
-/* Minimal retransmission: cache the one outstanding sequence-consuming segment
- * (SYN / data / FIN); a pure ACK is never retransmitted. On RTO with no ACK, the
- * segment is resent (with a refreshed ack/window); on ACK past its end, cleared. */
+/* Phase 18.4.1: one outstanding, sequence-consuming segment (SYN / data /
+ * FIN) -- a pure ACK is never retransmitted. On RTO with no ACK, resent
+ * (with a refreshed ack/window) and independently backed off; cleared once
+ * a cumulative ACK covers its end sequence. `struct conn` keeps up to
+ * TCP_MAX_INFLIGHT of these as a ring (oldest-unacked-first), replacing the
+ * single-segment stop-and-wait model every write() used to be serialized
+ * through. */
 struct rtx {
     uint8_t   data[TCP_TX_MAX];
     unsigned  len;              /* payload bytes */
     uint8_t   flags;
     uint32_t  seq;
-    int       pending;
+    int       used;
     uint64_t  last_ms;
     uint32_t  rto_ms;
     uint8_t   retries;
@@ -54,7 +60,12 @@ struct conn {
     rxring    rx;               /* in-order received data, drained by tcp_recv */
     unsigned  rx_total;         /* lifetime bytes accepted (for tcp_rx_total) */
     uint64_t  tw_deadline;      /* TIME_WAIT -> CLOSED moment */
-    struct rtx rtx;
+    struct rtx rtx[TCP_MAX_INFLIGHT];  /* ring; rtx[rtx_head] is the oldest
+                                         * unacked segment (ACKs are
+                                         * cumulative, so they always clear
+                                         * from the front) */
+    int       rtx_head;         /* index of the oldest unacked segment */
+    int       rtx_count;        /* how many of rtx[] are currently used */
     int       used;
     wait_queue_t rwq;           /* Phase 18.1.5: tsk_read() blocks here instead
                                   * of busy-spinning on net_poll(); woken (as a
@@ -160,21 +171,44 @@ static uint32_t seg_len(uint8_t flags, unsigned len)
     return len + ((flags & TCP_SYN) ? 1 : 0) + ((flags & TCP_FIN) ? 1 : 0);
 }
 
-/* Send a sequence-consuming segment and cache it for retransmission.
- *
- * `c->rtx` holds exactly ONE outstanding segment -- calling this again
- * while a previous one is still `pending` (unacknowledged) overwrites it,
- * losing that earlier segment's own retry tracking. In practice
- * net/tcpsock.c's tsk_write() already waits for `tcp_tx_idle()` (this slot
- * going non-pending) after every chunk it sends, including a single-chunk
- * write, before returning -- so two back-to-back tcp_send() calls from
- * different write() calls (e.g. user/httpsget.c's h2_maybe_send_window_update()
- * sending the stream-level then connection-level WINDOW_UPDATE) only
- * collide if the first segment's ACK genuinely doesn't arrive within that
- * 4-second wait, a real loss on top of an already-slow path. Not fixed
- * here -- doing so properly means tracking more than one in-flight segment,
- * a bigger change than this phase's own confirmed bug (see tcp_send()'s
- * comment) needs. */
+/* Phase 18.4.1: appends a new outstanding segment to `c`'s retransmit ring.
+ * Returns -1 without touching anything if the ring is already full
+ * (TCP_MAX_INFLIGHT) -- callers that need to guarantee tracking (the data
+ * path) check tcp_tx_idle() first and shouldn't normally hit this; tcp_close()
+ * doesn't, so a FIN sent while the ring happens to be completely full is
+ * still transmitted once by tcp_xmit_track() but not retransmitted, a rare
+ * and non-corrupting degradation rather than overwriting another segment's
+ * tracking the way the old single-slot design would have. */
+static int rtx_push(struct conn *c, uint8_t flags, uint32_t seq,
+                    const void *data, unsigned len)
+{
+    if (c->rtx_count >= TCP_MAX_INFLIGHT)
+        return -1;
+    if (len > TCP_TX_MAX) len = TCP_TX_MAX;
+    int idx = (c->rtx_head + c->rtx_count) % TCP_MAX_INFLIGHT;
+    struct rtx *r = &c->rtx[idx];
+    if (data && len) memcpy(r->data, data, len);
+    r->len     = len;
+    r->flags   = flags;
+    r->seq     = seq;
+    r->used    = 1;
+    r->last_ms = net_now_ms();
+    r->rto_ms  = TCP_RTO_MS;
+    r->retries = 0;
+    c->rtx_count++;
+    if ((unsigned)c->rtx_count > stats.max_inflight)
+        stats.max_inflight = (unsigned)c->rtx_count;
+    return 0;
+}
+
+/* Send a sequence-consuming segment and queue it for retransmission (see
+ * rtx_push()). The segment is transmitted at most once here regardless of
+ * whether it gets tracked -- tcp_tick() retries a *tracked* segment on RTO
+ * (TCP_RTO_MS, doubling, up to TCP_MAX_RETX attempts each); that machinery
+ * exists specifically to recover a transient send failure, the same as it
+ * recovers ordinary packet loss on the wire, so a failed tcp_xmit() here
+ * isn't itself surfaced as an error -- a send() succeeding has only ever
+ * meant "queued for delivery," not "delivered." */
 static int tcp_xmit_track(struct conn *c, uint8_t flags, uint32_t seq,
                           const void *data, unsigned len)
 {
@@ -186,15 +220,7 @@ static int tcp_xmit_track(struct conn *c, uint8_t flags, uint32_t seq,
     } else {
         r = tcp_xmit(c, flags, seq, c->tcb.rcv_nxt, data, len);
     }
-
-    if (data && len) memcpy(c->rtx.data, data, len);
-    c->rtx.len     = len;
-    c->rtx.flags   = flags;
-    c->rtx.seq     = seq;
-    c->rtx.pending = 1;
-    c->rtx.last_ms = net_now_ms();
-    c->rtx.rto_ms  = TCP_RTO_MS;
-    c->rtx.retries = 0;
+    rtx_push(c, flags, seq, data, len);
     return r;
 }
 
@@ -203,13 +229,7 @@ void tcp_test_drop_next_data(void) { test_drop_data = 1; }
 /* Arm SYN retransmission (the SYN itself is sent by tcp_connect's ARP loop). */
 static void rtx_save_syn(struct conn *c)
 {
-    c->rtx.len = 0;
-    c->rtx.flags   = TCP_SYN;
-    c->rtx.seq     = c->tcb.iss;
-    c->rtx.pending = 1;
-    c->rtx.last_ms = net_now_ms();
-    c->rtx.rto_ms  = TCP_RTO_MS;
-    c->rtx.retries = 0;
+    rtx_push(c, TCP_SYN, c->tcb.iss, NULL, 0);
 }
 
 int tcp_send(int h, const void *data, size_t len)
@@ -219,21 +239,26 @@ int tcp_send(int h, const void *data, size_t len)
         return -1;
     if (len > TCP_TX_MAX)
         len = TCP_TX_MAX;                        /* one segment only, no splitting */
-    /* Phase 17.5.2: tcp_xmit_track() below queues this segment into c->rtx
-     * -- pending, with its own seq/data/RTO -- REGARDLESS of whether the
-     * immediate tcp_xmit() attempt inside it actually succeeded. tcp_tick()
-     * already retries a pending segment on RTO (TCP_RTO_MS, doubling, up to
-     * TCP_MAX_RETX attempts) -- that machinery exists specifically to
-     * recover a transient send failure, the same as it recovers ordinary
-     * packet loss on the wire. This used to instead surface that first
-     * attempt's return value straight to the caller as a hard failure,
-     * *without* advancing snd_nxt -- turning an ordinary, already-queued,
-     * about-to-be-retried segment into an immediate, unretried error one
-     * layer up, for no reason a real TCP send() should ever fail outright:
-     * a send() succeeding has only ever meant "queued for delivery," not
-     * "delivered." If the underlying problem is NOT transient, repeated
-     * RTO failures still correctly close the connection via TCP_MAX_RETX,
-     * just after a real retry attempt instead of on the very first one. */
+    /* Phase 18.4.1: the caller (net/tcpsock.c's tsk_write()) is expected to
+     * have already checked tcp_tx_idle() -- this is a defensive backstop,
+     * not the primary gate, matching the old single-slot design's exact
+     * contract (tcp_send() assumes the caller checked room first). */
+    if (c->rtx_count >= TCP_MAX_INFLIGHT)
+        return -1;
+    uint32_t in_flight = c->tcb.snd_nxt - c->tcb.snd_una;   /* wrap-safe */
+    if (in_flight + len > c->tcb.snd_wnd)
+        return -1;                               /* peer's advertised window is full */
+    /* Phase 17.5.2: queuing this segment into the retransmit ring happens
+     * REGARDLESS of whether the immediate tcp_xmit() attempt inside
+     * tcp_xmit_track() actually succeeded -- see its own comment. This used
+     * to instead surface that first attempt's return value straight to the
+     * caller as a hard failure, *without* advancing snd_nxt -- turning an
+     * ordinary, already-queued, about-to-be-retried segment into an
+     * immediate, unretried error one layer up, for no reason a real TCP
+     * send() should ever fail outright. If the underlying problem is NOT
+     * transient, repeated RTO failures still correctly close the connection
+     * via TCP_MAX_RETX, just after a real retry attempt instead of on the
+     * very first one. */
     tcp_xmit_track(c, TCP_PSH | TCP_ACK, c->tcb.snd_nxt, data, (unsigned)len);
     c->tcb.snd_nxt += (uint32_t)len;            /* data consumes sequence space */
     return (int)len;
@@ -280,10 +305,20 @@ wait_queue_t *tcp_conn_waitq(int h)
     return c ? &c->rwq : NULL;
 }
 
+/* Phase 18.4.1: "idle" now means "room for at least one more segment," not
+ * "the single slot is empty" -- true as soon as EITHER the ring has a free
+ * slot AND the peer's advertised window has room, which is what actually
+ * lets net/tcpsock.c's tsk_write() pipeline several chunks of one write()
+ * back to back instead of stopping to wait for each one's ACK. */
 int tcp_tx_idle(int h)
 {
     struct conn *c = conn_of(h);
-    return !c || !c->rtx.pending;
+    if (!c)
+        return 1;
+    if (c->rtx_count >= TCP_MAX_INFLIGHT)
+        return 0;
+    uint32_t in_flight = c->tcb.snd_nxt - c->tcb.snd_una;   /* wrap-safe */
+    return in_flight < c->tcb.snd_wnd;
 }
 
 int tcp_close(int h)
@@ -314,31 +349,39 @@ void tcp_tick(void)
         if (!c->used)
             continue;
 
-        /* A RST (tcp_input()'s TCP_RST handling) or any other path that
-         * tears the connection down doesn't itself clear rtx.pending --
-         * without this check, a segment queued before the teardown kept
-         * being blindly retransmitted on a connection that's already
-         * CLOSED (or otherwise no longer live), spamming a peer that has
-         * long since forgotten this connection existed. */
-        if (c->rtx.pending && c->tcb.state == TCP_CLOSED) {
-            c->rtx.pending = 0;
+        /* A RST (tcp_input()'s TCP_RST handling) or any other path that tears
+         * the connection down doesn't itself clear the ring -- without this
+         * check, every segment still queued before the teardown kept being
+         * blindly retransmitted on a connection that's already CLOSED (or
+         * otherwise no longer live), spamming a peer that has long since
+         * forgotten this connection existed. */
+        if (c->rtx_count > 0 && c->tcb.state == TCP_CLOSED) {
+            c->rtx_count = 0;
+            c->rtx_head = 0;
             continue;
         }
 
-        /* Retransmit the outstanding segment if its RTO elapsed. */
-        if (c->rtx.pending && now - c->rtx.last_ms >= c->rtx.rto_ms) {
-            if (c->rtx.retries >= TCP_MAX_RETX) {       /* give up */
-                c->rtx.pending = 0;
+        /* Phase 18.4.1: walk every outstanding segment (oldest first),
+         * retransmitting whichever ones' own RTO elapsed independently --
+         * with several in flight, an ACK for an earlier one doesn't mean a
+         * later one arrived too. */
+        for (int k = 0; k < c->rtx_count; k++) {
+            int idx = (c->rtx_head + k) % TCP_MAX_INFLIGHT;
+            struct rtx *r = &c->rtx[idx];
+            if (now - r->last_ms < r->rto_ms)
+                continue;
+            if (r->retries >= TCP_MAX_RETX) {       /* give up entirely */
+                c->rtx_count = 0;
+                c->rtx_head = 0;
                 c->tcb.state = TCP_CLOSED;
-            } else {
-                tcp_xmit(c, c->rtx.flags, c->rtx.seq, c->tcb.rcv_nxt,
-                         c->rtx.data, c->rtx.len);
-                c->rtx.last_ms = now;
-                c->rtx.retries++;
-                c->rtx.rto_ms = c->rtx.rto_ms < TCP_RTO_MAX / 2
-                              ? c->rtx.rto_ms * 2 : TCP_RTO_MAX;   /* backoff */
-                stats.retransmits++;
+                break;
             }
+            tcp_xmit(c, r->flags, r->seq, c->tcb.rcv_nxt, r->data, r->len);
+            r->last_ms = now;
+            r->retries++;
+            r->rto_ms = r->rto_ms < TCP_RTO_MAX / 2
+                      ? r->rto_ms * 2 : TCP_RTO_MAX;   /* backoff */
+            stats.retransmits++;
         }
 
         if (c->tcb.state == TCP_TIME_WAIT && now >= c->tw_deadline)
@@ -448,7 +491,8 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
             c->tcb.snd_una = ack;
             c->tcb.snd_wnd = ntohs(h->window);
             c->tcb.state   = TCP_ESTABLISHED;
-            c->rtx.pending = 0;                  /* our SYN is acknowledged */
+            c->rtx_count   = 0;                  /* our SYN is acknowledged */
+            c->rtx_head    = 0;
             stats.established++;
             tcp_xmit(c, TCP_ACK, c->tcb.snd_nxt, c->tcb.rcv_nxt, NULL, 0);  /* finish */
         }
@@ -457,13 +501,27 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
 
     /* ESTABLISHED and every closing state: track ACKs, accept in-order data,
      * consume an in-order FIN, then advance the state machine. */
-    if ((flags & TCP_ACK) && (int32_t)(ack - c->tcb.snd_una) > 0) {
-        c->tcb.snd_una = ack;                    /* wrap-safe */
-        /* Clear the retransmit cache once its segment is fully acknowledged. */
-        if (c->rtx.pending) {
-            uint32_t end = c->rtx.seq + seg_len(c->rtx.flags, c->rtx.len);
-            if ((int32_t)(c->tcb.snd_una - end) >= 0)
-                c->rtx.pending = 0;
+    if (flags & TCP_ACK) {
+        /* The window field is valid on every ACK, not just the SYN-ACK's --
+         * Phase 18.4.1: this used to only ever be read once, at the
+         * handshake, so tcp_send()/tcp_tx_idle() had no way to notice the
+         * peer's real receive window shrinking or (from an initial zero)
+         * opening up again. */
+        c->tcb.snd_wnd = ntohs(h->window);
+        if ((int32_t)(ack - c->tcb.snd_una) > 0) {
+            c->tcb.snd_una = ack;                /* wrap-safe */
+            /* Clear every fully-acked segment from the front of the ring --
+             * ACKs are cumulative, so one ACK can free several at once
+             * (e.g. catching up after a burst of several in-flight sends). */
+            while (c->rtx_count > 0) {
+                struct rtx *r = &c->rtx[c->rtx_head];
+                uint32_t end = r->seq + seg_len(r->flags, r->len);
+                if ((int32_t)(c->tcb.snd_una - end) < 0)
+                    break;        /* oldest outstanding segment isn't fully acked yet */
+                r->used = 0;
+                c->rtx_head = (c->rtx_head + 1) % TCP_MAX_INFLIGHT;
+                c->rtx_count--;
+            }
         }
     }
 

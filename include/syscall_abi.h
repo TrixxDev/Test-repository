@@ -111,6 +111,15 @@ struct tcp_stats {
     unsigned retransmits;   /* (reserved; 0 until Phase 8.4)  */
     unsigned fins;          /* in-order FINs consumed         */
     unsigned drops;         /* segments dropped (csum/match)  */
+    unsigned max_inflight;  /* Phase 18.4.1: highest number of unacknowledged
+                              * segments any one connection has had queued at
+                              * once, lifetime max across all connections --
+                              * >1 is direct proof sends were pipelined, not
+                              * stop-and-wait */
+    unsigned ooo_segments;  /* Phase 18.4.2: out-of-order segments buffered
+                              * (later spliced into the in-order stream once
+                              * the gap before them closed), instead of being
+                              * dropped for the peer to blindly retransmit */
 };
 
 /* ---- directory enumeration (SYS_READDIR) ---- */
