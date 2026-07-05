@@ -203,6 +203,10 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)sys_tcpstat((struct tcp_stats *)regs->ebx);
         break;
 
+    case SYS_PROFSTAT:
+        regs->eax = (uint32_t)sys_profstat((struct kernel_prof *)regs->ebx);
+        break;
+
     case SYS_HTTPGET:
         regs->eax = (uint32_t)sys_httpget((const char *)regs->ebx,
                                           (void *)regs->ecx, (int)regs->edx);

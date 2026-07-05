@@ -122,6 +122,35 @@ struct tcp_stats {
                               * dropped for the peer to blindly retransmit */
 };
 
+/* ---- Phase 18.5.2: kernel-wide profiling counters (SYS_PROFSTAT) ----
+ * A first, deliberately small slice of "where does the CPU actually go":
+ * scheduling activity, TCP's two hot entry points, FAT32's two hot entry
+ * points, and bulk memory copies. Each _us field is a cumulative count of
+ * microseconds (perf_now_us(), the same RDTSC-based clock the compositor
+ * already profiles itself with), not a snapshot -- divide by the matching
+ * _calls field for an average. Userspace/TLS/HTTP2/GUI timing is out of
+ * scope here: those run inside separate userspace processes with their own
+ * address spaces, so they need their own in-process accounting rather than
+ * a shared kernel struct -- a deliberate scope cut, not an oversight. */
+struct kernel_prof {
+    unsigned sched_switches;   /* real context switches (do_switch() calls) --
+                                 * excludes schedule() calls that found nothing
+                                 * else runnable and returned without swapping */
+    unsigned wait_blocks;      /* times a thread actually blocked on a wait
+                                 * queue (or a wait queue + timeout), instead of
+                                 * finding what it needed already ready */
+    unsigned tcp_input_calls;
+    unsigned tcp_input_us;
+    unsigned tcp_tick_calls;
+    unsigned tcp_tick_us;
+    unsigned fat_read_calls;
+    unsigned fat_read_us;
+    unsigned fat_write_calls;
+    unsigned fat_write_us;
+    unsigned memcpy_calls;
+    unsigned memcpy_bytes;
+};
+
 /* ---- directory enumeration (SYS_READDIR) ---- */
 #define DT_FILE 1       /* a regular file      */
 #define DT_DIR  2       /* a directory         */
@@ -167,7 +196,9 @@ struct dirent {
                         /* never blocks, >0 is milliseconds. A separate syscall    */
                         /* from SYS_POLL so no existing caller's behavior changes. */
 
-#define SYS_MAX    47   /* one past the last valid syscall number    */
+#define SYS_PROFSTAT 47 /* profstat(struct kernel_prof *out) -> 0/-1 (Phase 18.5.2) */
+
+#define SYS_MAX    48   /* one past the last valid syscall number    */
 
 /* ---- socket layer ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

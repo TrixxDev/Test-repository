@@ -16,6 +16,7 @@
 #include "tcp.h"
 #include "netstack.h"
 #include "tcpsock.h"
+#include "prof.h"
 
 #define MAX_PROCS    32
 #define USTACK_TOP   0xC0000000u
@@ -205,6 +206,17 @@ int sys_tcpstat(struct tcp_stats *out)
     struct tcp_stats ts;
     tcp_get_stats(&ts);
     memcpy(out, &ts, sizeof(ts));
+    return 0;
+}
+
+/* Copy the Phase 18.5.2 kernel profiling counters out to user space. */
+int sys_profstat(struct kernel_prof *out)
+{
+    if (!is_user_addr((uint32_t)out, sizeof(*out)))
+        return -1;
+    struct kernel_prof kp;
+    kprof_get(&kp);
+    memcpy(out, &kp, sizeof(kp));
     return 0;
 }
 

@@ -7,6 +7,7 @@
 #include "perf.h"
 #include "string.h"
 #include "scheduler.h"
+#include "prof.h"
 
 struct tcp_hdr {
     uint16_t src_port;
@@ -362,6 +363,7 @@ int tcp_close(int h)
 
 void tcp_tick(void)
 {
+    uint64_t prof_t0 = perf_now_us();   /* Phase 18.5.2 */
     uint64_t now = net_now_ms();
     for (int i = 0; i < TCP_MAX_CONN; i++) {
         struct conn *c = &conns[i];
@@ -406,6 +408,8 @@ void tcp_tick(void)
         if (c->tcb.state == TCP_TIME_WAIT && now >= c->tw_deadline)
             c->tcb.state = TCP_CLOSED;
     }
+    g_kprof.tcp_tick_us += (unsigned)(perf_now_us() - prof_t0);   /* Phase 18.5.2 */
+    g_kprof.tcp_tick_calls++;
 }
 
 /* Allocate a slot: prefer a never-used one, else reuse a CLOSED one. */
@@ -473,7 +477,11 @@ static struct conn *find_conn(uint32_t src, uint16_t sport, uint16_t dport)
     return NULL;
 }
 
-void tcp_input(uint32_t src, const void *segment, size_t len)
+/* Phase 18.5.2: the real logic, renamed so tcp_input() itself can be a thin
+ * timing wrapper -- this function has several early returns (bad checksum, no
+ * matching connection, RST), and threading a stat update through every one of
+ * them would be far more invasive than timing the call from outside. */
+static void tcp_input_impl(uint32_t src, const void *segment, size_t len)
 {
     if (len < sizeof(struct tcp_hdr)) {
         stats.drops++;
@@ -679,4 +687,12 @@ void tcp_input(uint32_t src, const void *segment, size_t len)
      * correctness (the reader's own short timeout re-polls regardless), just
      * saves it up to that timeout's worth of latency. */
     wait_wake_all(&c->rwq);
+}
+
+void tcp_input(uint32_t src, const void *segment, size_t len)
+{
+    uint64_t t0 = perf_now_us();   /* Phase 18.5.2 */
+    tcp_input_impl(src, segment, len);
+    g_kprof.tcp_input_us += (unsigned)(perf_now_us() - t0);
+    g_kprof.tcp_input_calls++;
 }

@@ -1,4 +1,5 @@
 #include "string.h"
+#include "prof.h"
 #include <stdint.h>
 
 void *memset(void *dest, int value, size_t count)
@@ -11,6 +12,8 @@ void *memset(void *dest, int value, size_t count)
 
 void *memcpy(void *dest, const void *src, size_t count)
 {
+    g_kprof.memcpy_calls++;             /* Phase 18.5.2 */
+    g_kprof.memcpy_bytes += (unsigned)count;
     uint8_t *d = dest;
     const uint8_t *s = src;
     while (count--)

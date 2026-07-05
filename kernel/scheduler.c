@@ -3,6 +3,7 @@
 #include "pit.h"
 #include "gdt.h"
 #include "paging.h"
+#include "prof.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -179,6 +180,7 @@ static thread_t *next_runnable(thread_t *from)
 
 static void do_switch(thread_t *prev, thread_t *next)
 {
+    g_kprof.sched_switches++;   /* Phase 18.5.2: a real context switch, not just a schedule() call */
     tss_set_kernel_stack(next->kstack_top);
     if (next->pd_phys != prev->pd_phys)
         vmm_switch_address_space(next->pd_phys);
@@ -247,6 +249,7 @@ void wait_enqueue(wait_queue_t *wq)
     /* Caller holds interrupts off (same lost-wakeup contract as thread_block()). */
     wait_node_add(&current->wnode, wq);
     current->state = TS_BLOCKED;
+    g_kprof.wait_blocks++;
     schedule();
 }
 
@@ -283,6 +286,7 @@ void wait_block_timeout(uint32_t timeout_ms)
     if (timeout_ms)
         sleepers_arm(current, timeout_ms / 10);
     current->state = TS_BLOCKED;
+    g_kprof.wait_blocks++;
     schedule();
 }
 
@@ -354,6 +358,7 @@ int wait_event_timeout(wait_queue_t *wq, uint32_t timeout_ms)
 
     wait_node_add(&current->wnode, wq);
     current->state = TS_BLOCKED;
+    g_kprof.wait_blocks++;
     schedule();
 
     /* Resumed. wait_wake_one()/wait_wake_all() already remove+fire the node

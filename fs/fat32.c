@@ -2,6 +2,8 @@
 #include "ata.h"
 #include "kheap.h"
 #include "string.h"
+#include "perf.h"
+#include "prof.h"
 
 #define SECTOR_SIZE 512
 #define CLUSTER_MAX 4096        /* upper bound on bytes-per-cluster we handle */
@@ -185,7 +187,10 @@ static vfs_node_t *make_node(const char *name, uint32_t flags, uint32_t cluster,
 }
 
 /* Parse a directory's entries, invoking found() per regular entry. */
-static int fat_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf, int flags)
+/* Phase 18.5.2: the real logic, renamed so fat_read() itself can be a thin
+ * timing wrapper -- this has an early return (past EOF), and threading a
+ * stat update through it would be more invasive than timing from outside. */
+static int fat_read_impl(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf, int flags)
 {
     (void)flags;    /* regular files never block */
     if (off >= node->size)
@@ -213,6 +218,15 @@ static int fat_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf,
         cluster = fat_next(cluster);
     }
     return (int)done;
+}
+
+static int fat_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf, int flags)
+{
+    uint64_t t0 = perf_now_us();   /* Phase 18.5.2 */
+    int n = fat_read_impl(node, off, size, buf, flags);
+    g_kprof.fat_read_us += (unsigned)(perf_now_us() - t0);
+    g_kprof.fat_read_calls++;
+    return n;
 }
 
 /* Walk a directory; for index `want` (or matching `match83`) return its entry. */
@@ -308,7 +322,10 @@ static void fat_update_dirent(vfs_node_t *node)
 
 /* Write `size` bytes at `off`, extending the cluster chain (and the file's
  * recorded size) as needed. Partial clusters are read-modified-written. */
-static int fat_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf, int flags)
+/* Phase 18.5.2: renamed for the same reason as fat_read_impl() above -- this
+ * one has several early returns (not a regular file, zero length, overflow,
+ * cluster allocation failure). */
+static int fat_write_impl(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf, int flags)
 {
     (void)flags;    /* regular files never block */
     if (node->flags & VFS_DIR)
@@ -373,6 +390,15 @@ static int fat_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_
         node->size = off + done;
     fat_update_dirent(node);
     return (int)done;
+}
+
+static int fat_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf, int flags)
+{
+    uint64_t t0 = perf_now_us();   /* Phase 18.5.2 */
+    int n = fat_write_impl(node, off, size, buf, flags);
+    g_kprof.fat_write_us += (unsigned)(perf_now_us() - t0);
+    g_kprof.fat_write_calls++;
+    return n;
 }
 
 /* Create an empty regular file `name` in directory `node` (root dir for now). */

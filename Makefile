@@ -30,7 +30,7 @@ GUI_DISPLAY ?= -display sdl
 EMBEDDED   := kernel/embedded_user.c
 USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/cat.elf user/grep.elf user/orphan.elf user/nbtest.elf user/waittest.elf \
-              user/sendwintest.elf \
+              user/sendwintest.elf user/profstat.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
               user/wserver.elf user/term.elf user/dock.elf user/files.elf \
               user/viewer.elf user/wmstress.elf user/settings.elf user/fetch.elf \
@@ -155,7 +155,7 @@ $(DISK): $(USER_PROGS) user/poem.txt user/about.txt tools/mkfat32.py
 	    SH.ELF user/sh.elf HELLO.ELF user/hello.elf \
 	    CAT.ELF user/cat.elf GREP.ELF user/grep.elf ORPHAN.ELF user/orphan.elf \
 	    NBTEST.ELF user/nbtest.elf WAITTEST.ELF user/waittest.elf \
-	    SENDWIN.ELF user/sendwintest.elf \
+	    SENDWIN.ELF user/sendwintest.elf PROFSTAT.ELF user/profstat.elf \
 	    NETD.ELF user/netd.elf ECHOSRV.ELF user/echosrv.elf ECHOCLI.ELF user/echocli.elf \
 	    SAVE.ELF user/save.elf WSERVER.ELF user/wserver.elf TERM.ELF user/term.elf \
 	    DOCK.ELF user/dock.elf FILES.ELF user/files.elf VIEWER.ELF user/viewer.elf \
@@ -430,7 +430,7 @@ rxring-test:
 # the wire, so this is the only way to test it deterministically.
 .PHONY: tcp-reassembly-test
 tcp-reassembly-test:
-	$(CC) -O2 -Iinclude -Inet -Ikernel -Iarch/i386 tools/tcp_reassembly_test.c net/tcp.c net/rxring.c -o /tmp/aurora_tcp_reassembly_test
+	$(CC) -O2 -Iinclude -Inet -Ikernel -Iarch/i386 tools/tcp_reassembly_test.c net/tcp.c net/rxring.c kernel/prof.c -o /tmp/aurora_tcp_reassembly_test
 	/tmp/aurora_tcp_reassembly_test
 
 # Host-side TCP window management test (Phase 18.4.3): proves the receive
@@ -439,7 +439,7 @@ tcp-reassembly-test:
 # PEER-advertised window rather than only local ring/slot capacity.
 .PHONY: tcp-window-test
 tcp-window-test:
-	$(CC) -O2 -Iinclude -Inet -Ikernel -Iarch/i386 tools/tcp_window_test.c net/tcp.c net/rxring.c -o /tmp/aurora_tcp_window_test
+	$(CC) -O2 -Iinclude -Inet -Ikernel -Iarch/i386 tools/tcp_window_test.c net/tcp.c net/rxring.c kernel/prof.c -o /tmp/aurora_tcp_window_test
 	/tmp/aurora_tcp_window_test
 
 # Render the desktop with the real kernel 2D code into a PNG (no QEMU/display

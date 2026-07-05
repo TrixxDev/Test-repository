@@ -85,6 +85,7 @@ int  sys_readdir(const char *path, int index, struct dirent *out);
 int  sys_sysinfo(struct sysinfo *out);
 int  sys_netstat(struct net_stats *out);
 int  sys_tcpstat(struct tcp_stats *out);
+int  sys_profstat(struct kernel_prof *out);
 int  sys_httpget(const char *host, void *buf, int cap);
 int  sys_inet_connect(int fd, const char *host, int port);
 int  sys_sleep(int ms);
