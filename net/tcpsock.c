@@ -99,9 +99,25 @@ void tcpsock_close(vfs_node_t *node)
             __asm__ volatile("sti");
             tcp_close(t->h);
             uint64_t dl = net_now_ms() + 1500;
+            /* Phase 18.5.4: was an unconditional busy-spin (net_poll() with
+             * no yield at all) -- found via tcp_close_iters to be ~145,000
+             * pointless iterations whenever the peer doesn't close first
+             * (any h2-style connection the peer holds open). Same fix as
+             * tsk_read(): park on the connection's own wait queue between
+             * polls instead of spinning: tcp_input() already wakes it
+             * promptly on anything relevant (the peer's FIN/ACK), and the
+             * mandatory TCP_TIME_WAIT dwell this loop often has to ride out
+             * is now waited through instead of spun through. */
+            wait_queue_t *wq = tcp_conn_waitq(t->h);
             while (net_now_ms() < dl && tcp_state(t->h) != TCP_CLOSED) {
                 g_kprof.tcp_close_iters++;   /* Phase 18.5.4 */
                 net_poll();
+                if (tcp_state(t->h) == TCP_CLOSED || net_now_ms() >= dl)
+                    break;
+                __asm__ volatile("cli");
+                if (wq)
+                    wait_event_timeout(wq, 20);
+                __asm__ volatile("sti");
             }
             if (!(fl & 0x200))
                 __asm__ volatile("cli");
