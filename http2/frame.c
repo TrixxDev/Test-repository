@@ -1,5 +1,6 @@
 /* HTTP/2 frame header — see frame.h. */
 #include "frame.h"
+#include "uprof.h"
 
 int h2_write_frame_header(uint8_t *out, size_t cap, const h2_frame_header *h)
 {
@@ -63,7 +64,10 @@ int h2_frame_reader_feed(h2_frame_reader *r, const uint8_t *data, size_t len)
     return (int)pos;
 }
 
-int h2_frame_reader_next(h2_frame_reader *r, h2_frame_header *out,
+/* Phase 18.5.3: renamed so h2_frame_reader_next() itself can be a thin
+ * timing wrapper -- matches the pattern used at the other instrumented
+ * call sites, even though this one has only a single early return. */
+static int h2_frame_reader_next_impl(h2_frame_reader *r, h2_frame_header *out,
                          const uint8_t **payload, size_t *payload_len)
 {
     if (r->len < r->need) return 0;   /* header, or header+payload, still incomplete */
@@ -73,4 +77,19 @@ int h2_frame_reader_next(h2_frame_reader *r, h2_frame_header *out,
     r->len = 0;
     r->need = H2_FRAME_HEADER_LEN;
     return 1;
+}
+
+int h2_frame_reader_next(h2_frame_reader *r, h2_frame_header *out,
+                         const uint8_t **payload, size_t *payload_len)
+{
+    uint64_t t0 = cprof_now_us();   /* Phase 18.5.3 */
+    size_t plen = 0;
+    int rc = h2_frame_reader_next_impl(r, out, payload, &plen);
+    g_cprof.h2_frame_us += (unsigned)(cprof_now_us() - t0);
+    if (rc == 1) {
+        g_cprof.h2_frame_calls++;
+        g_cprof.h2_frame_bytes += (unsigned)plen;
+    }
+    if (payload_len) *payload_len = plen;
+    return rc;
 }

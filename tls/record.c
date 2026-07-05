@@ -1,6 +1,7 @@
 /* TLS 1.3 record layer (RFC 8446 §5) — see record.h. */
 #include "record.h"
 #include "chacha20poly1305.h"
+#include "uprof.h"
 
 void tls_record_init(tls_record_keys *k, const uint8_t key[32], const uint8_t iv[12])
 {
@@ -17,7 +18,11 @@ void tls_record_nonce(uint8_t nonce[12], const uint8_t iv[12], uint64_t seq)
         nonce[11 - i] ^= (uint8_t)(seq >> (8 * i));
 }
 
-int tls_record_seal(tls_record_keys *k, uint8_t type,
+/* Phase 18.5.3: renamed so tls_record_seal() itself can be a thin timing
+ * wrapper -- this has several early returns (oversized plaintext, output
+ * too small), and threading a stat update through each would be more
+ * invasive than timing the call from outside. */
+static int tls_record_seal_impl(tls_record_keys *k, uint8_t type,
                     const uint8_t *plaintext, size_t ptlen,
                     uint8_t *out, size_t outcap)
 {
@@ -49,7 +54,8 @@ int tls_record_seal(tls_record_keys *k, uint8_t type,
     return (int)total;
 }
 
-int tls_record_open(tls_record_keys *k,
+/* Phase 18.5.3: renamed for the same reason as tls_record_seal_impl() above. */
+static int tls_record_open_impl(tls_record_keys *k,
                     const uint8_t *record, size_t reclen,
                     uint8_t *out, size_t outcap, uint8_t *out_type)
 {
@@ -80,4 +86,28 @@ int tls_record_open(tls_record_keys *k,
     *out_type = out[n - 1];
     k->seq++;
     return (int)(n - 1);                                        /* content length */
+}
+
+int tls_record_seal(tls_record_keys *k, uint8_t type,
+                    const uint8_t *plaintext, size_t ptlen,
+                    uint8_t *out, size_t outcap)
+{
+    uint64_t t0 = cprof_now_us();   /* Phase 18.5.3 */
+    int n = tls_record_seal_impl(k, type, plaintext, ptlen, out, outcap);
+    g_cprof.aead_seal_us += (unsigned)(cprof_now_us() - t0);
+    g_cprof.aead_seal_calls++;
+    if (n > 0) g_cprof.aead_seal_bytes += (unsigned)ptlen;
+    return n;
+}
+
+int tls_record_open(tls_record_keys *k,
+                    const uint8_t *record, size_t reclen,
+                    uint8_t *out, size_t outcap, uint8_t *out_type)
+{
+    uint64_t t0 = cprof_now_us();   /* Phase 18.5.3 */
+    int n = tls_record_open_impl(k, record, reclen, out, outcap, out_type);
+    g_cprof.aead_open_us += (unsigned)(cprof_now_us() - t0);
+    g_cprof.aead_open_calls++;
+    if (n > 0) g_cprof.aead_open_bytes += (unsigned)n;
+    return n;
 }

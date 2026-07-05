@@ -14,6 +14,12 @@
 #include "hpack_table.h"
 #include "hpack_decode.h"
 #include "window_update.h"
+#include "uprof.h"
+
+/* Phase 18.5.3: h2_build_headers()/hpack_decode_headers()/h2_frame_reader_next()
+ * now time themselves via this -- a fake incrementing counter is fine here,
+ * this test checks byte<->struct correctness, not timing. */
+uint64_t cprof_now_us(void) { static uint64_t t; return t++; }
 
 static int failures;
 

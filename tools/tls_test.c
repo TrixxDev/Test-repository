@@ -33,6 +33,14 @@
 #include "p384_scalar.h"
 #include "p384_point.h"
 #include "p384_field.h"
+#include "uprof.h"
+
+/* Phase 18.5.3: tls/record.c's AEAD timing calls this -- a simple
+ * incrementing fake counter, the same "externally supplied, stubbed on
+ * the host" contract net/tcp.c's own host tests already use for
+ * perf_now_us(). This test only checks record framing/crypto correctness,
+ * not timing, so the exact values returned here don't matter. */
+uint64_t cprof_now_us(void) { static uint64_t t; return t++; }
 
 static int failures;
 

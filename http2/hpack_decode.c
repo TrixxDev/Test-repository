@@ -1,6 +1,7 @@
 /* HPACK header-block decoding — see hpack_decode.h. */
 #include "hpack_decode.h"
 #include "huffman.h"
+#include "uprof.h"
 
 /* RFC 7541 §5.1. `prefix_bits` low bits of the byte at *pos hold the
  * value's start (the caller has already dispatched on the representation
@@ -109,7 +110,11 @@ static int hpack_get_literal(const uint8_t *in, size_t in_len, size_t *pos, int 
     return hpack_get_string(in, in_len, pos, scratch, scratch_cap, spos, value, value_len);
 }
 
-int hpack_decode_headers(const uint8_t *in, size_t in_len, hpack_dyn_table *table,
+/* Phase 18.5.3: renamed so hpack_decode_headers() itself can be a thin
+ * timing wrapper -- this has many early returns inside its main loop, and
+ * threading a stat update through each would be far more invasive than
+ * timing the call from outside. */
+static int hpack_decode_headers_impl(const uint8_t *in, size_t in_len, hpack_dyn_table *table,
                          hpack_header_field *out, size_t out_cap, size_t *out_count,
                          uint8_t *scratch, size_t scratch_cap, size_t *scratch_used)
 {
@@ -166,4 +171,17 @@ int hpack_decode_headers(const uint8_t *in, size_t in_len, hpack_dyn_table *tabl
     *out_count = n;
     *scratch_used = spos;
     return 0;
+}
+
+int hpack_decode_headers(const uint8_t *in, size_t in_len, hpack_dyn_table *table,
+                         hpack_header_field *out, size_t out_cap, size_t *out_count,
+                         uint8_t *scratch, size_t scratch_cap, size_t *scratch_used)
+{
+    uint64_t t0 = cprof_now_us();   /* Phase 18.5.3 */
+    int rc = hpack_decode_headers_impl(in, in_len, table, out, out_cap, out_count,
+                                       scratch, scratch_cap, scratch_used);
+    g_cprof.hpack_decode_us += (unsigned)(cprof_now_us() - t0);
+    g_cprof.hpack_decode_calls++;
+    if (rc == 0) g_cprof.hpack_decode_bytes += (unsigned)in_len;
+    return rc;
 }

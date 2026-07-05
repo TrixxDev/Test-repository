@@ -34,6 +34,10 @@
 #include "hpack_table.h"
 #include "hpack_decode.h"
 #include "window_update.h"
+#include "uprof.h"
+
+/* Phase 18.5.3: see tools/h2_test.c's identical stub. */
+uint64_t cprof_now_us(void) { static uint64_t t; return t++; }
 
 #define DEFAULT_SEED  0x4155524fu   /* "AURO" -- arbitrary, just needs to be fixed */
 #define DEFAULT_ITERS 200000u

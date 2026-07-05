@@ -234,6 +234,7 @@
 #include "hpack_table.h"
 #include "hpack_decode.h"
 #include "window_update.h"
+#include "uprof.h"
 
 #define HTTPSGET_NOW 1782864000ULL   /* 2026-07-01; override via a numeric argument */
 #define MAX_REDIRECTS 20             /* hop ceiling; visited[] also catches loops earlier */
@@ -328,6 +329,7 @@ static char        g_multipart_ctype[MULTIPART_CTYPE_MAX];
  * comment) rather than pretending nothing happened. */
 static const char *g_alpn_protocols[ALPN_PROTOCOL_COUNT] = { "h2", "http/1.1" };
 static int         g_alpn_enabled;
+static int         g_profile_enabled;   /* Phase 18.5.3: --profile */
 
 /* Multi-origin session cache (Phase 15.8): one slot per origin, holding
  * whatever a real client would want to remember about it between requests --
@@ -1786,6 +1788,9 @@ int main(int argc, char **argv)
         if (argi < argc && strcmp(argv[argi], "--alpn") == 0) {
             g_alpn_enabled = 1; argi++; continue;
         }
+        if (argi < argc && strcmp(argv[argi], "--profile") == 0) {
+            g_profile_enabled = 1; argi++; continue;
+        }
         if (argi < argc && strcmp(argv[argi], "--repeat") == 0) {
             argi++;
             if (argi >= argc) { fprintf(2, "%s", usage); return 1; }
@@ -1937,6 +1942,23 @@ int main(int argc, char **argv)
         }
     }
     close_all_slots();
+
+    /* Phase 18.5.3: dump the userspace crypto/HPACK/HTTP2 profiling counters
+     * that record.c/headers.c/hpack_decode.c/frame.c have been accumulating
+     * into g_cprof this whole run -- opt-in (--profile) so normal runs stay
+     * quiet, matching --alpn's own opt-in debug line above. */
+    if (g_profile_enabled) {
+        printf("[profile] aead_seal:   calls=%u us=%u bytes=%u\n",
+               g_cprof.aead_seal_calls, g_cprof.aead_seal_us, g_cprof.aead_seal_bytes);
+        printf("[profile] aead_open:   calls=%u us=%u bytes=%u\n",
+               g_cprof.aead_open_calls, g_cprof.aead_open_us, g_cprof.aead_open_bytes);
+        printf("[profile] hpack_encode: calls=%u us=%u bytes=%u\n",
+               g_cprof.hpack_encode_calls, g_cprof.hpack_encode_us, g_cprof.hpack_encode_bytes);
+        printf("[profile] hpack_decode: calls=%u us=%u bytes=%u\n",
+               g_cprof.hpack_decode_calls, g_cprof.hpack_decode_us, g_cprof.hpack_decode_bytes);
+        printf("[profile] h2_frame:    calls=%u us=%u bytes=%u\n",
+               g_cprof.h2_frame_calls, g_cprof.h2_frame_us, g_cprof.h2_frame_bytes);
+    }
 
     if (last_status == 200) return 0;
     return last_status ? 0 : 2;

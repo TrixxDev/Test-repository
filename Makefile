@@ -74,7 +74,8 @@ TLS_U_SRC := crypto/sha256.c crypto/sha384.c crypto/hmac_sha256.c crypto/hkdf.c 
              x509/asn1.c x509/x509.c x509/verify_cert.c \
              compress/crc32.c compress/inflate.c compress/gzip.c \
              http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c \
-             http2/hpack_table.c http2/hpack_decode.c http2/window_update.c
+             http2/hpack_table.c http2/hpack_decode.c http2/window_update.c \
+             user/uprof.c user/uprof_clock.c
 TLS_U_OBJ := $(TLS_U_SRC:.c=.tlsu.o)
 
 %.tlsu.o: %.c
@@ -243,7 +244,7 @@ crypto-bench:
 # Host-side TLS protocol tests (tls/ over the verified crypto/ primitives).
 .PHONY: tls-test
 tls-test:
-	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_test.c tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/driver.c tls/cert.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_tls_test
+	$(CC) -O2 -Icrypto -Itls -Ix509 -Iuser tools/tls_test.c tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/driver.c tls/cert.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c user/uprof.c -o /tmp/aurora_tls_test
 	/tmp/aurora_tls_test
 
 # RFC 8448 trace runner: replays the published Simple 1-RTT Handshake through the
@@ -276,7 +277,7 @@ gzip-test:
 # and full header-block decode).
 .PHONY: h2-test
 h2-test:
-	$(CC) -O2 -Ihttp2 tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c -o /tmp/aurora_h2_test
+	$(CC) -O2 -Ihttp2 -Iuser tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c user/uprof.c -o /tmp/aurora_h2_test
 	/tmp/aurora_h2_test
 
 # Host-side HTTP/2 fuzz harness (Phase 17.5.1): random/malformed bytes into
@@ -286,7 +287,7 @@ h2-test:
 # below.
 .PHONY: h2-fuzz
 h2-fuzz:
-	$(CC) -O2 -Ihttp2 tools/h2_fuzz.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c -o /tmp/aurora_h2_fuzz
+	$(CC) -O2 -Ihttp2 -Iuser tools/h2_fuzz.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c user/uprof.c -o /tmp/aurora_h2_fuzz
 	/tmp/aurora_h2_fuzz
 
 # Same fuzz harness, built with GCC's AddressSanitizer + UndefinedBehavior-
@@ -300,7 +301,7 @@ SEED  ?= 0x4155524f
 ITERS ?= 20000
 .PHONY: h2-fuzz-san
 h2-fuzz-san:
-	gcc -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ihttp2 tools/h2_fuzz.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c -o /tmp/aurora_h2_fuzz_san
+	gcc -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ihttp2 -Iuser tools/h2_fuzz.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c user/uprof.c -o /tmp/aurora_h2_fuzz_san
 	/tmp/aurora_h2_fuzz_san $(SEED) $(ITERS)
 
 # The EXISTING fixed-vector h2-test suite, rebuilt with the same GCC
@@ -312,7 +313,7 @@ h2-fuzz-san:
 # redzones caught it here).
 .PHONY: h2-test-san
 h2-test-san:
-	gcc -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ihttp2 tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c -o /tmp/aurora_h2_test_san
+	gcc -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ihttp2 -Iuser tools/h2_test.c http2/frame.c http2/settings.c http2/data.c http2/hpack.c http2/headers.c http2/huffman.c http2/hpack_table.c http2/hpack_decode.c http2/window_update.c user/uprof.c -o /tmp/aurora_h2_test_san
 	/tmp/aurora_h2_test_san
 
 # Host-side X.509 / PKI tests (x509/ layer: ASN.1 DER reader, certificate parse).
@@ -413,7 +414,7 @@ LIVE_PORT ?= 443
 AURORA_TRUST_PEM ?= /root/.ccr/agent-proxy-ca.crt
 .PHONY: tls-live-test
 tls-live-test:
-	$(CC) -O2 -Icrypto -Itls -Ix509 tools/tls_live_test.c tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/driver.c tls/cert.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c -o /tmp/aurora_tls_live_test
+	$(CC) -O2 -Icrypto -Itls -Ix509 -Iuser tools/tls_live_test.c tls/record.c tls/record_reader.c tls/transcript.c tls/key_schedule.c tls/handshake.c tls/client.c tls/conn.c tls/driver.c tls/cert.c tls/trace.c x509/asn1.c x509/x509.c x509/verify_cert.c crypto/sha256.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c crypto/bignum.c crypto/rsa.c crypto/rsa_pss.c crypto/mgf1.c crypto/ecdsa.c crypto/p256_field.c crypto/p256_scalar.c crypto/p256_point.c crypto/sha384.c crypto/ecdsa384.c crypto/p384_field.c crypto/p384_scalar.c crypto/p384_point.c user/uprof.c -o /tmp/aurora_tls_live_test
 	AURORA_TRUST_PEM="$(AURORA_TRUST_PEM)" /tmp/aurora_tls_live_test $(LIVE_HOST) $(LIVE_PORT)
 
 # Host-side TCP receive-ring test (net/rxring.c: the buffer behind tcp_recv).

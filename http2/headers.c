@@ -1,6 +1,7 @@
 /* HTTP/2 HEADERS frame — see headers.h. */
 #include "headers.h"
 #include "hpack.h"
+#include "uprof.h"
 
 static int eq_lit(const char *s, size_t len, const char *lit)
 {
@@ -20,7 +21,11 @@ static size_t put_udec(char *out, size_t v)
     return tn;
 }
 
-int h2_build_headers(uint8_t *out, size_t cap, uint32_t stream_id,
+/* Phase 18.5.3: renamed so h2_build_headers() itself can be a thin timing
+ * wrapper -- this has many early returns (any hpack_put_* failing), and
+ * threading a stat update through each would be far more invasive than
+ * timing the call from outside. */
+static int h2_build_headers_impl(uint8_t *out, size_t cap, uint32_t stream_id,
                      const char *method, size_t method_len,
                      const char *authority, size_t authority_len,
                      const char *path, size_t path_len,
@@ -95,4 +100,24 @@ int h2_build_headers(uint8_t *out, size_t cap, uint32_t stream_id,
     h2_frame_header h = { (uint32_t)payload_len, H2_TYPE_HEADERS, flags, stream_id };
     if (h2_write_frame_header(out, cap, &h) < 0) return -1;
     return (int)pos;
+}
+
+int h2_build_headers(uint8_t *out, size_t cap, uint32_t stream_id,
+                     const char *method, size_t method_len,
+                     const char *authority, size_t authority_len,
+                     const char *path, size_t path_len,
+                     const char *user_agent, size_t user_agent_len,
+                     const char *cookie, size_t cookie_len,
+                     const char *content_type, size_t content_type_len,
+                     size_t body_len)
+{
+    uint64_t t0 = cprof_now_us();   /* Phase 18.5.3 */
+    int n = h2_build_headers_impl(out, cap, stream_id, method, method_len,
+                                  authority, authority_len, path, path_len,
+                                  user_agent, user_agent_len, cookie, cookie_len,
+                                  content_type, content_type_len, body_len);
+    g_cprof.hpack_encode_us += (unsigned)(cprof_now_us() - t0);
+    g_cprof.hpack_encode_calls++;
+    if (n > 0) g_cprof.hpack_encode_bytes += (unsigned)n;
+    return n;
 }
