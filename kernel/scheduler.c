@@ -3,11 +3,80 @@
 #include "pit.h"
 #include "gdt.h"
 #include "paging.h"
+#include "pmm.h"
 #include "prof.h"
+#include "kio.h"
 #include <stdint.h>
 #include <stddef.h>
 
 #define STACK_SIZE 8192
+
+/* Guard pages: every alloc_thread() kernel stack (kernel threads and every
+ * user/trampoline thread's ring-0 stack alike, per thread_create_user()/
+ * thread_create_trampoline() both routing through alloc_thread()) now lives
+ * in its own dedicated, page-mapped 3-page slot -- one deliberately UNMAPPED
+ * guard page (vmm_map_page() is never called for it) directly below
+ * STACK_SIZE/PAGE_SIZE mapped stack pages -- instead of an ordinary
+ * kmalloc() block sitting wherever the heap's first-fit allocator happened
+ * to place it, back-to-back with other heap objects. Before this, a stack
+ * overflow didn't fault at all: it silently overwrote whatever kmalloc'd
+ * memory sat next to it (exactly what happened in fs/fat32.c's
+ * fat_write_impl()/fat_update_dirent() double-cbuf bug -- see docs/SECURITY.md
+ * "Step 18.5"). Now the very first out-of-bounds write faults immediately.
+ *
+ * The slot area (0xF0000000+) sits inside the kernel-space PD range every
+ * process's page directory shares by reference with vmm_kernel_directory()
+ * (paging.c's vmm_create_address_space() aliases PD indices 768-1022 across
+ * every address space), so vmm_map_page()/vmm_unmap_page() here take effect
+ * for every process regardless of which CR3 happens to be loaded when a
+ * thread is created or freed -- the same reason kernel/process.c's own user-
+ * stack mapping doesn't need to switch address spaces first.
+ *
+ * Known gap: the boot thread (main_thread/main_kstack below) is a singleton
+ * static array, not routed through alloc_thread(), and is NOT guarded --
+ * matches its pre-existing "not page-aligned, half-size" special case.
+ *
+ * A same-privilege (ring0->ring0) page fault doesn't switch stacks, so the
+ * CPU's own exception-frame push happens using the already-invalid ESP --
+ * in practice this ALWAYS re-faults (confirmed empirically: an ordinary
+ * single-push-at-a-time overflow escalates page-fault -> double-fault ->
+ * triple-fault every time, not just for some rare "oversteps by a lot"
+ * case, since the delivery frame's first push targets the exact same
+ * address the original instruction just failed to write). Vector 8 (#DF)
+ * is therefore wired as a TASK GATE to a dedicated stack (arch/i386/gdt.c's
+ * df_tss, arch/i386/isr.c's df_handler_entry()) instead of a normal
+ * interrupt gate, so the diagnostic always has a valid stack to run on
+ * regardless of how the original thread's stack broke. */
+#define KSTACK_PAGES        (STACK_SIZE / PAGE_SIZE)     /* 2 */
+#define KSTACK_SLOT_PAGES   (KSTACK_PAGES + 1)           /* +1 guard page */
+#define KSTACK_AREA_BASE    0xF0000000u                  /* shared kernel range,
+                                                            * far from the heap
+                                                            * (0xD0000000+) and
+                                                            * the recursive
+                                                            * self-map (0xFFC00000) */
+#define MAX_KSTACK_SLOTS    64                            /* MAX_PROCS (32) plus
+                                                            * headroom for kernel
+                                                            * threads + not-yet-
+                                                            * freed zombies */
+
+static uint8_t kstack_slot_used[MAX_KSTACK_SLOTS];
+
+static int kstack_slot_alloc(void)
+{
+    for (int i = 0; i < MAX_KSTACK_SLOTS; i++) {
+        if (!kstack_slot_used[i]) {
+            kstack_slot_used[i] = 1;
+            return i;
+        }
+    }
+    return -1;                 /* every slot in use */
+}
+
+static void kstack_slot_free(int slot)
+{
+    if (slot >= 0 && slot < MAX_KSTACK_SLOTS)
+        kstack_slot_used[slot] = 0;
+}
 
 enum { TS_READY, TS_BLOCKED, TS_SLEEPING, TS_ZOMBIE };
 
@@ -15,7 +84,11 @@ struct thread {
     uint32_t esp;           /* saved kernel stack pointer (must stay first) */
     uint32_t pd_phys;       /* address space (CR3 value) */
     uint32_t kstack_top;    /* ring-0 stack top, loaded into TSS.esp0 */
-    void    *kstack;        /* base of the allocated kernel stack */
+    void    *kstack;        /* base of the allocated kernel stack (NULL for
+                               * the boot thread, which uses main_kstack[]
+                               * instead and has no guard page) */
+    int      kstack_slot;   /* index into kstack_slot_used[], or -1 if this
+                               * thread's stack isn't guard-paged (boot thread) */
     int      tid;
     int      state;
     void    *proc;          /* owning process (PCB), or NULL for kernel threads */
@@ -62,10 +135,22 @@ static void user_thread_start(void)
 
 void scheduler_init(void)
 {
+    /* Same reason lib/kheap.c's kheap_init() pre-creates its own range's page
+     * tables: vmm_create_address_space() clones the shared high-memory PDEs
+     * by VALUE from whatever page directory is active at that moment (it
+     * copies through the recursive self-map, not from one canonical kernel
+     * PD), so a page table this region needs must already exist before the
+     * first process is created, or a process created before the kstack
+     * area's table happened to get allocated would silently be missing it
+     * (a page fault into an address that's actually meant to be a live
+     * kernel stack -- not a page-table read here would be too late). */
+    vmm_ensure_table(KSTACK_AREA_BASE);
+
     main_thread.tid        = next_tid++;
     main_thread.pd_phys    = vmm_kernel_directory();
     main_thread.kstack_top = (uint32_t)(main_kstack + sizeof(main_kstack));
     main_thread.kstack     = NULL;
+    main_thread.kstack_slot = -1;   /* boot thread: no guard page, see above */
     main_thread.state      = TS_READY;
     main_thread.proc       = NULL;
     main_thread.next       = &main_thread;
@@ -107,14 +192,40 @@ static thread_t *alloc_thread(uint32_t pd_phys, uint32_t start_eip)
     thread_t *t = (thread_t *)kmalloc(sizeof(thread_t));
     if (!t)
         return NULL;
-    t->kstack = kmalloc(STACK_SIZE);
-    if (!t->kstack) {
+
+    int slot = kstack_slot_alloc();
+    if (slot < 0) {
         kfree(t);
         return NULL;
     }
+    /* Slot layout: [guard page, left unmapped] [KSTACK_PAGES mapped pages]. */
+    uint32_t slot_base = KSTACK_AREA_BASE + (uint32_t)slot * KSTACK_SLOT_PAGES * PAGE_SIZE;
+    uint32_t stack_va   = slot_base + PAGE_SIZE;
+    int mapped;
+    for (mapped = 0; mapped < KSTACK_PAGES; mapped++) {
+        uint32_t phys = pmm_alloc_frame();
+        if (!phys)
+            break;
+        vmm_map_page(stack_va + (uint32_t)mapped * PAGE_SIZE, phys, PAGE_PRESENT | PAGE_WRITE);
+    }
+    if (mapped < KSTACK_PAGES) {                /* out of physical memory: unwind */
+        for (int i = 0; i < mapped; i++) {
+            uint32_t va = stack_va + (uint32_t)i * PAGE_SIZE;
+            uint32_t phys = vmm_get_physical(va);
+            vmm_unmap_page(va);
+            if (phys)
+                pmm_free_frame(phys);
+        }
+        kstack_slot_free(slot);
+        kfree(t);
+        return NULL;
+    }
+
+    t->kstack       = (void *)stack_va;
+    t->kstack_slot  = slot;
     t->tid        = next_tid++;
     t->pd_phys    = pd_phys;
-    t->kstack_top = (uint32_t)((uint8_t *)t->kstack + STACK_SIZE);
+    t->kstack_top = stack_va + STACK_SIZE;
     t->state      = TS_READY;
     t->proc       = NULL;
     t->start_arg  = NULL;
@@ -405,7 +516,17 @@ void thread_free(thread_t *t)
     t->next->prev = t->prev;
     nthreads--;
     __asm__ volatile("sti");
-    kfree(t->kstack);
+    if (t->kstack) {                            /* NULL only for the boot thread */
+        uint32_t base = (uint32_t)t->kstack;
+        for (int i = 0; i < KSTACK_PAGES; i++) {
+            uint32_t va = base + (uint32_t)i * PAGE_SIZE;
+            uint32_t phys = vmm_get_physical(va);
+            vmm_unmap_page(va);
+            if (phys)
+                pmm_free_frame(phys);
+        }
+        kstack_slot_free(t->kstack_slot);
+    }
     kfree(t);
 }
 
@@ -416,6 +537,45 @@ void *thread_start_arg(thread_t *t)    { return t->start_arg; }
 void  thread_set_pd(thread_t *t, uint32_t pd) { t->pd_phys = pd; }
 uint32_t thread_kstack_top(thread_t *t) { return t->kstack_top; }
 
+/* Phase 18.5.6: 1 if `addr` falls in `t`'s guard page (the unmapped page
+ * directly below its kstack) -- called from the page-fault handler with
+ * the faulting CR2 value to tell a kernel stack overflow apart from any
+ * other unmapped-page access. The boot thread (kstack == NULL) has no
+ * guard page and never matches. */
+int thread_kstack_guard_hit(thread_t *t, uint32_t addr)
+{
+    if (!t || !t->kstack)
+        return 0;
+    uint32_t base = (uint32_t)t->kstack;
+    return addr >= base - PAGE_SIZE && addr < base;
+}
+
 void scheduler_enable(void)  { enabled = 1; }
 void scheduler_disable(void) { enabled = 0; }
+
+/* Phase 18.5.6 acceptance-test hook (see SYS_DEBUG_KSTACK_OVERFLOW) --
+ * deliberately overflows the CALLING thread's kernel stack so
+ * tools/guard_page_qemu.py can confirm the guard page actually catches it.
+ * `eat` is written (not just declared) so the compiler can't optimize the
+ * frame away, and the recursive call's result feeds into the return value
+ * so this can't become a tail call (which -O2 would otherwise turn into a
+ * loop that never grows the stack at all). */
+static int __attribute__((noinline)) kstack_overflow_recurse(int depth)
+{
+    volatile uint8_t eat[512];
+    for (unsigned i = 0; i < sizeof eat; i++)
+        eat[i] = (uint8_t)depth;
+    int r = 0;
+    if (depth > 0)
+        r = kstack_overflow_recurse(depth - 1) + 1;
+    return r + eat[0];
+}
+
+int sys_debug_kstack_overflow(void)
+{
+    kprintf("[kernel] debug_kstack_overflow: deliberately overflowing tid=%d's kernel stack\n",
+            current->tid);
+    kstack_overflow_recurse(1000);   /* 1000 * >=512B frames vs. an 8 KiB stack */
+    return 0;   /* unreachable if the guard page works */
+}
 int  thread_count(void)      { return nthreads; }

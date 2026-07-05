@@ -241,7 +241,17 @@ struct dirent {
 
 #define SYS_PROFSTAT 47 /* profstat(struct kernel_prof *out) -> 0/-1 (Phase 18.5.2) */
 
-#define SYS_MAX    48   /* one past the last valid syscall number    */
+#define SYS_DEBUG_KSTACK_OVERFLOW 48
+                        /* debug_kstack_overflow() -> never returns (Phase 18.5.6):
+                         * a QEMU-acceptance-test-only hook that deliberately
+                         * recurses past the calling thread's kernel stack to
+                         * verify its guard page actually halts with a
+                         * "KERNEL STACK OVERFLOW" diagnostic instead of
+                         * silently corrupting adjacent heap memory (see
+                         * kernel/scheduler.c and tools/guard_page_qemu.py).
+                         * Not reachable from anything but this explicit call. */
+
+#define SYS_MAX    49   /* one past the last valid syscall number    */
 
 /* ---- socket layer ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

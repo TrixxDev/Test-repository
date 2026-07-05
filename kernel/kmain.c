@@ -96,6 +96,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
 
     kprintf("[boot] paging + kernel heap...\n");
     paging_init();
+    gdt_df_tss_set_cr3(vmm_kernel_directory());   /* Phase 18.5.6: #DF task gate */
     kheap_init();
 
     kprintf("[boot] VFS + tmpfs...\n");

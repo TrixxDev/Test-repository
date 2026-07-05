@@ -30,13 +30,20 @@ struct tss_entry {
     uint16_t trap, iomap_base;
 } __attribute__((packed));
 
-/* null, kernel code, kernel data, user code, user data, TSS. */
-static struct gdt_entry gdt[6];
+/* null, kernel code, kernel data, user code, user data, TSS, double-fault TSS. */
+static struct gdt_entry gdt[7];
 static struct gdt_ptr   gp;
 static struct tss_entry tss;
 
 /* Dedicated ring-0 stack used when handling interrupts that arrive from ring 3. */
 static uint8_t kernel_stack[16384] __attribute__((aligned(16)));
+
+/* Phase 18.5.6: the #DF task-gate target -- see gdt.h's DF_TSS_SELECTOR
+ * comment. Its own small stack, entirely separate from every thread's own
+ * (possibly just-overflowed) kernel stack. */
+static struct tss_entry df_tss;
+static uint8_t df_stack[4096] __attribute__((aligned(16)));
+extern void df_handler_entry(void);   /* arch/i386/isr.c */
 
 extern void gdt_flush(uint32_t gdt_ptr);
 
@@ -69,6 +76,40 @@ void tss_set_kernel_stack(uint32_t esp0)
     tss.esp0 = esp0;
 }
 
+/* Phase 18.5.6: see gdt.h's DF_TSS_SELECTOR comment. cr3 is left 0 here --
+ * gdt_install() runs before paging_init(), so there's no meaningful value
+ * yet; gdt_df_tss_set_cr3() patches it in once paging is up, well before
+ * any thread (and so any guard page) exists. */
+static void write_df_tss(int n)
+{
+    uint32_t base  = (uint32_t)&df_tss;
+    uint32_t limit = sizeof(df_tss) - 1;
+
+    set_gate(n, base, limit, 0x89, 0x00);   /* present, 32-bit TSS (available) */
+
+    memset(&df_tss, 0, sizeof(df_tss));
+    df_tss.ss0    = 0x10;
+    df_tss.esp0   = (uint32_t)(df_stack + sizeof(df_stack));
+    df_tss.ss     = 0x10;                              /* stack the task gate actually runs on */
+    df_tss.esp    = (uint32_t)(df_stack + sizeof(df_stack));
+    df_tss.cs     = 0x08;
+    df_tss.ds = df_tss.es = df_tss.fs = df_tss.gs = 0x10;
+    df_tss.eip    = (uint32_t)df_handler_entry;
+    df_tss.eflags = 0x00000002;                        /* reserved bit only; IF=0 */
+    df_tss.iomap_base = sizeof(df_tss);
+}
+
+void gdt_df_tss_set_cr3(uint32_t cr3)
+{
+    df_tss.cr3 = cr3;
+}
+
+void gdt_get_last_fault_state(uint32_t *eip, uint32_t *esp)
+{
+    if (eip) *eip = tss.eip;
+    if (esp) *esp = tss.esp;
+}
+
 void gdt_install(void)
 {
     gp.limit = sizeof(gdt) - 1;
@@ -80,6 +121,7 @@ void gdt_install(void)
     set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF);       /* user code:   ring 3 */
     set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);       /* user data:   ring 3 */
     write_tss(5);
+    write_df_tss(6);
 
     gdt_flush((uint32_t)&gp);
 

@@ -117,6 +117,16 @@ void *thread_start_arg(thread_t *t);
 void  thread_set_pd(thread_t *t, uint32_t pd_phys);
 uint32_t thread_kstack_top(thread_t *t);
 
+/* Phase 18.5.6: 1 if `addr` (a faulting CR2 value) falls inside `t`'s kernel
+ * stack guard page -- the page-fault handler's way to recognize a stack
+ * overflow specifically, instead of just an unmapped-page access. */
+int thread_kstack_guard_hit(thread_t *t, uint32_t addr);
+
+/* Phase 18.5.6: SYS_DEBUG_KSTACK_OVERFLOW's implementation -- deliberately
+ * overflows the calling thread's kernel stack; never returns if the guard
+ * page works. QEMU-acceptance-test-only, see tools/guard_page_qemu.py. */
+int sys_debug_kstack_overflow(void);
+
 void scheduler_enable(void);
 void scheduler_disable(void);
 int  thread_count(void);

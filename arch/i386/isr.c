@@ -3,6 +3,8 @@
 #include "io.h"
 #include "kio.h"
 #include "syscall.h"
+#include "scheduler.h"
+#include "gdt.h"
 
 /* Exception stubs (isr0..isr31) and IRQ stubs (irq0..irq15) from interrupt.S. */
 extern void isr0(void);  extern void isr1(void);  extern void isr2(void);
@@ -56,7 +58,11 @@ void isr_install(void)
     idt_set_gate(5,  (uint32_t)isr5,  0x08, 0x8E);
     idt_set_gate(6,  (uint32_t)isr6,  0x08, 0x8E);
     idt_set_gate(7,  (uint32_t)isr7,  0x08, 0x8E);
-    idt_set_gate(8,  (uint32_t)isr8,  0x08, 0x8E);
+    /* Phase 18.5.6: vector 8 (#DF) is a TASK GATE, not an interrupt gate --
+     * see gdt.h's DF_TSS_SELECTOR comment for why a same-privilege interrupt
+     * gate can't reliably deliver a double fault caused by a broken stack.
+     * `base` is unused/ignored by hardware for a task gate. */
+    idt_set_gate(8,  0,               DF_TSS_SELECTOR, 0x85);
     idt_set_gate(9,  (uint32_t)isr9,  0x08, 0x8E);
     idt_set_gate(10, (uint32_t)isr10, 0x08, 0x8E);
     idt_set_gate(11, (uint32_t)isr11, 0x08, 0x8E);
@@ -135,12 +141,56 @@ static const char *exception_messages[32] = {
     "Reserved", "Reserved",
 };
 
+/* Phase 18.5.6: entered by a hardware task switch (vector 8's task gate),
+ * never by a normal `call` -- runs on df_tss's own dedicated stack, so it
+ * needs none of the (possibly exhausted) stack that caused the double fault
+ * in the first place. gdt_get_last_fault_state() reads the outgoing task's
+ * eip/esp, which the CPU saved into the main TSS as part of the switch (this
+ * kernel never does a hardware task switch otherwise, so TR still points at
+ * that one TSS) -- CR2 itself isn't preserved across the cascade, but in
+ * this kernel a double fault reaching here is overwhelmingly a kernel stack
+ * overflow (nothing else is expected to fault while already handling a
+ * fault), so the message says so plainly instead of just "Double fault". */
+void df_handler_entry(void)
+{
+    uint32_t eip, esp;
+    gdt_get_last_fault_state(&eip, &esp);
+    kprintf("\n*** DOUBLE FAULT -- almost certainly a kernel stack overflow: the very\n"
+            "    first attempt to deliver the page fault itself needed a stack slot\n"
+            "    that was ALSO unmapped, so the page-fault handler never got to run\n"
+            "    (last known eip=0x%x esp=0x%x before the cascade)\n", eip, esp);
+    kprintf("*** System halted.\n");
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}
+
 /* Called from the assembly stub for CPU exceptions (vectors 0-31). */
 void isr_handler(registers_t *regs)
 {
     if (regs->int_no == 0x80) {
         syscall_handler(regs);
         return;
+    }
+
+    /* Phase 18.5.6: vector 14 (page fault) is the only exception the CPU
+     * hands us a faulting address for -- in CR2, never captured anywhere
+     * in this codebase before. Checked first against the current thread's
+     * kernel-stack guard page (kernel/scheduler.c) so an overflow gets a
+     * specific diagnostic instead of a generic "Page fault" with no address
+     * at all, which is what let the fs/fat32.c cbuf overflow (docs/SECURITY.md
+     * "Step 18.5") go unnoticed until it corrupted unrelated heap memory. */
+    if (regs->int_no == 14) {
+        uint32_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        if (thread_kstack_guard_hit(thread_current(), cr2))
+            kprintf("\n*** KERNEL STACK OVERFLOW: fault addr=0x%x eip=0x%x (guard page)\n",
+                    cr2, regs->eip);
+        else
+            kprintf("\n*** PAGE FAULT: fault addr=0x%x err=%u eip=0x%x\n",
+                    cr2, regs->err_code, regs->eip);
+        kprintf("*** System halted.\n");
+        for (;;)
+            __asm__ volatile("cli; hlt");
     }
 
     const char *msg = regs->int_no < 32 ? exception_messages[regs->int_no]

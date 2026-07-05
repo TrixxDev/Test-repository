@@ -30,7 +30,7 @@ GUI_DISPLAY ?= -display sdl
 EMBEDDED   := kernel/embedded_user.c
 USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/cat.elf user/grep.elf user/orphan.elf user/nbtest.elf user/waittest.elf \
-              user/sendwintest.elf user/profstat.elf \
+              user/sendwintest.elf user/profstat.elf user/kstacktest.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
               user/wserver.elf user/term.elf user/dock.elf user/files.elf \
               user/viewer.elf user/wmstress.elf user/settings.elf user/fetch.elf \
@@ -157,6 +157,7 @@ $(DISK): $(USER_PROGS) user/poem.txt user/about.txt tools/mkfat32.py
 	    CAT.ELF user/cat.elf GREP.ELF user/grep.elf ORPHAN.ELF user/orphan.elf \
 	    NBTEST.ELF user/nbtest.elf WAITTEST.ELF user/waittest.elf \
 	    SENDWIN.ELF user/sendwintest.elf PROFSTAT.ELF user/profstat.elf \
+	    KSTKTEST.ELF user/kstacktest.elf \
 	    NETD.ELF user/netd.elf ECHOSRV.ELF user/echosrv.elf ECHOCLI.ELF user/echocli.elf \
 	    SAVE.ELF user/save.elf WSERVER.ELF user/wserver.elf TERM.ELF user/term.elf \
 	    DOCK.ELF user/dock.elf FILES.ELF user/files.elf VIEWER.ELF user/viewer.elf \
