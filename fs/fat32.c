@@ -199,7 +199,22 @@ static int fat_read_impl(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t 
         size = node->size - off;
 
     uint32_t clus_bytes = (uint32_t)fat.bytes_per_sec * fat.sec_per_clus;
-    uint8_t cbuf[CLUSTER_MAX];
+    /* static, not stack-allocated: fat_write_impl() below calls
+     * fat_update_dirent() before it returns, and each has its own 4096-byte
+     * cluster buffer -- two of those alive at once already equals a whole
+     * thread's 8192-byte kernel stack (STACK_SIZE in kernel/scheduler.c),
+     * leaving zero room for the interrupt frame, sys_write(), vfs_write(),
+     * or anything else in the call chain. There's no guard page below the
+     * stack, so the overflow doesn't fault immediately -- it silently
+     * corrupts whatever kmalloc'd memory happens to sit next to it, which is
+     * exactly what caused a real crash here: EIP ending up pointing into the
+     * bytes of the string a `save` command had just written, well after
+     * that process had already exited. Safe as `static` (instead of
+     * threading a caller-supplied scratch buffer through every call site)
+     * because drivers/ata.c's cluster I/O is synchronous PIO that never
+     * yields, and this kernel has no SMP -- only one caller is ever
+     * mid-cluster-I/O at a time. */
+    static uint8_t cbuf[CLUSTER_MAX];
     uint32_t cluster = node->inode;
 
     for (uint32_t skip = off / clus_bytes; skip > 0; skip--)
@@ -234,7 +249,7 @@ static vfs_node_t *dir_scan(vfs_node_t *dir, const char *match83,
                             int want, char *name_out, uint32_t cap)
 {
     uint32_t clus_bytes = (uint32_t)fat.bytes_per_sec * fat.sec_per_clus;
-    uint8_t cbuf[CLUSTER_MAX];
+    static uint8_t cbuf[CLUSTER_MAX];   /* static: see fat_read_impl()'s comment above */
     uint32_t cluster = dir->inode;
     int index = 0;
     uint32_t guard = fat.count_clusters + 1;    /* a chain can't exceed all clusters */
@@ -308,7 +323,7 @@ static void fat_update_dirent(vfs_node_t *node)
     fat_meta_t *m = (fat_meta_t *)node->priv;
     if (!m || m->dir_cluster < 2)
         return;
-    uint8_t cbuf[CLUSTER_MAX];
+    static uint8_t cbuf[CLUSTER_MAX];   /* static: see fat_read_impl()'s comment above */
     if (read_cluster(m->dir_cluster, cbuf) != 0)
         return;
     uint8_t *e = cbuf + m->entry_off;
@@ -369,7 +384,7 @@ static int fat_write_impl(vfs_node_t *node, uint32_t off, uint32_t size, const u
     for (uint32_t skip = off / clus_bytes; skip > 0; skip--)
         c = fat_next(c);
 
-    uint8_t cbuf[CLUSTER_MAX];
+    static uint8_t cbuf[CLUSTER_MAX];   /* static: see fat_read_impl()'s comment above */
     uint32_t pos  = off % clus_bytes;
     uint32_t done = 0;
     while (done < size && c >= 2 && c < FAT_EOC) {
@@ -411,7 +426,7 @@ static vfs_node_t *fat_create(vfs_node_t *node, const char *name, uint32_t flags
     to_83(name, n83);
 
     uint32_t clus_bytes = (uint32_t)fat.bytes_per_sec * fat.sec_per_clus;
-    uint8_t cbuf[CLUSTER_MAX];
+    static uint8_t cbuf[CLUSTER_MAX];   /* static: see fat_read_impl()'s comment above */
     uint32_t cluster = node->inode;
 
     while (cluster >= 2 && cluster < FAT_EOC) {
