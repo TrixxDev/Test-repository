@@ -10,6 +10,7 @@
 #include "kheap.h"
 #include "string.h"
 #include "process.h"
+#include "syscall_abi.h"   /* O_NONBLOCK, EAGAIN */
 
 #define SOCK_BUF 2048
 
@@ -70,7 +71,7 @@ static void wake(thread_t **slot)
 
 /* ---- VFS ops: read == recv, write == send ---- */
 
-static int sock_node_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out)
+static int sock_node_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out, int flags)
 {
     (void)off;
     socket_t *s = (socket_t *)node->priv;
@@ -78,9 +79,14 @@ static int sock_node_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t
         return -1;                          /* not connected */
     sock_conn_t *c = s->conn;
     int sd = s->side, peer = 1 - sd;
+    int nonblock = (flags & O_NONBLOCK) != 0;
 
     __asm__ volatile("cli");
     while (c->to[sd].count == 0 && c->open[peer]) {
+        if (nonblock) {                     /* Phase 18.2 */
+            __asm__ volatile("sti");
+            return -EAGAIN;
+        }
         c->rwait[sd] = thread_current();
         thread_block();
     }
@@ -93,7 +99,7 @@ static int sock_node_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t
     return n;                               /* 0 == EOF (peer closed, drained) */
 }
 
-static int sock_node_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *in)
+static int sock_node_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *in, int flags)
 {
     (void)off;
     socket_t *s = (socket_t *)node->priv;
@@ -101,6 +107,7 @@ static int sock_node_write(vfs_node_t *node, uint32_t off, uint32_t size, const 
         return -1;
     sock_conn_t *c = s->conn;
     int sd = s->side, peer = 1 - sd;
+    int nonblock = (flags & O_NONBLOCK) != 0;
     int n = 0;
 
     __asm__ volatile("cli");
@@ -109,12 +116,15 @@ static int sock_node_write(vfs_node_t *node, uint32_t off, uint32_t size, const 
             __asm__ volatile("sti");
             return n ? n : -1;
         }
-        while (c->to[peer].count == SOCK_BUF && c->open[peer]) {
+        if (c->to[peer].count == SOCK_BUF) {
+            if (nonblock) {                 /* Phase 18.2: partial write is fine, else -EAGAIN */
+                __asm__ volatile("sti");
+                return n ? n : -EAGAIN;
+            }
             c->wwait[sd] = thread_current();
             thread_block();
-        }
-        if (!c->open[peer])
             continue;
+        }
         n += ring_put(&c->to[peer], in + n, (int)size - n);
         wake(&c->rwait[peer]);              /* peer reader waiting on POLLIN */
         wake(&c->pwait[peer]);

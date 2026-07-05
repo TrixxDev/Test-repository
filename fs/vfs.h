@@ -18,8 +18,13 @@
 struct vfs_node;
 
 typedef struct vfs_ops {
-    int (*read)(struct vfs_node *node, uint32_t off, uint32_t size, uint8_t *buf);
-    int (*write)(struct vfs_node *node, uint32_t off, uint32_t size, const uint8_t *buf);
+    /* `flags` is the calling fd's own status flags (O_NONBLOCK, Phase 18.2) --
+     * a property of the open file description, not of `node` (two fds can
+     * share one node with different blocking behavior), so it can't live on
+     * vfs_node_t itself and must be threaded through here. Most
+     * implementations (regular files) ignore it; console/pipe/socket honor it. */
+    int (*read)(struct vfs_node *node, uint32_t off, uint32_t size, uint8_t *buf, int flags);
+    int (*write)(struct vfs_node *node, uint32_t off, uint32_t size, const uint8_t *buf, int flags);
     struct vfs_node *(*finddir)(struct vfs_node *node, const char *name);
     int (*readdir)(struct vfs_node *node, uint32_t index, char *name_out, uint32_t cap);
     struct vfs_node *(*create)(struct vfs_node *node, const char *name, uint32_t flags);
@@ -49,8 +54,8 @@ vfs_node_t *vfs_resolve(const char *path);
  * everyone else (no group concept yet). */
 int vfs_permitted(vfs_node_t *node, int uid, int want);
 
-int vfs_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf);
-int vfs_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf);
+int vfs_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf, int flags);
+int vfs_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf, int flags);
 int vfs_readdir(vfs_node_t *node, uint32_t index, char *name_out, uint32_t cap);
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name);
 vfs_node_t *vfs_create(vfs_node_t *dir, const char *name, uint32_t flags);

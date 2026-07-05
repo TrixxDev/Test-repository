@@ -106,17 +106,17 @@ int vfs_permitted(vfs_node_t *node, int uid, int want)
     return (bits & want) == want;
 }
 
-int vfs_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf)
+int vfs_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf, int flags)
 {
     if (node && node->ops && node->ops->read)
-        return node->ops->read(node, off, size, buf);
+        return node->ops->read(node, off, size, buf, flags);
     return -1;
 }
 
-int vfs_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf)
+int vfs_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf, int flags)
 {
     if (node && node->ops && node->ops->write)
-        return node->ops->write(node, off, size, buf);
+        return node->ops->write(node, off, size, buf, flags);
     return -1;
 }
 

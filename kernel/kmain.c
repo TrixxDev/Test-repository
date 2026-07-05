@@ -105,7 +105,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     /* tmpfs fallback copy of init. */
     vfs_node_t *tmp = vfs_resolve("/tmp");
     vfs_node_t *fb = vfs_create(tmp, "init.elf", VFS_FILE);
-    vfs_write(fb, 0, user_elf_len, user_elf);
+    vfs_write(fb, 0, user_elf_len, user_elf, 0);
 
     const char *init_path = "/tmp/init.elf";
     kprintf("[boot] probing ATA disk...\n");
@@ -153,7 +153,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
     /* Load and start init. */
     vfs_node_t *f = vfs_resolve(init_path);
     uint8_t *buf = (uint8_t *)kmalloc(f->size);
-    vfs_read(f, 0, f->size, buf);
+    vfs_read(f, 0, f->size, buf, 0);
 
     terminal_setcolor(VGA_LIGHT_GREEN, VGA_BLACK);
     kprintf("\n[exec] starting init from %s\n", init_path);

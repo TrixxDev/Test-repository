@@ -60,6 +60,23 @@
 #define SYS_TCPSTAT 42  /* tcpstat(struct tcp_stats *out) -> 0/-1               */
 #define SYS_HTTPGET 43  /* http_get(host, buf, cap) -> bytes / <0 (DNS->TCP->GET) */
 #define SYS_INET_CONNECT 44 /* inet_connect(fd, host, port) -> 0/-2 DNS/-3 (AF_INET) */
+#define SYS_FCNTL   45  /* fcntl(fd, cmd, arg) -> see F_GETFL/F_SETFL below         */
+
+/* ---- Phase 18.2: unified kernel error codes ----
+ * Existing syscalls that predate this still just return a generic -1 on
+ * failure; that's unchanged. These are specific, small negative values a
+ * caller can compare against by name when it needs to react differently to
+ * a particular reason, the same way real errno values work -- but returned
+ * directly as the syscall's own value (there is no separate errno variable
+ * here), matching this ABI's existing "negative on error" convention. */
+#define EAGAIN      11  /* a non-blocking operation would have to wait     */
+#define EWOULDBLOCK EAGAIN  /* POSIX historically distinguishes these; Aurora, like Linux, does not */
+#define EINTR       4   /* a blocking wait was interrupted before completing.
+                          * Defined for completeness (the error-code model
+                          * every subsystem shares should name it), but
+                          * nothing returns it yet: Aurora has no signal
+                          * mechanism to interrupt a blocking wait. It
+                          * becomes real once one exists. */
 
 /* shm_create() flags (arg2). */
 #define SHM_PUBLIC  1   /* any process may shm_map the object (e.g. clipboard) */
@@ -120,8 +137,20 @@ struct dirent {
 #define O_RDWR     2
 #define O_CREAT    0x100    /* create the file if it does not exist */
 #define O_TRUNC    0x200    /* truncate to zero length on open      */
+#define O_NONBLOCK 0x400    /* Phase 18.2: read()/write() return -EAGAIN
+                              * instead of blocking when the operation isn't
+                              * immediately possible. Settable at open() time
+                              * or later via fcntl(fd, F_SETFL, O_NONBLOCK) --
+                              * the latter is how a pipe or socket fd (never
+                              * created through open()) gets it. */
 
-#define SYS_MAX    45   /* one past the last valid syscall number    */
+/* fcntl() commands (arg2); arg3 is the command's own argument.
+ * F_SETFL only ever affects O_NONBLOCK here -- there is no O_APPEND or
+ * other settable status flag yet, so other bits in `arg` are ignored. */
+#define F_GETFL    1    /* -> this fd's current flags word           */
+#define F_SETFL    2    /* set flags (arg3 & O_NONBLOCK) -> 0        */
+
+#define SYS_MAX    46   /* one past the last valid syscall number    */
 
 /* ---- socket layer ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

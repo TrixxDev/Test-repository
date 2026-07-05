@@ -19,6 +19,7 @@ static inline int   write(int fd, const void *b, int n) { return _syscall(SYS_WR
 static inline int   read(int fd, void *b, int n)        { return _syscall(SYS_READ, fd, (int)b, n); }
 static inline int   open(const char *p, int f)          { return _syscall(SYS_OPEN, (int)p, f, 0); }
 static inline int   close(int fd)                       { return _syscall(SYS_CLOSE, fd, 0, 0); }
+static inline int   fcntl(int fd, int cmd, int arg)     { return _syscall(SYS_FCNTL, fd, cmd, arg); }
 static inline int   fork(void)                          { return _syscall(SYS_FORK, 0, 0, 0); }
 static inline int   execv(const char *p, char **argv)   { return _syscall(SYS_EXEC, (int)p, (int)argv, 0); }
 static inline int   wait(int *status)                   { return _syscall(SYS_WAIT, (int)status, 0, 0); }

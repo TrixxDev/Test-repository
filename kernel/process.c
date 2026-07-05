@@ -89,6 +89,7 @@ static int fd_install_role(process_t *p, vfs_node_t *node, int role)
             f->access = (role == FD_PIPE_R) ? VFS_R
                       : (role == FD_PIPE_W) ? VFS_W
                       : (VFS_R | VFS_W);    /* FD_SOCKET, FD_NORMAL */
+            f->flags = 0;    /* blocking by default; fcntl(F_SETFL, O_NONBLOCK) opts in */
             p->fds[fd] = f;
             return fd;
         }
@@ -111,6 +112,7 @@ static void open_standard_streams(process_t *p)
         f->refcount = 1;
         f->role = FD_NORMAL;
         f->access = VFS_R | VFS_W;       /* console is readable + writable */
+        f->flags = 0;
         p->fds[fd] = f;
     }
 }
@@ -276,8 +278,10 @@ int sys_open(const char *path, int flags)
         node->size = 0;     /* logical truncate; the next write persists it */
 
     int fd = fd_install(process_current(), node);
-    if (fd >= 0)
+    if (fd >= 0) {
         process_current()->fds[fd]->access = want;  /* enforce the open mode */
+        process_current()->fds[fd]->flags = flags & O_NONBLOCK;
+    }
     return fd;
 }
 
@@ -333,7 +337,7 @@ int sys_read(int fd, void *buf, uint32_t len)
         kprintf("[syscall] sys_read: invalid user buffer 0x%x (len=%u)\n", (uint32_t)buf, len);
         return -1;
     }
-    int n = vfs_read(f->node, f->offset, len, (uint8_t *)buf);
+    int n = vfs_read(f->node, f->offset, len, (uint8_t *)buf, f->flags);
     if (n > 0)
         f->offset += (uint32_t)n;
     return n;
@@ -353,7 +357,7 @@ int sys_write(int fd, const void *buf, uint32_t len)
         kprintf("[syscall] sys_write: invalid user buffer 0x%x (len=%u)\n", (uint32_t)buf, len);
         return -1;
     }
-    int n = vfs_write(f->node, f->offset, len, (const uint8_t *)buf);
+    int n = vfs_write(f->node, f->offset, len, (const uint8_t *)buf, f->flags);
     if (n > 0)
         f->offset += (uint32_t)n;
     return n;
@@ -367,6 +371,25 @@ int sys_close(int fd)
     file_unref(p->fds[fd]);
     p->fds[fd] = NULL;
     return 0;
+}
+
+/* Phase 18.2: only O_NONBLOCK is a settable status flag today (no O_APPEND,
+ * no signal-driven I/O) -- F_SETFL only ever touches that one bit. */
+int sys_fcntl(int fd, int cmd, int arg)
+{
+    process_t *p = process_current();
+    if (fd < 0 || fd >= MAX_FDS || !p->fds[fd])
+        return -1;
+    file_t *f = p->fds[fd];
+    switch (cmd) {
+    case F_GETFL:
+        return f->flags;
+    case F_SETFL:
+        f->flags = (f->flags & ~O_NONBLOCK) | (arg & O_NONBLOCK);
+        return 0;
+    default:
+        return -1;
+    }
 }
 
 int sys_pipe(int fds[2])
@@ -1011,7 +1034,7 @@ void do_exec(const char *path, char **argv, registers_t *regs)
         regs->eax = (uint32_t)-1;
         return;
     }
-    vfs_read(f, 0, f->size, buf);
+    vfs_read(f, 0, f->size, buf, 0);
 
     uint32_t new_pd, entry, esp;
     if (load_image(buf, f->size, argc, kargs, &new_pd, &entry, &esp) != 0) {

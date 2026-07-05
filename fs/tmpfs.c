@@ -41,8 +41,9 @@ static tnode_t *new_node(const char *name, uint32_t flags)
     return t;
 }
 
-static int tmpfs_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf)
+static int tmpfs_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf, int flags)
 {
+    (void)flags;    /* regular files never block */
     tnode_t *t = (tnode_t *)node;
     if (off >= node->size)
         return 0;
@@ -52,8 +53,9 @@ static int tmpfs_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *bu
     return (int)size;
 }
 
-static int tmpfs_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf)
+static int tmpfs_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf, int flags)
 {
+    (void)flags;    /* regular files never block */
     tnode_t *t = (tnode_t *)node;
     uint32_t need = off + size;
 

@@ -3,6 +3,7 @@
 #include "serial.h"
 #include "kio.h"
 #include "scheduler.h"
+#include "syscall_abi.h"   /* O_NONBLOCK, EAGAIN */
 
 /* Phase 18.1.4: the first migration off a hand-rolled single-waiter field
  * onto the shared kernel wait_queue_t (kernel/scheduler.h) -- proof that the
@@ -20,14 +21,15 @@ void console_notify(void)
 }
 
 /* Blocks until a byte arrives from either the keyboard or the serial command
- * channel (Phase 18.0), whichever is first. Both sources are checked in one
- * interrupts-off window so a byte that arrives between the check and
- * wait_enqueue() can't be missed (lost wakeup): keyboard_trygetchar() and
- * serial_trygetchar() assume the caller already holds interrupts off. Serial
- * bytes are echoed here (the keyboard driver already echoes its own locally)
- * so a byte typed over serial is visible in the same log a QEMU test reads
- * back from that same serial port. */
-static int console_getchar(void)
+ * channel (Phase 18.0), whichever is first -- unless `nonblock`, in which
+ * case it returns -EAGAIN instead of waiting (Phase 18.2). Both sources are
+ * checked in one interrupts-off window so a byte that arrives between the
+ * check and wait_enqueue() can't be missed (lost wakeup): keyboard_trygetchar()
+ * and serial_trygetchar() assume the caller already holds interrupts off.
+ * Serial bytes are echoed here (the keyboard driver already echoes its own
+ * locally) so a byte typed over serial is visible in the same log a QEMU
+ * test reads back from that same serial port. */
+static int console_getchar(int nonblock)
 {
     for (;;) {
         __asm__ volatile("cli");
@@ -43,17 +45,24 @@ static int console_getchar(void)
                 kputchar((char)c);
             return c;
         }
+        if (nonblock) {
+            __asm__ volatile("sti");
+            return -EAGAIN;
+        }
         wait_enqueue(&console_wq);   /* yields with interrupts off; resumes on input */
     }
 }
 
-static int console_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf)
+static int console_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf, int flags)
 {
     (void)node;
     (void)off;
+    int nonblock = (flags & O_NONBLOCK) != 0;
     uint32_t n = 0;
     while (n < size) {
-        int c = console_getchar();
+        int c = console_getchar(nonblock);
+        if (c == -EAGAIN)
+            return n ? (int)n : -EAGAIN;   /* a partial read is a success, not EAGAIN */
         buf[n++] = (uint8_t)c;
         if (c == '\n')
             break;
@@ -61,10 +70,11 @@ static int console_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *
     return (int)n;
 }
 
-static int console_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf)
+static int console_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf, int flags)
 {
     (void)node;
     (void)off;
+    (void)flags;    /* writing to the console never blocks */
     for (uint32_t i = 0; i < size; i++)
         kputchar((char)buf[i]);
     return (int)size;

@@ -185,8 +185,9 @@ static vfs_node_t *make_node(const char *name, uint32_t flags, uint32_t cluster,
 }
 
 /* Parse a directory's entries, invoking found() per regular entry. */
-static int fat_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf)
+static int fat_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *buf, int flags)
 {
+    (void)flags;    /* regular files never block */
     if (off >= node->size)
         return 0;
     if (size > node->size - off)            /* clamp without off+size overflow */
@@ -307,8 +308,9 @@ static void fat_update_dirent(vfs_node_t *node)
 
 /* Write `size` bytes at `off`, extending the cluster chain (and the file's
  * recorded size) as needed. Partial clusters are read-modified-written. */
-static int fat_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf)
+static int fat_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *buf, int flags)
 {
+    (void)flags;    /* regular files never block */
     if (node->flags & VFS_DIR)
         return -1;
     if (size == 0)

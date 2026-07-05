@@ -52,6 +52,10 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)sys_write((int)regs->ebx, (const void *)regs->ecx, regs->edx);
         break;
 
+    case SYS_FCNTL:
+        regs->eax = (uint32_t)sys_fcntl((int)regs->ebx, (int)regs->ecx, (int)regs->edx);
+        break;
+
     case SYS_CLOSE:
         regs->eax = (uint32_t)sys_close((int)regs->ebx);
         break;

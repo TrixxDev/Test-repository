@@ -7,13 +7,14 @@
 #include "kheap.h"
 #include "string.h"
 #include "scheduler.h"
+#include "syscall_abi.h"   /* O_NONBLOCK, EAGAIN */
 
 #define TCPSOCK_MSS 1400
 
 struct tcpsock { int h; };      /* TCP connection handle, -1 until connected */
 
-static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out);
-static int tsk_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *in);
+static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out, int flags);
+static int tsk_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *in, int flags);
 
 static vfs_ops_t tcpsock_ops = { .read = tsk_read, .write = tsk_write };
 
@@ -130,13 +131,18 @@ void tcpsock_close(vfs_node_t *node)
  * run queue entirely instead of burning its whole time slice every round --
  * tcp_input() also wakes it early (a latency win, not a correctness
  * requirement) whenever a DIFFERENT thread's net_poll() happens to deliver
- * data for this connection first. */
-static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out)
+ * data for this connection first.
+ *
+ * Phase 18.2: O_NONBLOCK returns -EAGAIN on the very first pass instead of
+ * ever entering the wait loop, once the EOF checks have ruled out "actually
+ * done." */
+static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out, int flags)
 {
     (void)off;
     struct tcpsock *t = (struct tcpsock *)node->priv;
     if (!t || t->h < 0)
         return -1;
+    int nonblock = (flags & O_NONBLOCK) != 0;
     wait_queue_t *wq = tcp_conn_waitq(t->h);
     __asm__ volatile("sti");
     uint64_t dl = net_now_ms() + 60000;
@@ -149,6 +155,8 @@ static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out)
         if (st == TCP_CLOSE_WAIT || st == TCP_LAST_ACK || st == TCP_CLOSING ||
             st == TCP_TIME_WAIT || st == TCP_CLOSED)
             return 0;                           /* peer closed and drained -> EOF */
+        if (nonblock)
+            return -EAGAIN;
         if (net_now_ms() >= dl)
             return 0;                           /* idle timeout -> EOF */
         __asm__ volatile("cli");
@@ -159,13 +167,24 @@ static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out)
 }
 
 /* send: transmit in MSS-sized segments, stop-and-wait (one outstanding segment
- * under the single-segment retransmit cache). */
-static int tsk_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *in)
+ * under the single-segment retransmit cache). tcp_send() itself never blocks
+ * (it just queues the segment), so the only wait is BETWEEN chunks of a
+ * write() bigger than one MSS -- chunk 2 can't go out until chunk 1's ACK
+ * frees the single retransmit slot.
+ *
+ * Phase 18.2: O_NONBLOCK stops after whatever already went out instead of
+ * waiting for that ACK, returning a partial write rather than -EAGAIN --
+ * the first chunk of any write() always sends immediately regardless of
+ * blocking mode, so this path can never legitimately send zero bytes and
+ * still call it "would block." */
+static int tsk_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_t *in, int flags)
 {
     (void)off;
     struct tcpsock *t = (struct tcpsock *)node->priv;
     if (!t || t->h < 0 || tcp_state(t->h) != TCP_ESTABLISHED)
         return -1;
+    int nonblock = (flags & O_NONBLOCK) != 0;
+    wait_queue_t *wq = tcp_conn_waitq(t->h);
     __asm__ volatile("sti");
     unsigned sent = 0;
     while (sent < size) {
@@ -175,9 +194,18 @@ static int tsk_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_
         if (r <= 0)
             break;
         sent += (unsigned)r;
+        if (sent == size || nonblock)
+            break;
         uint64_t dl = net_now_ms() + 4000;      /* wait for the ACK before the next */
-        while (net_now_ms() < dl && !tcp_tx_idle(t->h))
+        while (net_now_ms() < dl && !tcp_tx_idle(t->h)) {
             net_poll();
+            if (tcp_tx_idle(t->h))
+                break;
+            __asm__ volatile("cli");
+            if (wq)
+                wait_event_timeout(wq, 20);
+            __asm__ volatile("sti");
+        }
     }
     return sent ? (int)sent : -1;
 }

@@ -32,6 +32,10 @@ typedef struct file {
     int         refcount;
     int         role;       /* FD_NORMAL / FD_PIPE_R / FD_PIPE_W */
     int         access;     /* VFS_R / VFS_W bits this fd was opened with */
+    int         flags;      /* Phase 18.2: status flags (currently just
+                              * O_NONBLOCK); shared across dup()'d fds since
+                              * they share this same file_t, matching POSIX's
+                              * "open file description" semantics. */
 } file_t;
 
 typedef struct process {
@@ -76,6 +80,7 @@ int  sys_open(const char *path, int flags);
 int  sys_read(int fd, void *buf, uint32_t len);
 int  sys_write(int fd, const void *buf, uint32_t len);
 int  sys_close(int fd);
+int  sys_fcntl(int fd, int cmd, int arg);
 int  sys_readdir(const char *path, int index, struct dirent *out);
 int  sys_sysinfo(struct sysinfo *out);
 int  sys_netstat(struct net_stats *out);
