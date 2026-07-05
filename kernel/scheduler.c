@@ -23,18 +23,14 @@ struct thread {
     uint32_t user_stack;
     struct thread *next;
     struct thread *prev;
-    struct thread *wq_next; /* Phase 18.1: next waiter in the wait_queue_t it's
-                              * blocked on, or NULL. A thread is on at most one
-                              * wait queue at a time -- a separate link from
-                              * next/prev, which is the scheduler's own ring
-                              * and never changes membership when a thread
-                              * blocks. */
-    wait_queue_t *wq_owner; /* which wait_queue_t wq_next belongs to, or NULL.
-                              * Lets thread_free() self-remove a thread that's
-                              * killed while still parked on a queue -- without
-                              * this, freeing it would leave that queue's chain
-                              * holding a dangling pointer, a use-after-free
-                              * the next time something wakes the queue. */
+    wait_node_t wnode;      /* Phase 18.1/18.3: this thread's own membership
+                              * node for the single-queue wait calls
+                              * (wait_enqueue/wait_event_timeout) -- a separate
+                              * link from next/prev, which is the scheduler's
+                              * own ring and never changes membership when a
+                              * thread blocks. Phase 18.3's multi-queue waits
+                              * use their own, separately-allocated nodes
+                              * instead of this one. */
 };
 
 extern void switch_task(uint32_t *old_esp_out, uint32_t new_esp);
@@ -55,6 +51,7 @@ static struct { thread_t *t; uint32_t wake; int used; } sleepers[MAX_SLEEPERS];
 
 static void scheduler_tick(void);   /* PIT hook: wake due sleepers, then schedule */
 static void sleepers_cancel(thread_t *t);   /* cancel t's pending sleepers[] deadline, if any */
+static int  sleepers_arm(thread_t *t, uint32_t nticks);   /* arm t's sleepers[] deadline */
 
 /* First thing a freshly created user thread runs (in ring 0). */
 static void user_thread_start(void)
@@ -72,6 +69,7 @@ void scheduler_init(void)
     main_thread.proc       = NULL;
     main_thread.next       = &main_thread;
     main_thread.prev       = &main_thread;
+    main_thread.wnode.thread = &main_thread;
     current = &main_thread;
     nthreads = 1;
     pit_set_tick_hook(scheduler_tick);
@@ -119,8 +117,10 @@ static thread_t *alloc_thread(uint32_t pd_phys, uint32_t start_eip)
     t->state      = TS_READY;
     t->proc       = NULL;
     t->start_arg  = NULL;
-    t->wq_next    = NULL;
-    t->wq_owner   = NULL;
+    t->wnode.thread = t;
+    t->wnode.wq   = NULL;
+    t->wnode.next = t->wnode.prev = NULL;
+    t->wnode.fired = 0;
     t->esp        = build_stack(t->kstack, start_eip);
     return t;
 }
@@ -210,74 +210,80 @@ void thread_wake(thread_t *t)
         t->state = TS_READY;
 }
 
-/* ---- Phase 18.1: wait queues -- the one shared blocking primitive ---- */
+/* ---- Phase 18.1/18.3: wait queues -- the one shared blocking primitive ---- */
 
 void wait_queue_init(wait_queue_t *wq)
 {
     wq->head = wq->tail = NULL;
 }
 
-/* Unlinks `t` from `wq` if it's on it. O(n) in the queue's own length, which
- * in practice is tiny (a handful of threads at most) -- simplicity over a
- * doubly-linked list nobody needs yet. */
-static void wait_queue_remove(wait_queue_t *wq, thread_t *t)
+void wait_node_add(wait_node_t *node, wait_queue_t *wq)
 {
-    thread_t **p = &wq->head;
-    thread_t *prev = NULL;
-    while (*p) {
-        if (*p == t) {
-            *p = t->wq_next;
-            if (t == wq->tail)
-                wq->tail = prev;
-            t->wq_next = NULL;
-            t->wq_owner = NULL;
-            return;
-        }
-        prev = *p;
-        p = &(*p)->wq_next;
-    }
+    node->thread = current;
+    node->wq = wq;
+    node->fired = 0;
+    node->next = NULL;
+    node->prev = wq->tail;
+    if (wq->tail)
+        wq->tail->next = node;
+    else
+        wq->head = node;
+    wq->tail = node;
+}
+
+void wait_node_remove(wait_node_t *node)
+{
+    wait_queue_t *wq = node->wq;
+    if (!wq)
+        return;                     /* already removed (idempotent) */
+    if (node->prev) node->prev->next = node->next; else wq->head = node->next;
+    if (node->next) node->next->prev = node->prev; else wq->tail = node->prev;
+    node->next = node->prev = NULL;
+    node->wq = NULL;
 }
 
 void wait_enqueue(wait_queue_t *wq)
 {
     /* Caller holds interrupts off (same lost-wakeup contract as thread_block()). */
-    current->wq_next = NULL;
-    current->wq_owner = wq;
-    if (wq->tail)
-        wq->tail->wq_next = current;
-    else
-        wq->head = current;
-    wq->tail = current;
+    wait_node_add(&current->wnode, wq);
     current->state = TS_BLOCKED;
     schedule();
 }
 
 void wait_wake_one(wait_queue_t *wq)
 {
-    thread_t *t = wq->head;
-    if (!t)
+    wait_node_t *n = wq->head;
+    if (!n)
         return;
-    wq->head = t->wq_next;
-    if (!wq->head)
-        wq->tail = NULL;
-    t->wq_next = NULL;
-    t->wq_owner = NULL;
-    sleepers_cancel(t);       /* a wait_event_timeout() waiter's backstop, if any */
-    thread_wake(t);
+    wait_node_remove(n);
+    n->fired = 1;
+    sleepers_cancel(n->thread);   /* a wait_event_timeout() waiter's backstop, if any */
+    thread_wake(n->thread);
 }
 
 void wait_wake_all(wait_queue_t *wq)
 {
-    thread_t *t = wq->head;
-    while (t) {
-        thread_t *next = t->wq_next;
-        t->wq_next = NULL;
-        t->wq_owner = NULL;
-        sleepers_cancel(t);
-        thread_wake(t);
-        t = next;
+    wait_node_t *n = wq->head;
+    while (n) {
+        wait_node_t *next = n->next;
+        wait_node_remove(n);
+        n->fired = 1;
+        sleepers_cancel(n->thread);
+        thread_wake(n->thread);
+        n = next;
     }
-    wq->head = wq->tail = NULL;
+}
+
+void wait_block_timeout(uint32_t timeout_ms)
+{
+    /* Caller holds interrupts off. A table-full sleepers_arm() just means
+     * "no timer backstop this time" -- the caller's own fd-readiness re-scan
+     * loop (Phase 18.3's sys_wait_events()) still bounds the overall wait,
+     * unlike wait_event_timeout() which promises a specific timeout. */
+    if (timeout_ms)
+        sleepers_arm(current, timeout_ms / 10);
+    current->state = TS_BLOCKED;
+    schedule();
 }
 
 /* PIT tick hook (IRQ0, interrupts off): wake any sleeper whose deadline has
@@ -346,25 +352,16 @@ int wait_event_timeout(wait_queue_t *wq, uint32_t timeout_ms)
     if (sleepers_arm(current, timeout_ms / 10) < 0)
         return 0;               /* timer table full -- don't risk an unbounded wait */
 
-    current->wq_next = NULL;
-    current->wq_owner = wq;
-    if (wq->tail)
-        wq->tail->wq_next = current;
-    else
-        wq->head = current;
-    wq->tail = current;
+    wait_node_add(&current->wnode, wq);
     current->state = TS_BLOCKED;
     schedule();
 
-    /* Resumed. wait_wake_one()/wait_wake_all() unlink from wq AND cancel the
-     * sleepers[] slot before waking; the PIT tick hook's deadline does
-     * neither -- it only clears the slot. So still being on wq means the
-     * timeout fired first, not a real wake. */
-    int still_queued = 0;
-    for (thread_t *t = wq->head; t; t = t->wq_next)
-        if (t == current) { still_queued = 1; break; }
-    if (still_queued) {
-        wait_queue_remove(wq, current);
+    /* Resumed. wait_wake_one()/wait_wake_all() already remove+fire the node
+     * (and cancel our sleepers[] slot) if THEY are what woke us; the PIT
+     * tick hook's deadline does neither -- it only clears the slot. So
+     * still being linked into wq means the timeout fired first. */
+    if (current->wnode.wq == wq) {
+        wait_node_remove(&current->wnode);
         return 0;
     }
     return 1;
@@ -397,8 +394,7 @@ void thread_free(thread_t *t)
      * a wait queue (e.g. blocked in a socket read). Without this, that
      * queue's chain would keep a dangling pointer to freed memory, a
      * use-after-free the next time something wakes it. */
-    if (t->wq_owner)
-        wait_queue_remove(t->wq_owner, t);
+    wait_node_remove(&t->wnode);
     sleepers_cancel(t);
     t->prev->next = t->next;
     t->next->prev = t->prev;
