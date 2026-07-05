@@ -3809,3 +3809,92 @@ tracked as a standalone "Throughput under QEMU/slirp" investigation and
 does not block further Aurora development. 18.5 is closed on that basis:
 its goal was a profile and a localization, not a throughput fix, and
 both are now as complete as they can be from inside the guest.
+
+## Step 18.5.6 — kernel stack guard pages
+
+A new initiative, not a continuation of 18.5's TCP investigation: with the
+network/HTTP arc mature, the next highest-value work shifts to platform
+quality rather than another protocol -- starting with a defect class this
+project had already hit once for real. 17.5.2/18.5.2 uncovered a genuine
+kernel stack overflow in `fs/fat32.c` (`fat_write_impl()` calling
+`fat_update_dirent()` with both functions' own 4 KB `cbuf` locals live on
+the stack simultaneously, exactly filling `STACK_SIZE`), fixed at the time
+by making the buffers `static` -- a point fix for one call path, with the
+commit itself noting *"there is no guard page below a kernel stack here, so
+the overflow didn't fault immediately -- it silently overwrote whatever
+kmalloc'd memory happened to sit next to it"*. This phase closes that gap
+generally, for every thread, not just that one call path.
+
+**The allocator.** `kernel/scheduler.c`'s `alloc_thread()` (shared by
+`thread_create_kernel()`, `thread_create_user()`, and
+`thread_create_trampoline()` -- every thread this kernel ever creates)
+used to get its `STACK_SIZE` (8 KiB) stack from a plain `kmalloc()`, an
+ordinary heap object with no guarantee of page alignment, sitting
+back-to-back with other heap allocations. It now gets a dedicated 3-page
+slot from a small new virtual arena (`KSTACK_AREA_BASE = 0xF0000000`,
+64 slots, `kstack_slot_alloc()`/`_free()` tracking which are in use): one
+page mapped via `vmm_map_page()`/`pmm_alloc_frame()`, left **unmapped** as
+a guard, directly below the `STACK_SIZE`/`PAGE_SIZE` (= 2) pages that are
+the actual stack. `thread_free()` unmaps and returns those frames and the
+slot on thread exit. The boot thread (`main_thread`/`main_kstack[4096]`,
+a singleton static array predating `alloc_thread()`) is a known,
+documented exception -- not guarded, matching its pre-existing
+not-page-aligned, half-size special case.
+
+Found the hard way, not designed for up front: the very first `exec` after
+boot silently hung forever once this landed. `vmm_create_address_space()`
+clones the shared high-memory PDEs *by value*, read through the recursive
+self-map of whichever page directory happens to be active at that moment
+-- not copied from one fixed canonical "the kernel's" directory. A page
+table that doesn't exist yet in the currently active directory when a new
+process is created never propagates to it. `lib/kheap.c`'s `kheap_init()`
+already pre-creates its own region's page tables via `vmm_ensure_table()`
+specifically to sidestep this, with a comment saying exactly why; the new
+kstack arena needed the identical treatment (one `vmm_ensure_table()` call
+in `scheduler_init()`, before any thread — and so any process — exists),
+added once the hang made the dependency obvious.
+
+**The double-fault problem.** A guard page only matters if hitting it
+produces a usable diagnostic instead of silent wreckage further down the
+line. The naive version doesn't: a same-privilege (ring0->ring0) page
+fault delivers its exception frame onto the *current* stack, unchanged --
+if that stack is itself the thing that's unmapped, the CPU's own delivery
+attempt re-faults at the *exact same address* the original instruction
+just failed to write (a faulting `push` doesn't move ESP, so the exception
+frame's first push targets that identical slot), escalating page-fault
+during page-fault to a double fault, which re-faults the same way trying
+to deliver *itself*, guaranteeing a triple fault -- a bare VM reset with
+no OS-level message at all. Confirmed directly, not assumed: a first cut
+of `SYS_DEBUG_KSTACK_OVERFLOW`'s test (`kstacktest.elf`, a tight recursion
+eating 512+ bytes per frame) reliably triple-faulted with zero output;
+QEMU's own `-d int,cpu_reset` trace showed the exact PF -> PF(as #DF) ->
+#DF(as triple fault) cascade, CR2 identical across all three. Fixed with
+the standard i386 protected-mode technique for exactly this problem:
+vector 8 (#DF) is now a **task gate** (`arch/i386/gdt.c`'s `df_tss`, its
+own small dedicated stack, CR3 patched in once `paging_init()` has run --
+`gdt_install()` itself runs too early for CR3 to be meaningful), not an
+ordinary interrupt gate. A hardware task switch loads an entirely fresh
+register set (including ESP/SS) *before* executing a single instruction of
+the handler, so double-fault delivery needs no stack space from the
+broken context at all. `arch/i386/isr.c`'s `df_handler_entry()` reads the
+outgoing task's last `eip`/`esp` from the main TSS (the CPU saves them
+there as part of the switch, since this kernel has never done a hardware
+task switch before and TR still references it) and prints a specific
+"DOUBLE FAULT -- almost certainly a kernel stack overflow" message before
+halting. Vector 14's own handler is unchanged and still handles the
+(less severe, less common) case directly: reading CR2 and printing
+"KERNEL STACK OVERFLOW" for a guard-page hit that doesn't happen to land
+exactly on ESP itself.
+
+**Verification.** `tools/guard_page_qemu.py` is a permanent QEMU
+acceptance test, not a one-off: types `kstktest`, accepts either
+diagnostic as a pass (which one fires is a property of exactly how the
+overflow lands, not a choice), and fails on a hang, a silent return, or
+the generic exception fallthrough. Re-verified the actual original bug
+scenario directly: `save /disk/TEST.TXT <text>` followed by process exit
+(the exact `fat_write_impl`/`fat_update_dirent` shape that started this)
+completes cleanly. Full clean rebuild plus a regression sweep (every host
+test: crypto/tls/x509/url/crc32/inflate/gzip/h2; `tools/prof_qemu.py`;
+`tools/dns_cache_qemu.py`; `tools/tls_resume_qemu.py`) all still pass --
+this touches every thread this kernel creates, so breadth mattered more
+than depth here.

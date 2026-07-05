@@ -205,6 +205,50 @@ kernel's execution model, not another protocol.
   Aurora's place; if it's similarly slow, the environment is the answer and
   this closes for good, otherwise a real stack difference exists worth chasing.
 
+## Phase 19 — Platform Hardening & Desktop Maturity (opened after 18.5 closed the network arc)
+
+With process/VM/IPC/VFS, a GUI + window server, TCP/IP, TLS 1.3, and HTTP/1.1
+plus HTTP/2 all working, the highest-value work is no longer "another
+protocol" -- it's raising the quality of the whole platform. Priority order
+(highest first), each independently valuable and not blocking the others:
+
+- [x] **19.1 — Guard pages.** Every kernel stack gets its own page-mapped
+  slot with an unmapped guard page below it, plus a task-gate double-fault
+  handler so an overflow that lands exactly on ESP still gets a diagnostic
+  instead of a silent triple-fault reset. See docs/SECURITY.md "Step 18.5.6".
+  Directly motivated by a real bug this project already hit once
+  (`fs/fat32.c`'s `fat_write_impl`/`fat_update_dirent` double-buffer
+  overflow, fixed at the time with no protection added).
+- [ ] **19.2 — Stack canaries.** `-fstack-protector` (currently
+  `-fno-stack-protector` in both `CFLAGS` and user `UCFLAGS`) plus a
+  `__stack_chk_fail` handler; smaller and lower-risk than 19.1, catches
+  overflows that corrupt a return address without ever touching a guard
+  page (a local buffer overflowing into other locals/saved registers on
+  the SAME stack, not off the end of it).
+- [ ] **19.3 — Shared-memory surfaces + Clipboard.** The single biggest
+  desktop-experience win available: replace the window server's per-frame
+  IPC-then-copy-into-VRAM path with an app-owned shared framebuffer +
+  damage-rect handoff (less `memcpy`, smoother GUI, and the prerequisite
+  for anything video/media-shaped later). Clipboard
+  (`WM_CLIPBOARD_SET`/`GET`, one bounded string, last-writer-wins) is
+  small enough to land alongside it and closes a real gap (copy/paste
+  across apps doesn't exist yet).
+- [ ] **19.4 — SDK / ABI freeze.** Declare "Aurora SDK v1" (libc, libgui,
+  libsock, libtls) and guarantee compatibility, so applications can start
+  living independently of kernel churn.
+- [ ] **19.5 — Developer tools.** `perf top`/`record`/`stat` (the counters
+  already exist, from 18.5.2/18.5.3/this phase); a minimal debugger
+  (`ps`/`attach`/`bt`/`regs`/`memory`); `trace` (`open`/`tcp`/`sched`, ...).
+- [ ] **19.6 — FS maturity.** Long file names; `mmap()`; a page cache (once
+  in, `cat`/the browser/the editor all get faster for free).
+- [ ] **19.7 — Network infrastructure** (only after the above, and no more
+  new protocols first): DNS cache eviction/TTL polish, TCP fast
+  retransmit, `sendfile()`, zero-copy.
+
+Deliberately NOT next (per the same discussion): more application-layer
+protocols (already have HTTP/1.1 + HTTP/2 + TLS 1.3), SMP (large, not
+urgent), a mini-browser (fun, but wants 19.3/19.4 underneath it first).
+
 ## Phase 10 — Desktop apps & Aurora Assistant
 
 - [ ] system apps (terminal, settings) on top of the window server.
@@ -234,25 +278,11 @@ kernel's execution model, not another protocol.
 
 ## Suggested immediate next action
 
-**v1.1.0 (window controls), v1.1.1 (Aurora system menu) and v1.1.2 (Settings) are
-done.** The desktop environment is nearly complete: windows (close/focus/drag/
-minimize/maximize), Dock, Finder, Viewer, Terminal, system menu, and a Settings
-app that themes the desktop (wallpaper + accent in `/disk/settings.cfg`, applied
-live and persisted) with a System info pane.
-
-**Finish v1.1 — Clipboard (10.4, v1.1.3):** `WM_CLIPBOARD_SET` / `WM_CLIPBOARD_GET`
-— the window server holds one (bounded) string; an app copies the current
-selection/line and another pastes it. Wire Terminal "copy line" and Viewer/
-Terminal "paste". This is the first real cross-process data sharing through the
-WM and rounds out the desktop. Design points: a fixed max length, last-writer-wins
-ownership, plain text only.
-
-After v1.1.3 the desktop environment is complete; **v2.0** opens the
-infrastructure track again — client-side **shared-memory surfaces**, then
-**networking** (8B: virtio-net → ARP → IPv4 → UDP → TCP → DNS), then the
-**Aurora Assistant** (`aurorad`).
-
-Deliberately deferred (per the agreed priority): client-side **shared-memory
-surfaces** (architectural rework, low payoff now) and **networking** (8B:
-virtio-net → TCP — large error surface). Finish the desktop experience first;
-networking and the Aurora Assistant come in v2.0.
+Superseded by Phase 19 above (the desktop track's remaining items --
+Clipboard, shared-memory surfaces -- are now 19.3, sequenced after the
+kernel-hardening work that directly follows a bug this project already
+hit): networking (8B) and HTTP/1.1+HTTP/2+TLS 1.3 are long since DONE, far
+past what this section used to describe, and 19.1 (guard pages) just
+landed. **Next: 19.2 — stack canaries** (small, low-risk, a natural pair
+with 19.1), then 19.3 (shared-memory surfaces + Clipboard) as the next
+big user-visible push.
