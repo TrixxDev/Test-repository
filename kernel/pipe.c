@@ -74,6 +74,32 @@ static int pipe_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8
 static vfs_ops_t pipe_read_ops  = { .read = pipe_read };
 static vfs_ops_t pipe_write_ops = { .write = pipe_write };
 
+/* Phase 18.3: readiness for wait_events()/poll(). Call with interrupts
+ * disabled. */
+int pipe_poll(vfs_node_t *node, int events)
+{
+    pipe_t *p = (pipe_t *)node->priv;
+    int re = 0;
+    if (node->ops == &pipe_write_ops) {
+        if ((events & POLLOUT) && (p->count < PIPE_BUF || p->readers == 0))
+            re |= POLLOUT;
+        if (p->readers == 0)
+            re |= POLLERR;
+    } else {
+        if ((events & POLLIN) && (p->count > 0 || p->writers == 0))
+            re |= POLLIN;
+    }
+    return re;
+}
+
+/* The wait queue this end of the pipe blocks on -- the read end's rwq or the
+ * write end's wwq, shared with wait_events() pollers the same way. */
+wait_queue_t *pipe_waitq(vfs_node_t *node)
+{
+    pipe_t *p = (pipe_t *)node->priv;
+    return (node->ops == &pipe_write_ops) ? &p->wwq : &p->rwq;
+}
+
 int pipe_create(vfs_node_t **rnode, vfs_node_t **wnode)
 {
     pipe_t *p = (pipe_t *)kmalloc(sizeof(pipe_t));

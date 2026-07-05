@@ -112,6 +112,10 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)sys_poll((struct pollfd *)regs->ebx, (int)regs->ecx, (int)regs->edx);
         break;
 
+    case SYS_WAIT_EVENTS:
+        regs->eax = (uint32_t)sys_wait_events((struct pollfd *)regs->ebx, (int)regs->ecx, (int)regs->edx);
+        break;
+
     case SYS_GETUID:
         regs->eax = (uint32_t)sys_getuid();
         break;

@@ -150,7 +150,15 @@ struct dirent {
 #define F_GETFL    1    /* -> this fd's current flags word           */
 #define F_SETFL    2    /* set flags (arg3 & O_NONBLOCK) -> 0        */
 
-#define SYS_MAX    46   /* one past the last valid syscall number    */
+#define SYS_WAIT_EVENTS 46  /* wait_events(pollfd*, nfds, timeout_ms) -> nready / -1 */
+                        /* Phase 18.3: like poll() (SYS_POLL, below) but covers    */
+                        /* every fd role -- console, pipe, loopback socket, TCP    */
+                        /* socket -- not just loopback sockets, and honors         */
+                        /* timeout_ms as a real bound: negative waits forever, 0   */
+                        /* never blocks, >0 is milliseconds. A separate syscall    */
+                        /* from SYS_POLL so no existing caller's behavior changes. */
+
+#define SYS_MAX    47   /* one past the last valid syscall number    */
 
 /* ---- socket layer ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */

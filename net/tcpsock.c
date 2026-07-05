@@ -209,3 +209,30 @@ static int tsk_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_
     }
     return sent ? (int)sent : -1;
 }
+
+/* Phase 18.3: readiness for wait_events()/poll(). Call with interrupts
+ * disabled (matches kernel/socket.c's sock_poll() convention). */
+int tcpsock_poll(vfs_node_t *node, int events)
+{
+    struct tcpsock *t = (struct tcpsock *)node->priv;
+    int h = t ? t->h : -1;
+    int st = tcp_state(h);          /* TCP_CLOSED for an invalid handle */
+    int eof_state = (st == TCP_CLOSE_WAIT || st == TCP_LAST_ACK || st == TCP_CLOSING ||
+                     st == TCP_TIME_WAIT || st == TCP_CLOSED);
+    int re = 0;
+    if ((events & POLLIN) && (tcp_rx_avail(h) > 0 || eof_state))
+        re |= POLLIN;
+    if ((events & POLLOUT) && st == TCP_ESTABLISHED && tcp_tx_idle(h))
+        re |= POLLOUT;
+    if (eof_state)
+        re |= POLLERR;
+    return re;
+}
+
+/* Phase 18.3: the wait queue this socket blocks on -- one queue for both
+ * directions (see tcp_conn_waitq()'s doc comment). NULL if unconnected. */
+wait_queue_t *tcpsock_waitq(vfs_node_t *node)
+{
+    struct tcpsock *t = (struct tcpsock *)node->priv;
+    return (t && t->h >= 0) ? tcp_conn_waitq(t->h) : NULL;
+}

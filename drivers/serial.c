@@ -66,6 +66,14 @@ int serial_trygetchar(void)
     return (unsigned char)c;
 }
 
+/* Phase 18.3: non-destructive -- unlike serial_trygetchar(), doesn't consume
+ * a byte. Used by console_poll() to answer "readable?" without eating the
+ * byte a subsequent real read() would need. Same interrupts-off contract. */
+int serial_has_data(void)
+{
+    return shead != stail;
+}
+
 void serial_install(void)
 {
     register_interrupt_handler(36, on_serial);   /* IRQ4 -> vector 36 */

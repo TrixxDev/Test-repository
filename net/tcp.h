@@ -72,6 +72,10 @@ int         tcp_recv(int h, void *buf, size_t cap);
 /* Total payload bytes received on connection `h` so far. */
 int         tcp_rx_total(int h);
 
+/* Phase 18.3: bytes currently buffered and unread (non-destructive, unlike
+ * tcp_recv()) -- for a readiness check, not for draining. */
+int         tcp_rx_avail(int h);
+
 /* Phase 18.1.5: the wait queue tcp_input() wakes whenever a segment changes
  * anything a blocked reader might care about (new data, FIN, RST, a state
  * change) -- NULL for an invalid handle. */

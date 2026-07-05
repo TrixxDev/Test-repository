@@ -265,6 +265,15 @@ int tcp_rx_total(int h)
     return c ? (int)c->rx_total : 0;
 }
 
+/* Phase 18.3: bytes currently sitting in the RX ring, unread -- unlike
+ * tcp_recv(), this doesn't consume anything, so it's safe for a mere
+ * readiness check (tcpsock_poll()). */
+int tcp_rx_avail(int h)
+{
+    struct conn *c = conn_of(h);
+    return c ? (int)rxring_used(&c->rx) : 0;
+}
+
 wait_queue_t *tcp_conn_waitq(int h)
 {
     struct conn *c = conn_of(h);

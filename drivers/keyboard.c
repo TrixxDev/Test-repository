@@ -132,3 +132,12 @@ int keyboard_trygetchar(void)
     khead = (khead + 1) % KBUF_SIZE;
     return (unsigned char)c;
 }
+
+/* Phase 18.3: non-destructive -- unlike keyboard_trygetchar(), doesn't
+ * consume a key. Used by console_poll() to answer "readable?" without
+ * eating the byte a subsequent real read() would need. Same interrupts-off
+ * contract. */
+int keyboard_has_data(void)
+{
+    return khead != ktail;
+}

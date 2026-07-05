@@ -20,6 +20,19 @@ void console_notify(void)
     wait_wake_one(&console_wq);
 }
 
+int console_poll(int events)
+{
+    int re = events & POLLOUT;         /* console_write() never blocks */
+    if ((events & POLLIN) && (keyboard_has_data() || serial_has_data()))
+        re |= POLLIN;
+    return re;
+}
+
+wait_queue_t *console_waitq(void)
+{
+    return &console_wq;
+}
+
 /* Blocks until a byte arrives from either the keyboard or the serial command
  * channel (Phase 18.0), whichever is first -- unless `nonblock`, in which
  * case it returns -EAGAIN instead of waiting (Phase 18.2). Both sources are

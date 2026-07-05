@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include "vfs.h"
 #include "syscall_abi.h"
+#include "scheduler.h"      /* wait_queue_t */
 
 /* Create an unconnected socket endpoint. Returns its VFS node, or NULL. */
 vfs_node_t *sock_create(int domain, int type);
@@ -30,11 +31,9 @@ int sock_link(uint32_t handle_a, uint32_t handle_b);
  * that currently holds for this socket node. Call with interrupts disabled. */
 int sock_poll(vfs_node_t *node, int events);
 
-/* Register/clear the current thread as the poll waiter for a socket so a peer
- * send/recv/close wakes it. Call with interrupts disabled. */
-struct thread;
-void sock_poll_arm(vfs_node_t *node, struct thread *t);
-void sock_poll_disarm(vfs_node_t *node, struct thread *t);
+/* Phase 18.3: the wait queue backing `want` (exactly one of POLLIN/POLLOUT)
+ * for this socket, or NULL if unconnected / `want` matches neither bit. */
+wait_queue_t *sock_waitq(vfs_node_t *node, int want);
 
 /* True if `node` is a socket endpoint (used by the fd layer / poll). */
 int sock_is_socket(vfs_node_t *node);

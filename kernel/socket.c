@@ -22,9 +22,14 @@ typedef struct {
 typedef struct sock_conn {
     ring_t    to[2];        /* to[s] = bytes destined for side s (its inbound) */
     int       open[2];      /* open[s] = side s endpoint still open            */
-    thread_t *rwait[2];     /* side s blocked reading its inbound (to[s])      */
-    thread_t *wwait[2];     /* side s blocked writing (space in to[1-s])       */
-    thread_t *pwait[2];     /* side s blocked in poll()                        */
+    wait_queue_t rwq[2];    /* Phase 18.3: side s waiting to read its inbound
+                              * (to[s]) -- a blocking read() and a wait_events()
+                              * poller share this same queue, since both care
+                              * about the exact same event (data arrived, or
+                              * the peer closed). Was a lone thread_t* (one
+                              * blocking reader) plus a separate pwait[] (one
+                              * poller) -- now unified. */
+    wait_queue_t wwq[2];    /* side s waiting for space in to[1-s] */
 } sock_conn_t;
 
 enum { SS_NEW = 0, SS_CONNECTED, SS_LISTENING };
@@ -61,14 +66,6 @@ static int ring_put(ring_t *r, const uint8_t *in, int max)
     return n;
 }
 
-static void wake(thread_t **slot)
-{
-    if (*slot) {
-        thread_wake(*slot);
-        *slot = NULL;
-    }
-}
-
 /* ---- VFS ops: read == recv, write == send ---- */
 
 static int sock_node_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out, int flags)
@@ -87,14 +84,11 @@ static int sock_node_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t
             __asm__ volatile("sti");
             return -EAGAIN;
         }
-        c->rwait[sd] = thread_current();
-        thread_block();
+        wait_enqueue(&c->rwq[sd]);
     }
     int n = ring_get(&c->to[sd], out, (int)size);
-    if (n > 0) {
-        wake(&c->wwait[peer]);              /* peer can write more into to[sd] */
-        wake(&c->pwait[peer]);              /* peer poller waiting on POLLOUT  */
-    }
+    if (n > 0)
+        wait_wake_all(&c->wwq[peer]);       /* peer can write more into to[sd] */
     __asm__ volatile("sti");
     return n;                               /* 0 == EOF (peer closed, drained) */
 }
@@ -121,13 +115,11 @@ static int sock_node_write(vfs_node_t *node, uint32_t off, uint32_t size, const 
                 __asm__ volatile("sti");
                 return n ? n : -EAGAIN;
             }
-            c->wwait[sd] = thread_current();
-            thread_block();
+            wait_enqueue(&c->wwq[sd]);
             continue;
         }
         n += ring_put(&c->to[peer], in + n, (int)size - n);
-        wake(&c->rwait[peer]);              /* peer reader waiting on POLLIN */
-        wake(&c->pwait[peer]);
+        wait_wake_all(&c->rwq[peer]);       /* peer reader waiting on POLLIN */
     }
     __asm__ volatile("sti");
     return n;
@@ -180,9 +172,8 @@ void sock_close(vfs_node_t *node)
         int sd = s->side, peer = 1 - sd;
         __asm__ volatile("cli");
         c->open[sd] = 0;
-        wake(&c->rwait[peer]);              /* peer recv -> EOF   */
-        wake(&c->wwait[peer]);              /* peer send -> broken */
-        wake(&c->pwait[peer]);
+        wait_wake_all(&c->rwq[peer]);        /* peer recv -> EOF    */
+        wait_wake_all(&c->wwq[peer]);        /* peer send -> broken */
         free_conn = (!c->open[0] && !c->open[1]);
         __asm__ volatile("sti");
     }
@@ -233,16 +224,18 @@ int sock_poll(vfs_node_t *node, int events)
     return re;
 }
 
-void sock_poll_arm(vfs_node_t *node, thread_t *t)
+/* Phase 18.3: the wait queue backing `want` (exactly one of POLLIN/POLLOUT)
+ * for this socket's current side -- a blocking read()/write() and a
+ * wait_events() poller wait on the exact same event, so they share it. NULL
+ * if unconnected or `want` is neither bit. */
+wait_queue_t *sock_waitq(vfs_node_t *node, int want)
 {
     socket_t *s = (socket_t *)node->priv;
-    if (s->conn)
-        s->conn->pwait[s->side] = t;
-}
-
-void sock_poll_disarm(vfs_node_t *node, thread_t *t)
-{
-    socket_t *s = (socket_t *)node->priv;
-    if (s->conn && s->conn->pwait[s->side] == t)
-        s->conn->pwait[s->side] = 0;
+    if (!s->conn)
+        return NULL;
+    if (want & POLLIN)
+        return &s->conn->rwq[s->side];
+    if (want & POLLOUT)
+        return &s->conn->wwq[s->side];
+    return NULL;
 }

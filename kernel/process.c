@@ -722,6 +722,7 @@ int sys_poll(struct pollfd *fds, int nfds, int timeout)
     process_t *p = process_current();
     if (!fds || nfds < 0 || nfds > MAX_FDS)
         return -1;
+    wait_node_t nodes[MAX_FDS];
 
     for (;;) {
         int ready = 0;
@@ -747,19 +748,120 @@ int sys_poll(struct pollfd *fds, int nfds, int timeout)
             __asm__ volatile("sti");
             return ready;
         }
-        /* Arm a poll waiter on each socket fd, block, then disarm and re-scan. */
+        /* Arm a wait_node_t on each socket fd's relevant queue, block, then
+         * remove them all and re-scan. */
         for (int i = 0; i < nfds; i++) {
             int fd = fds[i].fd;
             if (fd >= 0 && fd < MAX_FDS && p->fds[fd] && p->fds[fd]->role == FD_SOCKET
-                && !tcpsock_is(p->fds[fd]->node))
-                sock_poll_arm(p->fds[fd]->node, thread_current());
+                && !tcpsock_is(p->fds[fd]->node)) {
+                wait_queue_t *wq = sock_waitq(p->fds[fd]->node, fds[i].events);
+                if (wq)
+                    wait_node_add(&nodes[i], wq);
+            }
         }
-        thread_block();
+        wait_block_timeout(0);
         for (int i = 0; i < nfds; i++) {
             int fd = fds[i].fd;
             if (fd >= 0 && fd < MAX_FDS && p->fds[fd] && p->fds[fd]->role == FD_SOCKET
-                && !tcpsock_is(p->fds[fd]->node))
-                sock_poll_disarm(p->fds[fd]->node, thread_current());
+                && !tcpsock_is(p->fds[fd]->node)) {
+                wait_queue_t *wq = sock_waitq(p->fds[fd]->node, fds[i].events);
+                if (wq)
+                    wait_node_remove(&nodes[i]);
+            }
+        }
+        __asm__ volatile("sti");
+    }
+}
+
+/* Phase 18.3: like sys_poll() above, but dispatches readiness/wait-queue
+ * lookup to whichever subsystem actually owns each fd (console, pipe,
+ * loopback socket, TCP socket all now expose a _poll()+_waitq() pair) and
+ * enforces `timeout` as a genuine millisecond bound instead of blocking
+ * forever for any nonzero value. A pollfd entry that wants both POLLIN and
+ * POLLOUT may need two different queues (a socket's read and write sides),
+ * so each fd gets up to two nodes. Kept separate from sys_poll() so no
+ * existing caller's behavior changes; sys_poll() could become a thin
+ * wrapper around this later without an ABI break. */
+int sys_wait_events(struct pollfd *fds, int nfds, int timeout)
+{
+    process_t *p = process_current();
+    if (!fds || nfds < 0 || nfds > MAX_FDS)
+        return -1;
+    wait_node_t in_nodes[MAX_FDS], out_nodes[MAX_FDS];
+    uint32_t deadline_tick = pit_ticks() + (timeout > 0 ? ((uint32_t)timeout + 9) / 10 : 0);
+
+    for (;;) {
+        int ready = 0;
+        __asm__ volatile("cli");
+        for (int i = 0; i < nfds; i++) {
+            fds[i].revents = 0;
+            int fd = fds[i].fd;
+            int want = fds[i].events;
+            file_t *f = (fd >= 0 && fd < MAX_FDS) ? p->fds[fd] : NULL;
+            int re;
+            if (!f)
+                re = POLLERR;
+            else if (f->node == console_node())
+                re = console_poll(want);
+            else if (f->role == FD_PIPE_R || f->role == FD_PIPE_W)
+                re = pipe_poll(f->node, want);
+            else if (f->role == FD_SOCKET && tcpsock_is(f->node))
+                re = tcpsock_poll(f->node, want);
+            else if (f->role == FD_SOCKET)
+                re = sock_poll(f->node, want);
+            else
+                re = want & (POLLIN | POLLOUT);     /* a regular file never blocks */
+            re &= (want | POLLERR);
+            if (re) {
+                fds[i].revents = (short)re;
+                ready++;
+            }
+        }
+        if (ready > 0 || timeout == 0) {
+            __asm__ volatile("sti");
+            return ready;
+        }
+        if (timeout > 0 && (int32_t)(pit_ticks() - deadline_tick) >= 0) {
+            __asm__ volatile("sti");
+            return 0;                               /* timed out, nothing ready */
+        }
+
+        for (int i = 0; i < nfds; i++) {
+            in_nodes[i].wq = out_nodes[i].wq = NULL;
+            int fd = fds[i].fd;
+            file_t *f = (fd >= 0 && fd < MAX_FDS) ? p->fds[fd] : NULL;
+            if (!f)
+                continue;
+            int want = fds[i].events;
+            wait_queue_t *wqin = NULL, *wqout = NULL;
+            if (f->node == console_node()) {
+                if (want & POLLIN) wqin = console_waitq();  /* write never blocks */
+            } else if (f->role == FD_PIPE_R || f->role == FD_PIPE_W) {
+                wqin = pipe_waitq(f->node);          /* one end, one queue either way */
+            } else if (f->role == FD_SOCKET && tcpsock_is(f->node)) {
+                wqin = wqout = tcpsock_waitq(f->node);
+            } else if (f->role == FD_SOCKET) {
+                if (want & POLLIN)  wqin  = sock_waitq(f->node, POLLIN);
+                if (want & POLLOUT) wqout = sock_waitq(f->node, POLLOUT);
+            }
+            if (wqin)
+                wait_node_add(&in_nodes[i], wqin);
+            if (wqout && wqout != wqin)
+                wait_node_add(&out_nodes[i], wqout);
+        }
+
+        uint32_t wait_ms = 0;    /* 0 = forever (timeout < 0) */
+        if (timeout > 0) {
+            uint32_t now_tick = pit_ticks();
+            wait_ms = (deadline_tick - now_tick) * 10;
+            if (wait_ms == 0)
+                wait_ms = 1;     /* wait_block_timeout(0) means forever -- never pass 0 for a real bound */
+        }
+        wait_block_timeout(wait_ms);
+
+        for (int i = 0; i < nfds; i++) {
+            wait_node_remove(&in_nodes[i]);
+            wait_node_remove(&out_nodes[i]);
         }
         __asm__ volatile("sti");
     }

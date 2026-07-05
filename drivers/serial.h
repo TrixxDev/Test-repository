@@ -14,3 +14,7 @@ void serial_install(void);
 /* Non-blocking: returns the next received byte, or -1 if none is buffered.
  * Caller must hold interrupts off (see drivers/console.c's console_getchar()). */
 int serial_trygetchar(void);
+
+/* Non-blocking, non-destructive: 1 if a byte is buffered, 0 otherwise. Same
+ * interrupts-off contract. */
+int serial_has_data(void);

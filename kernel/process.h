@@ -103,6 +103,10 @@ int  sys_lookup(const char *name);
 /* sockets (loopback) + poll */
 int  sys_socket(int domain, int type);
 int  sys_poll(struct pollfd *fds, int nfds, int timeout);
+
+/* Phase 18.3: like sys_poll() but covers every fd role, with a real
+ * millisecond timeout (negative = forever, 0 = don't block). */
+int  sys_wait_events(struct pollfd *fds, int nfds, int timeout);
 int  sys_getuid(void);
 int  sys_setuid(int uid);
 int  sys_uid_of(int pid);

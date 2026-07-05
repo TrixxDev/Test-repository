@@ -47,6 +47,10 @@ static inline int svc_lookup(const char *name)           { return _syscall(SYS_L
 static inline int socket(int domain, int type)           { return _syscall(SYS_SOCKET, domain, type, 0); }
 static inline int sock_link(int handle_a, int handle_b)  { return _syscall(SYS_SOCK_LINK, handle_a, handle_b, 0); }
 static inline int poll(struct pollfd *fds, int nfds, int timeout) { return _syscall(SYS_POLL, (int)fds, nfds, timeout); }
+/* Phase 18.3: like poll(), but covers every fd role (console, pipe, either
+ * socket type) and honors `timeout_ms` as a real bound: negative waits
+ * forever, 0 never blocks, >0 is milliseconds. */
+static inline int wait_events(struct pollfd *fds, int nfds, int timeout_ms) { return _syscall(SYS_WAIT_EVENTS, (int)fds, nfds, timeout_ms); }
 static inline int getuid(void)                           { return _syscall(SYS_GETUID, 0, 0, 0); }
 static inline int setuid(int uid)                        { return _syscall(SYS_SETUID, uid, 0, 0); }
 static inline int uid_of(int pid)                        { return _syscall(SYS_UIDOF, pid, 0, 0); }
