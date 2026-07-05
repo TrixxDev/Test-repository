@@ -175,7 +175,9 @@ def parse_profstat(log):
                        "tcp_tick_calls", "tcp_tick_us", "fat_read_calls", "fat_read_us",
                        "fat_write_calls", "fat_write_us", "memcpy_calls", "memcpy_bytes",
                        "tcp_read_calls", "tcp_read_iters", "tcp_read_bytes", "tcp_wait_us",
-                       "tcp_connect_iters", "tcp_write_iters", "tcp_close_iters"):
+                       "tcp_connect_iters", "tcp_write_iters", "tcp_close_iters",
+                       "rx_irqs", "rx_packets", "rx_bytes", "rx_dropped", "rx_errors",
+                       "tx_packets", "tx_bytes"):
                 out[key] = int(val)
     return out
 
