@@ -62,6 +62,22 @@ void chacha20_block(chacha20_ctx *c, uint8_t out[CHACHA20_BLOCK_LEN])
     c->state[12]++;             /* advance the 32-bit block counter */
 }
 
+/* Phase 18.5: XOR four bytes at a time via the same byte-shift load/store
+ * idiom rd32le() already uses (see chacha20_init/chacha20_core above) --
+ * clang folds that idiom into a single unaligned movl on x86, regardless of
+ * `in`/`out`'s alignment, with no UB from casting an arbitrarily-aligned
+ * uint8_t* to uint32_t*. Byte-at-a-time XOR compiled to three separate
+ * single-byte memory ops per byte (load, xor, store); one HTTPS record is
+ * every application byte through this loop, so it's the hottest loop in the
+ * whole TLS_CHACHA20_POLY1305_SHA256 path. */
+static void wr32le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v);
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
 void chacha20_xor(chacha20_ctx *c, const uint8_t *in, uint8_t *out, size_t len)
 {
     uint8_t ks[CHACHA20_BLOCK_LEN];
@@ -70,7 +86,13 @@ void chacha20_xor(chacha20_ctx *c, const uint8_t *in, uint8_t *out, size_t len)
         chacha20_block(c, ks);
         size_t n = len - off;
         if (n > CHACHA20_BLOCK_LEN) n = CHACHA20_BLOCK_LEN;
-        for (size_t i = 0; i < n; i++) out[off + i] = in[off + i] ^ ks[i];
+
+        size_t i = 0;
+        for (; i + 4 <= n; i += 4)
+            wr32le(out + off + i, rd32le(in + off + i) ^ rd32le(ks + i));
+        for (; i < n; i++)
+            out[off + i] = in[off + i] ^ ks[i];
+
         off += n;
     }
 }

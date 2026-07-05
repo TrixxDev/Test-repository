@@ -229,6 +229,17 @@ crypto-test:
 	$(CC) -O2 -Icrypto tools/crypto_test.c crypto/sha256.c crypto/sha384.c crypto/hmac_sha256.c crypto/hkdf.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c crypto/x25519.c -o /tmp/aurora_crypto_test
 	/tmp/aurora_crypto_test
 
+# Phase 18.5: throughput benchmark for the ChaCha20-Poly1305 hot path (the
+# only cipher suite Aurora speaks, so its speed is HTTPS's speed). -fno-vectorize
+# -fno-slp-vectorize keeps the host measurement honest: the real target builds
+# with -mno-sse -mno-mmx -mno-sse2 (kernel AND userspace TLS, see UCFLAGS) and
+# never gets the auto-vectorized SIMD loop a default host build would silently
+# substitute in, which would hide a scalar-loop regression/improvement entirely.
+.PHONY: crypto-bench
+crypto-bench:
+	$(CC) -O2 -fno-vectorize -fno-slp-vectorize -Icrypto tools/crypto_bench.c crypto/chacha20.c crypto/poly1305.c crypto/chacha20poly1305.c -o /tmp/aurora_crypto_bench
+	/tmp/aurora_crypto_bench
+
 # Host-side TLS protocol tests (tls/ over the verified crypto/ primitives).
 .PHONY: tls-test
 tls-test:
