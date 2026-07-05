@@ -3676,3 +3676,136 @@ Aurora has no wall clock, so the validity instant is a build-time constant
 
 Remaining after the QEMU acceptance: 15.0 trims the per-cert memory; 14.x adds
 P-384/SHA-384 to open the ECDSA slice of the public web.
+
+## Step 18.5 — Performance Characterization: measurement before optimization
+
+Before touching TLS/HTTP2 performance, 18.5 asked what's actually slow,
+rather than assuming it and optimizing the wrong layer. 18.5.2 added
+kernel-wide counters (`struct kernel_prof`, `SYS_PROFSTAT`): scheduler
+switches, wait-queue blocks, `tcp_input`/`tcp_tick` calls and time,
+`memcpy`, FAT read/write. 18.5.3 added the userspace equivalent
+(`user/uprof.h`, `httpsget --profile`): AEAD seal/open, HPACK
+encode/decode, HTTP/2 frame processing, each as calls/time/bytes.
+
+**18.5.3.1 — the characterization sweep.** `tools/perf_characterize.py`
+drives `httpsget --profile` against real H2/HTTP-1.1 servers (reusing
+`h2_large_qemu.py`/`keepalive_qemu.py`/`tls_resume_qemu.py` rather than
+building a third set of test servers) across response size (1 KB → 5 MB),
+protocol (HTTP/1.1 vs HTTP/2), connection setup (cold handshake vs TLS
+resumption), and reuse (one request vs fifty over one connection) — ten
+scenarios, one merged `tools/perf_characterize_results.json`. The
+standing hypothesis going in was that `aead_open` (Aurora's from-scratch
+ChaCha20-Poly1305, running on an emulated i686 core) would dominate wall
+time at scale. Measured: at 5 MB, `aead_open` is 291 ms of a 1114.4 s
+transfer — 0.026%. Every profiled subsystem combined (AEAD, HPACK, frame
+processing, `tcp_input`, `tcp_tick`) is 1.79 s — 0.16%. The hypothesis is
+false; crypto and framing are not the bottleneck at any size tested, and
+an AEAD speedup (SIMD, batching) was explicitly ruled out as the next
+step on this evidence.
+
+Two bugs were found and fixed in the *test harness* during this sweep
+(neither is an Aurora bug): typing `"httpsget ... ; profstat"` as one
+serial-console line doesn't chain two commands — Aurora's shell has no
+`;` separator, so `; profstat` became two more argv tokens fed straight
+to `httpsget`, which for a bodyless GET treats every trailing non-path
+token as an override of `now` (the TLS certificate-validation clock),
+corrupting it to ~0 and producing a perfectly reproducible "leaf not yet
+valid" failure with nothing to do with clocks or certs. Fixed by typing
+two genuinely separate lines. Separately, a daemon accept-thread in the
+test servers doesn't reliably release port 443 when closed from another
+thread within the same process (a POSIX `close()`-vs-blocking-`accept()`
+race) — fixed by running every server-backed scenario as its own OS
+process, merging results by scenario name afterward.
+
+**18.5.4 — where the profiled time doesn't reach.** Two numbers from
+18.5.3.1 still needed an explanation: roughly 150–175 scheduler
+`wait_blocks` per 16 KB HTTP/2 DATA frame, and `tcp_tick_calls` running
+~140,000–150,000 for HTTP/2 scenarios against 9 for HTTP/1.1 on an
+identical 10 KB body. New counters (`tcp_read_calls`/`tcp_read_iters`/
+`tcp_read_bytes`/`tcp_wait_us` in `net/tcpsock.c`'s `tsk_read()`, plus a
+call-site counter for each of `net/tcpsock.c`'s other three `net_poll()`
+sites — connect, write, close) answered both directly instead of by
+inspection:
+
+- The `wait_blocks` count is not small reads: at 100 KB, 22 `read()`
+  calls return ~4.7 KB on average (above one TCP segment), and
+  `tcp_wait_us`/`wait_blocks` ≈ 19.9 ms confirms `wait_event_timeout()`
+  is genuinely sleeping its nominal ~20 ms each time, not spinning. The
+  count is simply (seconds needed to fill one frame at this
+  environment's actual delivery rate) ÷ (20 ms poll interval) — a
+  consequence of transfer speed, not a defect in the wait loop.
+- `tcp_tick_calls` traced entirely to `tcp_close_iters`: 144,817 (HTTP/2)
+  vs. 1 (HTTP/1.1). `tcpsock_close()`'s teardown-wait loop had **no
+  yield at all** — an unconditional busy-spin for its full 1500 ms
+  budget whenever the peer hadn't already closed first. The HTTP/1.1
+  test server closes immediately (a passive close completes in one
+  check); the HTTP/2 test server deliberately keeps the connection open
+  (its own comment: closing early would strand Aurora's still-arriving
+  WINDOW_UPDATEs against this environment's slow crypto), forcing
+  Aurora into an *active* close, which must sit in `TCP_TIME_WAIT`
+  (`TCP_TIME_WAIT_MS` = 1000 ms fixed) — a dwell the 1500 ms budget
+  can't reliably absorb without spinning through nearly all of it.
+  Confirmed protocol-agnostic (a generic close-path defect, not
+  anything HTTP/2-specific) and confirmed per-*connection*, not
+  per-request: `reuse:50x1KB`'s `tcp_close_iters` (135,705) is the same
+  order as `reuse:1x1KB`'s (141,119) despite fifty requests instead of
+  one. Fixed: `tcpsock_close()` now parks on the connection's own wait
+  queue between polls, exactly like `tsk_read()`/`tsk_write()` already
+  do — `tcp_input()` already wakes it promptly on anything relevant,
+  and `tcp_tick()` still flips `TIME_WAIT` to `CLOSED` on schedule, so
+  the loop's exit condition is unchanged, only how it waits. Re-verified
+  on four scenarios (`protocol_h2`, `protocol_h1`, `size_1k`,
+  `reuse_50x`): `tcp_close_iters` for HTTP/2(10 KB) dropped from 144,817
+  to 52 (≈ the `TIME_WAIT` floor at a 20 ms poll interval) with
+  identical `200 OK` results and `wall_us` within run-to-run noise. The
+  spin ran *after* the response was already fully received (outside
+  `httpsget`'s own measured `wall_us`), so it never explained
+  18.5.3.1's request-latency numbers — those stand unchanged — but it
+  was real, wasted, ~1.5 s-of-100%-CPU per HTTP/2-style close.
+
+**18.5.5 — ruling out the driver and the receive window.** Two follow-up
+questions remained: does the ~20 ms poll interval actually pace data
+delivery (a virtio-net/IRQ/scheduler-tick question), and does the
+16 KB receive ring (`RX_RING_CAP`) starve against `httpsget`'s ~6.4 KB
+read buffer (a flow-control question)? Both answered by measurement,
+both closed as *not* the cause:
+
+- `profstat` now also prints the driver's own pre-existing
+  `struct net_stats` (`rx_irqs`, `rx_packets`, ...; it already existed
+  for the Settings app's network panel, just was never surfaced next to
+  the kernel counters). `rx_irqs` stays within ~1.2–1.5× of `rx_packets`
+  across every scenario measured — interrupts track real packet
+  arrivals, not a source of spurious wakeups. But `tcp_tick_calls`
+  (`net_poll()` calls) runs 2.8×–9.2× higher than `rx_packets`, and
+  that ratio *grows* with transfer size: most polls find nothing,
+  because packets physically arrive on the wire far slower than the
+  20 ms poll interval (measured: ~82–87 ms/packet at 10 KB, ~188 ms/
+  packet at 100 KB) — the poll loop is already faster than the data,
+  not the other way around.
+- A receive-window trace (`wnd_zero_events`/`wnd_closed_us` in
+  `net/tcp.c`, timestamped from the moment `rcv_wnd` hits exactly 0 to
+  the moment `tcp_recv()`'s existing reopening branch fires) tested the
+  hypothesis directly. Result at 100 KB: the window closed twice in the
+  entire transfer, for 273 *microseconds* total — 0.0013% of a 21.5 s
+  wall time. HTTP/1.1 and HTTP/2 at 10 KB never closed the window at
+  all. `tcp_recv()`'s reopening ACK is exactly as synchronous as the
+  code reads; there is no hidden delay there.
+
+**Where this leaves 18.5.** Every layer inside Aurora's own client-side
+path has now been measured, not assumed: AEAD/TLS, HPACK/HTTP-2 framing,
+userspace `read()` sizing, the wait-queue mechanism, the busy-spin found
+in `close()` (fixed; confirmed not a throughput factor), the IRQ/driver
+path, and receive-window management are all cleared as explanations for
+this environment's ~4.6–5 KB/s effective bulk-transfer rate. What
+remains sits outside Aurora entirely — QEMU's own `slirp` user-mode
+network emulation (well known for elevated latency, not built for
+throughput measurement) or the Python test servers' own send-side
+pacing (Nagle interacting with per-frame `sendall()` calls, TLS record
+boundaries) — neither reachable from inside the guest. The natural next
+step is an external control experiment (the same Python server, same
+QEMU/slirp path, a Linux guest's `curl` in Aurora's place) to attribute
+the remaining latency to the environment rather than the OS; this is
+tracked as a standalone "Throughput under QEMU/slirp" investigation and
+does not block further Aurora development. 18.5 is closed on that basis:
+its goal was a profile and a localization, not a throughput fix, and
+both are now as complete as they can be from inside the guest.

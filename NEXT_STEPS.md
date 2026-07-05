@@ -158,7 +158,7 @@ arc and opening the 18.x track below. This doc (and [CURRENT_STATUS.md](CURRENT_
 were not kept current during that arc; treat docs/SECURITY.md as authoritative
 for anything past phase ~10.
 
-## Phase 18.x — Kernel I/O & Scheduling (opened after 17.5.2 closed HTTP/2)
+## Phase 18.x — Kernel I/O & Scheduling — DONE (opened after 17.5.2 closed HTTP/2)
 
 The bugs found while hardening HTTP/2 (17.5.1/17.5.2) stopped being "RFC X not
 implemented" and started being two already-correct mechanisms interacting
@@ -173,21 +173,37 @@ kernel's execution model, not another protocol.
   scancode-injecting through the monitor's `sendkey`. See
   [CURRENT_STATUS.md](CURRENT_STATUS.md)'s phase table and
   `tools/qemu_serial.py`.
-- [ ] **18.1 — Wait queues + sleep/wakeup.** Generalize the single-waiter
-  block/wake pattern (keyboard, serial, pipes, sockets each roll their own
-  today) into one real primitive multiple threads can wait on.
-- [ ] **18.2 — Non-blocking I/O model.** `O_NONBLOCK` + `EAGAIN`/`EWOULDBLOCK`/
-  `EINTR` — today there's no way to distinguish "no data yet" from EOF or a
-  timeout; this has no real meaning without 18.1 underneath it, so the two
-  are one contract, not two sequential phases.
-- [ ] **18.3 — `poll()`/`select()`-style multi-source wait**, built on 18.1/18.2.
-- [ ] **18.4 — TCP sliding window + out-of-order reassembly** (`net/tcp.c`
-  currently tracks one outstanding segment at a time) — depends on 18.1 to
-  do cleanly, without a busy-loop architecture.
-- [ ] **18.5 — ChaCha20-Poly1305 optimization.** Deliberately last: 17.5.2
-  measured this project's from-scratch record decryption at ~1.2-1.5 KB/s on
-  emulated i686, but fixing TCP/blocking-I/O first may shift where the real
-  bottleneck actually is.
+- [x] **18.1 — Wait queues + sleep/wakeup.** `wait_queue_t` + `wait_event_timeout()`
+  generalized the single-waiter block/wake pattern; console/pipe/socket all
+  migrated onto it.
+- [x] **18.2 — Non-blocking I/O model.** `O_NONBLOCK` + `EAGAIN`/`EWOULDBLOCK`,
+  an `EINTR` contract (defined, unused until Aurora has signals), all
+  console/pipe/socket paths migrated.
+- [x] **18.3 — `poll()`/`select()`-style multi-source wait.** `sys_wait_events()`
+  + a libc wrapper, built on 18.1/18.2.
+- [x] **18.4 — TCP sliding window + out-of-order reassembly.** Multiple
+  segments in flight, out-of-order splicing, real receive-window management.
+- [x] **18.5 — Performance Characterization (reframed from "ChaCha20-Poly1305
+  optimization" once actually measured).** 17.5.2's ~1.2-1.5 KB/s figure was a
+  single anecdotal data point, not a profile — 18.5.2/18.5.3 added kernel- and
+  userspace-side counters (AEAD, HPACK, HTTP/2 framing, `tcp_input`/`tcp_tick`,
+  wait blocks), and 18.5.3.1 ran a ten-scenario sweep (size/protocol/setup/reuse)
+  against them. Verdict: AEAD is 0.026% of wall time at 5 MB — the standing
+  "optimize ChaCha20-Poly1305 next" plan this section used to state was wrong,
+  and is retired. 18.5.4 traced the sweep's own leftover mysteries (150-175
+  `wait_blocks`/DATA-frame, 145K-vs-9 `tcp_tick_calls`) to a real bug — an
+  unconditional busy-spin in `tcpsock_close()`'s teardown wait — found,
+  confirmed protocol-agnostic, and fixed (same `wait_event_timeout()`
+  discipline `tsk_read()`/`tsk_write()` already had). 18.5.5 then cleared the
+  IRQ/driver path and receive-window management as explanations too (measured,
+  not assumed: `rx_irqs≈rx_packets`; the window closed for 273µs total out of a
+  21.5s transfer). Every layer inside Aurora's own client stack is now cleared;
+  what's left is outside the guest (QEMU `slirp` latency, or the Python test
+  servers' own send pacing) — see docs/SECURITY.md's "Step 18.5" for the full
+  trace. Tracked separately, not blocking: **"Throughput under QEMU/slirp"** —
+  run the same Python server/QEMU/slirp path with a Linux guest's `curl` in
+  Aurora's place; if it's similarly slow, the environment is the answer and
+  this closes for good, otherwise a real stack difference exists worth chasing.
 
 ## Phase 10 — Desktop apps & Aurora Assistant
 
