@@ -1931,6 +1931,7 @@ int main(int argc, char **argv)
     else
         printf("[httpsget] %d paths from %s  (trust store: %u roots)\n", npaths, host, (unsigned)CA_ROOTS_N);
 
+    uint64_t wall_t0 = cprof_now_us();   /* Phase 18.5.3.1: end-to-end wall clock */
     int last_status = 0;
     for (int rep = 0; rep < repeat; rep++) {
         if (repeat > 1) printf("[httpsget] ---- repeat %d/%d ----\n", rep + 1, repeat);
@@ -1941,6 +1942,7 @@ int main(int argc, char **argv)
             last_status = st;
         }
     }
+    unsigned wall_us = (unsigned)(cprof_now_us() - wall_t0);
     close_all_slots();
 
     /* Phase 18.5.3: dump the userspace crypto/HPACK/HTTP2 profiling counters
@@ -1948,6 +1950,7 @@ int main(int argc, char **argv)
      * into g_cprof this whole run -- opt-in (--profile) so normal runs stay
      * quiet, matching --alpn's own opt-in debug line above. */
     if (g_profile_enabled) {
+        printf("[profile] wall:        us=%u\n", wall_us);
         printf("[profile] aead_seal:   calls=%u us=%u bytes=%u\n",
                g_cprof.aead_seal_calls, g_cprof.aead_seal_us, g_cprof.aead_seal_bytes);
         printf("[profile] aead_open:   calls=%u us=%u bytes=%u\n",
