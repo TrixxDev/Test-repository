@@ -18,5 +18,10 @@ int main(void)
     printf("fat_read_calls=%u fat_read_us=%u\n", p.fat_read_calls, p.fat_read_us);
     printf("fat_write_calls=%u fat_write_us=%u\n", p.fat_write_calls, p.fat_write_us);
     printf("memcpy_calls=%u memcpy_bytes=%u\n", p.memcpy_calls, p.memcpy_bytes);
+    printf("tcp_read_calls=%u tcp_read_iters=%u tcp_read_bytes=%u\n",
+           p.tcp_read_calls, p.tcp_read_iters, p.tcp_read_bytes);
+    printf("tcp_wait_us=%u\n", p.tcp_wait_us);
+    printf("tcp_connect_iters=%u tcp_write_iters=%u tcp_close_iters=%u\n",
+           p.tcp_connect_iters, p.tcp_write_iters, p.tcp_close_iters);
     return 0;
 }

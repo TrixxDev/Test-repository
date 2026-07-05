@@ -149,6 +149,35 @@ struct kernel_prof {
     unsigned fat_write_us;
     unsigned memcpy_calls;
     unsigned memcpy_bytes;
+
+    /* Phase 18.5.4: tcpsock's tsk_read() loop specifically (net/tcpsock.c) --
+     * added to find out WHY tcp_tick_calls (driven by net_poll(), which
+     * tsk_read()'s loop calls once per pass) can run orders of magnitude
+     * higher for one workload than another at the same wall-clock duration.
+     * tcp_read_calls is syscall-level (one per read() reaching this fd);
+     * tcp_read_iters is loop-level (one per net_poll() pass inside a single
+     * read(), so tcp_read_iters/tcp_read_calls is the average number of
+     * "still no data" retries per read()); tcp_read_bytes is bytes actually
+     * returned on the successful passes. tcp_wait_us times only the
+     * wait_event_timeout() calls this same loop makes -- dividing by the
+     * (shared, pre-existing) wait_blocks counter gives the average real
+     * wait duration per block, which is the direct answer to "is this loop
+     * actually sleeping ~20ms, or basically not sleeping at all." */
+    unsigned tcp_read_calls;
+    unsigned tcp_read_iters;
+    unsigned tcp_read_bytes;
+    unsigned tcp_wait_us;
+
+    /* Phase 18.5.4 continued: tcp_read_iters alone turned out NOT to explain
+     * a huge tcp_tick_calls gap between two workloads at the same wall-clock
+     * duration (9 read-loop iterations either way) -- so net_poll()'s other
+     * three tcpsock.c call sites (the connect wait, the write-side
+     * wait-for-ACK-before-next-chunk loop, and the close teardown wait) each
+     * get their own iteration counter too, to find out which phase actually
+     * accounts for the difference instead of guessing. */
+    unsigned tcp_connect_iters;
+    unsigned tcp_write_iters;
+    unsigned tcp_close_iters;
 };
 
 /* ---- directory enumeration (SYS_READDIR) ---- */

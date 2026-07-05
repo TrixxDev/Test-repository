@@ -8,6 +8,8 @@
 #include "string.h"
 #include "scheduler.h"
 #include "syscall_abi.h"   /* O_NONBLOCK, EAGAIN */
+#include "perf.h"          /* Phase 18.5.4: perf_now_us() */
+#include "prof.h"          /* Phase 18.5.4: g_kprof */
 
 #define TCPSOCK_MSS 1400
 
@@ -69,8 +71,10 @@ int tcpsock_connect(vfs_node_t *node, const char *host, int port)
         return -3;
     uint64_t dl = net_now_ms() + 5000;
     while (net_now_ms() < dl &&
-           tcp_state(h) != TCP_ESTABLISHED && tcp_state(h) != TCP_CLOSED)
+           tcp_state(h) != TCP_ESTABLISHED && tcp_state(h) != TCP_CLOSED) {
+        g_kprof.tcp_connect_iters++;   /* Phase 18.5.4 */
         net_poll();
+    }
     if (tcp_state(h) != TCP_ESTABLISHED)
         return -3;                              /* connect failed / refused */
     t->h = h;
@@ -95,8 +99,10 @@ void tcpsock_close(vfs_node_t *node)
             __asm__ volatile("sti");
             tcp_close(t->h);
             uint64_t dl = net_now_ms() + 1500;
-            while (net_now_ms() < dl && tcp_state(t->h) != TCP_CLOSED)
+            while (net_now_ms() < dl && tcp_state(t->h) != TCP_CLOSED) {
+                g_kprof.tcp_close_iters++;   /* Phase 18.5.4 */
                 net_poll();
+            }
             if (!(fl & 0x200))
                 __asm__ volatile("cli");
         }
@@ -146,11 +152,15 @@ static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out,
     wait_queue_t *wq = tcp_conn_waitq(t->h);
     __asm__ volatile("sti");
     uint64_t dl = net_now_ms() + 60000;
+    g_kprof.tcp_read_calls++;                    /* Phase 18.5.4 */
     for (;;) {
+        g_kprof.tcp_read_iters++;                /* Phase 18.5.4 */
         net_poll();
         int g = tcp_recv(t->h, out, size);
-        if (g > 0)
+        if (g > 0) {
+            g_kprof.tcp_read_bytes += (unsigned)g;   /* Phase 18.5.4 */
             return g;
+        }
         int st = tcp_state(t->h);
         if (st == TCP_CLOSE_WAIT || st == TCP_LAST_ACK || st == TCP_CLOSING ||
             st == TCP_TIME_WAIT || st == TCP_CLOSED)
@@ -160,8 +170,11 @@ static int tsk_read(vfs_node_t *node, uint32_t off, uint32_t size, uint8_t *out,
         if (net_now_ms() >= dl)
             return 0;                           /* idle timeout -> EOF */
         __asm__ volatile("cli");
-        if (wq)
+        if (wq) {
+            uint64_t wait_t0 = perf_now_us();               /* Phase 18.5.4 */
             wait_event_timeout(wq, 20);          /* short poll interval, may wake early */
+            g_kprof.tcp_wait_us += (unsigned)(perf_now_us() - wait_t0);   /* Phase 18.5.4 */
+        }
         __asm__ volatile("sti");
     }
 }
@@ -198,6 +211,7 @@ static int tsk_write(vfs_node_t *node, uint32_t off, uint32_t size, const uint8_
             break;
         uint64_t dl = net_now_ms() + 4000;      /* wait for the ACK before the next */
         while (net_now_ms() < dl && !tcp_tx_idle(t->h)) {
+            g_kprof.tcp_write_iters++;   /* Phase 18.5.4 */
             net_poll();
             if (tcp_tx_idle(t->h))
                 break;
