@@ -177,7 +177,8 @@ def parse_profstat(log):
                        "tcp_read_calls", "tcp_read_iters", "tcp_read_bytes", "tcp_wait_us",
                        "tcp_connect_iters", "tcp_write_iters", "tcp_close_iters",
                        "rx_irqs", "rx_packets", "rx_bytes", "rx_dropped", "rx_errors",
-                       "tx_packets", "tx_bytes", "wnd_zero_events", "wnd_closed_us"):
+                       "tx_packets", "tx_bytes", "wnd_zero_events", "wnd_closed_us",
+                       "kstack_max_used"):
                 out[key] = int(val)
     return out
 

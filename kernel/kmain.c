@@ -7,6 +7,7 @@
 
 #include "kio.h"
 #include "multiboot.h"
+#include "stack_protector.h"
 #include "gdt.h"
 #include "idt.h"
 #include "isr.h"
@@ -78,6 +79,12 @@ void kernel_main(uint32_t magic, uint32_t mb_info)
         kprintf("[warn] unexpected multiboot magic: 0x%x\n", magic);
 
     const multiboot_info_t *mb = (const multiboot_info_t *)mb_info;
+
+    /* Phase 19.2: reseed the stack-protector guard before anything else --
+     * only kernel_main() itself (which never returns, so its own canary
+     * check never runs) has a frame alive across the reseed; see
+     * stack_protector_init()'s contract. */
+    stack_protector_init();
 
     /* Each step logs before it runs, so if an early fault triple-faults and
      * resets the machine, the last serial line names the exact failing step. */

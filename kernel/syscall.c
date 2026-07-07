@@ -1,6 +1,7 @@
 #include "syscall.h"
 #include "kio.h"
 #include "scheduler.h"
+#include "stack_protector.h"
 #include "process.h"
 #include "socket.h"
 #include "fb.h"
@@ -211,6 +212,10 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)sys_debug_kstack_overflow();
         break;
 
+    case SYS_DEBUG_STACK_SMASH:
+        regs->eax = (uint32_t)sys_debug_stack_smash();
+        break;
+
     case SYS_HTTPGET:
         regs->eax = (uint32_t)sys_httpget((const char *)regs->ebx,
                                           (void *)regs->ecx, (int)regs->edx);
@@ -242,4 +247,11 @@ void syscall_handler(registers_t *regs)
         regs->eax = (uint32_t)-1;
         break;
     }
+
+    /* Phase 19.2: syscall exit is one of the three stack-end canary
+     * chokepoints (with context switch and thread_free) -- one load and
+     * one compare per syscall, so corruption that reached the bottom of
+     * this thread's kernel stack during the call above is reported here
+     * rather than surviving until the next context switch. */
+    thread_kstack_end_check();
 }

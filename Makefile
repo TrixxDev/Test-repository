@@ -10,8 +10,12 @@ TARGET  := i686-elf
 
 INCLUDES := -Iinclude -Iarch/i386 -Idrivers -Ilib -Ikernel -Ifs -Inet
 
+# Phase 19.2: -fstack-protector-strong (was -fno-stack-protector) -- every
+# function with a local array gets a canary checked on return, backed by the
+# freestanding runtime in arch/i386/stack_protector.c (clang references the
+# global __stack_chk_guard for bare-metal i686-elf; no libssp needed).
 CFLAGS  := --target=$(TARGET) -m32 -ffreestanding -nostdlib \
-           -fno-pic -fno-pie -fno-stack-protector \
+           -fno-pic -fno-pie -fstack-protector-strong \
            -mno-sse -mno-mmx -mno-sse2 \
            -std=gnu11 -O2 -g -Wall -Wextra -MMD -MP $(INCLUDES)
 
@@ -30,12 +34,12 @@ GUI_DISPLAY ?= -display sdl
 EMBEDDED   := kernel/embedded_user.c
 USER_PROGS := user/init.elf user/logger.elf user/sh.elf user/hello.elf \
               user/cat.elf user/grep.elf user/orphan.elf user/nbtest.elf user/waittest.elf \
-              user/sendwintest.elf user/profstat.elf user/kstacktest.elf \
+              user/sendwintest.elf user/profstat.elf user/kstacktest.elf user/canarytest.elf \
               user/netd.elf user/echosrv.elf user/echocli.elf user/save.elf \
               user/wserver.elf user/term.elf user/dock.elf user/files.elf \
               user/viewer.elf user/wmstress.elf user/settings.elf user/fetch.elf \
               user/tlsconnect.elf user/httpsget.elf
-LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o user/libc/clip.o user/libc/http.o
+LIBC_OBJ   := user/libc/string.o user/libc/printf.o user/libc/malloc.o user/libc/net.o user/libc/clip.o user/libc/http.o user/libc/ssp.o
 # Portable graphics/compositor code, built for userspace and linked into wserver.
 WM_OBJ     := user/gfx_u.o user/desktop_u.o user/wm_u.o
 
@@ -53,7 +57,12 @@ $(KERNEL): $(OBJ) linker.ld
 	@echo "Built $(KERNEL)"
 
 # --- user programs (crt0 provides _start and calls main) ---
+# Phase 19.2: userspace gets -fstack-protector-strong too (runtime lives in
+# user/libc/ssp.c, linked into every program via LIBC_OBJ) -- the TLS/HTTP
+# parsers built from TLS_U_SRC are exactly the code most exposed to hostile
+# input, and 17.5.1's fuzzing already found one real stack overflow by hand.
 UCFLAGS := --target=$(TARGET) -m32 -ffreestanding -nostdlib -fno-pic -fno-pie \
+           -fstack-protector-strong \
            -mno-sse -mno-mmx -mno-sse2 \
            -O2 -MMD -MP -Iinclude -Iuser -Ikernel
 
@@ -157,7 +166,7 @@ $(DISK): $(USER_PROGS) user/poem.txt user/about.txt tools/mkfat32.py
 	    CAT.ELF user/cat.elf GREP.ELF user/grep.elf ORPHAN.ELF user/orphan.elf \
 	    NBTEST.ELF user/nbtest.elf WAITTEST.ELF user/waittest.elf \
 	    SENDWIN.ELF user/sendwintest.elf PROFSTAT.ELF user/profstat.elf \
-	    KSTKTEST.ELF user/kstacktest.elf \
+	    KSTKTEST.ELF user/kstacktest.elf CANARYT.ELF user/canarytest.elf \
 	    NETD.ELF user/netd.elf ECHOSRV.ELF user/echosrv.elf ECHOCLI.ELF user/echocli.elf \
 	    SAVE.ELF user/save.elf WSERVER.ELF user/wserver.elf TERM.ELF user/term.elf \
 	    DOCK.ELF user/dock.elf FILES.ELF user/files.elf VIEWER.ELF user/viewer.elf \

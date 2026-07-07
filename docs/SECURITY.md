@@ -3898,3 +3898,122 @@ test: crypto/tls/x509/url/crc32/inflate/gzip/h2; `tools/prof_qemu.py`;
 `tools/dns_cache_qemu.py`; `tools/tls_resume_qemu.py`) all still pass --
 this touches every thread this kernel creates, so breadth mattered more
 than depth here.
+
+## Step 19.2 — stack canaries: kernel and userspace
+
+**What.** Both build trees now compile with `-fstack-protector-strong`
+(kernel `CFLAGS` and userspace `UCFLAGS` both previously pinned the
+protector OFF): every function with a local array or address-taken local
+gets a hidden canary word between its locals and its saved ebp/return
+address, re-checked on return. A mismatch means the frame was overwritten;
+the check fires BEFORE the corrupted return address can be used. This is
+the layer 19.1's guard page architecturally cannot provide: the guard page
+catches an overflow that runs off the END of the stack's mapped pages,
+but says nothing about an overflow that stays inside them — a 64-byte
+buffer overrun by 64 bytes corrupts its own frame's return address and
+never comes near the guard page. 17.5.1 already found exactly this bug
+class for real (tools/h2_test.c's `check_hex()` overflow, silent through
+every prior run until ASan caught it on the host); canaries are the
+in-guest, always-on version of that detection.
+
+**Freestanding runtime, kernel side** (arch/i386/stack_protector.c/.h).
+clang targeting bare `i686-elf` emits references to a global
+`__stack_chk_guard` and calls `__stack_chk_fail()` on mismatch; nothing
+provides those in a `-nostdlib` build, so the kernel now does. The fail
+handler prints `*** KERNEL STACK SMASHING DETECTED` with the failing
+function's address (`__builtin_return_address(0)` — the one word the
+corruption is guaranteed NOT to have reached, since the call that pushed
+it happens after the check compares) and halts; a frame whose canary is
+gone cannot be safely returned through, so halting is the only honest
+option in ring 0. The guard is reseeded once at boot from the TSC
+(`stack_protector_init()`, the first statement in `kernel_main()`) — no
+RNG dependency, per-boot unpredictability. The one reseed hazard is
+documented in the init contract: any function with a frame alive ACROSS
+the reseed would compare its old copy against the new value and die
+falsely; at that point in boot the only such frame is `kernel_main()`
+itself, which never returns, so its check never runs.
+
+**Per-thread canary ABI** (kernel/scheduler.c). A single fixed guard
+would mean every thread checks against the same value forever. Instead
+`thread_t` carries `stack_canary = stack_canary_for(tid, stack_base)` — a
+deterministic hash (Knuth multiplicative mix + xorshift avalanche) of the
+boot seed, the tid and the stack base: no rand(), reproducible within a
+boot, different across boots and across threads — and `do_switch()` (and
+`thread_zombie_and_yield()`'s inline switch) writes the INCOMING thread's
+value into the global `__stack_chk_guard` on every context switch. That
+is coherent because a frame's canary is pushed and checked only while its
+own thread executes, and the global holds that thread's value for the
+whole window; the boot thread's canary is set to the already-reseeded
+global (its frames were pushed against it), and IRQ handler frames
+complete within the thread they interrupted. This is the same trick
+Linux's !SMP x86 stack protector uses, for the same reason.
+
+**Stack-END canary** (second, independent layer). alloc_thread() writes
+the thread's canary value into the lowest word of its stack — directly
+above 19.1's guard page — and it is checked at exactly three cheap
+chokepoints, never in a hot loop: context switch (`do_switch()`), syscall
+exit (`syscall_handler()`'s tail, one load+compare per syscall), and
+`thread_free()`. It catches the case both other layers miss: a write that
+reached the very bottom of the mapped stack without crossing into the
+guard page and without being a compiler-visible frame overflow (e.g. a
+large memset through a pointer, or an alloca-style skip landing short of
+the boundary).
+
+**Stack high-water mark** (profiling hook, same commit). `do_switch()`
+also samples the OUTGOING thread's live ESP (the in-register value, not
+the stale `thread->esp`, which `switch_task()` only updates as it leaves)
+and records the deepest `kstack_top - esp` seen into the new
+`kernel_prof.kstack_max_used` counter, surfaced by `profstat` and parsed
+by tools/perf_characterize.py. Switch points are where stacks are deepest
+in practice (every blocking path ends in one), but a deep chain that
+never blocks or preempts at its deepest frame is not sampled — the field
+is documented as a lower bound, not an exact peak. (A measured value from
+a real boot is recorded at the end of this step, below.)
+
+**Userspace.** UCFLAGS gets the same flag; the runtime lives in
+user/libc/ssp.c (linked into every program via LIBC_OBJ, including the
+whole freestanding TLS/HTTP/2 stack built from TLS_U_SRC — precisely the
+code that parses hostile network input). One honest difference, stated in
+the file: the userspace guard is a FIXED constant, because crt0 jumps
+straight to main with no libc init hook and Aurora has no getrandom()
+yet — it reliably catches accidental corruption (the common case) but a
+targeted exploit that reads the binary knows the value; per-process
+entropy belongs to the future ASLR phase. A smashed process prints
+`*** stack smashing detected` and `_exit(134)`s (128+SIGABRT by
+convention) — the process dies, the OS does not.
+
+**Acceptance test** (SYS_DEBUG_STACK_SMASH=49, user/canarytest.c,
+tools/canary_qemu.py — permanent, like guard_page_qemu.py). Phase 1
+smashes a userspace buffer in a fork()ed child: the child aborts with
+status 134, the parent (and the OS) keep running. Phase 2 calls the new
+syscall, which overruns a 64-byte kernel frame buffer by 64 bytes through
+a volatile pointer with a volatile length (so -O2 can neither prove UB
+nor delete the write): far enough to clobber the compiler canary, and
+deliberately nowhere near the guard page, so the resulting halt is
+attributable to THIS phase's mechanism alone. The test also asserts the
+halt text is the canary diagnostic and NOT "KERNEL STACK OVERFLOW" /
+"DOUBLE FAULT" / a generic exception — a regression in either 19.1 or
+19.2 shows up in exactly one of the two acceptance tests, not smeared
+across both.
+
+**What each layer now catches** (the full kernel-stack model):
+
+| corruption shape                                  | caught by       |
+|---------------------------------------------------|-----------------|
+| overflow past the end of the mapped stack          | guard page (19.1), first OOB write |
+| overflow with ESP itself left invalid              | task-gate #DF handler (19.1) |
+| in-frame overrun reaching the return address       | compiler canary (19.2), at return |
+| write reaching the stack's last word, not crossing | stack-end canary (19.2), at switch/syscall-exit/free |
+| creeping depth growth (no corruption yet)          | kstack_max_used watermark (19.2), observable in profstat |
+
+Verified: tools/canary_qemu.py ALL PASS (both phases, correct halt text);
+tools/guard_page_qemu.py still ALL PASS (the two debug halts stay
+distinct); full host suite (all 24 targets: crypto/tls/tls-trace/crc32/
+inflate/gzip/h2/h2-san/h2-fuzz-san/x509/rsa/p256/p384/ecdsa/ecdsa384/url/
+cookiejar/base64/ca-roots/dns-cache/dhcp/rxring/tcp-reassembly/tcp-window)
+ALL PASS; QEMU regression under real scheduler load — prof_qemu,
+tcp_sendwin_qemu, keepalive_qemu, securehttps_qemu, h2_reuse_qemu,
+h2_large_qemu (1/5/20 MB transfers, thousands of context switches with
+the per-thread guard swap active) — ALL PASS. The per-thread swap
+survived every fork/exec/block/IRQ-preemption path in the suite with
+zero false positives.

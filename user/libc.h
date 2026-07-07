@@ -82,6 +82,7 @@ static inline int   tcpstat(struct tcp_stats *out)      { return _syscall(SYS_TC
 /* Fill *out with Phase 18.5.2 kernel profiling counters (scheduler/TCP/FAT/memcpy). 0/-1. */
 static inline int   profstat(struct kernel_prof *out)   { return _syscall(SYS_PROFSTAT, (int)out, 0, 0); }
 static inline int   debug_kstack_overflow(void)         { return _syscall(SYS_DEBUG_KSTACK_OVERFLOW, 0, 0, 0); }
+static inline int   debug_stack_smash(void)             { return _syscall(SYS_DEBUG_STACK_SMASH, 0, 0, 0); }
 /* AF_INET stream sockets over the TCP stack. socket -> connect -> send/recv
  * (= write/read) -> close. inet_connect resolves the host (DNS) and opens the
  * connection; returns 0, -2 (DNS), -3 (connect). */

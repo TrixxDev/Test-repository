@@ -28,6 +28,12 @@ thread_t *thread_create_trampoline(uint32_t pd_phys, uint32_t start_eip, void *a
 /* Make a thread created via the user/trampoline helpers runnable. */
 void thread_start(thread_t *t);
 
+/* Phase 19.2: verify the CURRENT thread's stack-end canary (the word just
+ * above its guard page); halts with a diagnostic on mismatch. Called from
+ * the syscall exit path -- context switch and thread_free() run the same
+ * check internally. Deliberately not called anywhere hot. */
+void thread_kstack_end_check(void);
+
 void schedule(void);          /* yield to another runnable thread */
 void thread_block(void);      /* mark current BLOCKED + yield (call with IF off) */
 void thread_wake(thread_t *t);

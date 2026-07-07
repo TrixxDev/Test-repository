@@ -6,6 +6,7 @@
 #include "pmm.h"
 #include "prof.h"
 #include "kio.h"
+#include "stack_protector.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -89,6 +90,18 @@ struct thread {
                                * instead and has no guard page) */
     int      kstack_slot;   /* index into kstack_slot_used[], or -1 if this
                                * thread's stack isn't guard-paged (boot thread) */
+    uint32_t stack_canary;  /* Phase 19.2: this thread's own canary value.
+                               * Two uses: (1) do_switch() writes it into the
+                               * global __stack_chk_guard on switch-in, so
+                               * every -fstack-protector frame this thread
+                               * pushes checks against a per-thread value;
+                               * (2) the same value is stored in the lowest
+                               * word of the kernel stack (directly above the
+                               * guard page) as a stack-END canary, checked
+                               * at context switch / syscall exit / free --
+                               * a cheap early sensor for writes that reached
+                               * the very bottom without crossing into the
+                               * guard page. */
     int      tid;
     int      state;
     void    *proc;          /* owning process (PCB), or NULL for kernel threads */
@@ -151,6 +164,14 @@ void scheduler_init(void)
     main_thread.kstack_top = (uint32_t)(main_kstack + sizeof(main_kstack));
     main_thread.kstack     = NULL;
     main_thread.kstack_slot = -1;   /* boot thread: no guard page, see above */
+    /* Phase 19.2: the boot thread's canary must equal the CURRENT global
+     * guard, not a fresh value -- its frames (kernel_main and everything
+     * under it) were already pushed against __stack_chk_guard as reseeded
+     * by stack_protector_init(), and do_switch() will restore this value
+     * every time the boot thread is switched back in. A different value
+     * here would make the first process_wait() resume die on a false
+     * canary mismatch. */
+    main_thread.stack_canary = __stack_chk_guard;
     main_thread.state      = TS_READY;
     main_thread.proc       = NULL;
     main_thread.next       = &main_thread;
@@ -224,6 +245,13 @@ static thread_t *alloc_thread(uint32_t pd_phys, uint32_t start_eip)
     t->kstack       = (void *)stack_va;
     t->kstack_slot  = slot;
     t->tid        = next_tid++;
+    /* Phase 19.2: per-thread canary (see the struct field comment), plus a
+     * copy in the stack's lowest word -- the stack-end canary. build_stack()
+     * only touches the top of the stack, so this word survives until
+     * something writes all the way down to the last 4 bytes above the guard
+     * page. Costs the stack its bottom word of usable space, nothing else. */
+    t->stack_canary = stack_canary_for((uint32_t)t->tid, stack_va);
+    *(uint32_t *)stack_va = t->stack_canary;
     t->pd_phys    = pd_phys;
     t->kstack_top = stack_va + STACK_SIZE;
     t->state      = TS_READY;
@@ -289,9 +317,53 @@ static thread_t *next_runnable(thread_t *from)
     return (from->state == TS_READY) ? from : NULL;
 }
 
+/* Phase 19.2: halt if `t`'s stack-END canary (the word directly above its
+ * guard page, written by alloc_thread()) has been overwritten. Checked at
+ * the three cheap chokepoints -- context switch, syscall exit (via
+ * thread_kstack_end_check()), and thread_free() -- NOT in any hot loop.
+ * This is the early sensor for corruption that reached the very bottom of
+ * the stack without crossing into the guard page; per-frame corruption
+ * higher up is the compiler canary's job, crossing the boundary is the
+ * guard page's. Halts rather than kills: a thread whose deepest kernel
+ * frame area is corrupt cannot be safely unwound. */
+static void kstack_end_check(thread_t *t)
+{
+    if (!t->kstack || *(uint32_t *)t->kstack == t->stack_canary)
+        return;
+    kprintf("\n*** KERNEL STACK END CANARY smashed: tid=%d wrote down to the last\n"
+            "    word above its guard page without crossing it (found 0x%x,\n"
+            "    expected 0x%x)\n",
+            t->tid, *(uint32_t *)t->kstack, t->stack_canary);
+    kprintf("*** System halted.\n");
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}
+
+void thread_kstack_end_check(void)
+{
+    kstack_end_check(current);
+}
+
 static void do_switch(thread_t *prev, thread_t *next)
 {
     g_kprof.sched_switches++;   /* Phase 18.5.2: a real context switch, not just a schedule() call */
+    kstack_end_check(prev);
+    /* Phase 19.2: kernel-stack high-water mark. We are still on prev's
+     * stack right here, so live ESP (not the stale prev->esp, which
+     * switch_task() only updates as it leaves) measures prev's true
+     * current depth, scheduler frames included. */
+    uint32_t esp_now;
+    __asm__ volatile("mov %%esp, %0" : "=r"(esp_now));
+    uint32_t used = prev->kstack_top - esp_now;
+    if (used > g_kprof.kstack_max_used)
+        g_kprof.kstack_max_used = used;
+    /* Phase 19.2: make the compiler canary per-thread -- every frame next
+     * has ever pushed stored ITS value of the guard, and no frame of next's
+     * runs checks except while next is executing, so swapping here keeps
+     * every thread's push/check pairs self-consistent (see
+     * stack_protector.h). Must happen before switch_task(): the first
+     * C prologue on the other side already reads the guard. */
+    __stack_chk_guard = next->stack_canary;
     tss_set_kernel_stack(next->kstack_top);
     if (next->pd_phys != prev->pd_phys)
         vmm_switch_address_space(next->pd_phys);
@@ -492,6 +564,9 @@ void thread_zombie_and_yield(void)
     thread_t *next = next_runnable(prev);   /* main thread is always runnable */
     current = next;
 
+    kstack_end_check(prev);                 /* Phase 19.2: last chance to catch
+                                             * corruption the dying thread did */
+    __stack_chk_guard = next->stack_canary; /* Phase 19.2: same swap as do_switch() */
     tss_set_kernel_stack(next->kstack_top);
     if (next->pd_phys != prev->pd_phys)
         vmm_switch_address_space(next->pd_phys);
@@ -516,6 +591,9 @@ void thread_free(thread_t *t)
     t->next->prev = t->prev;
     nthreads--;
     __asm__ volatile("sti");
+    kstack_end_check(t);    /* Phase 19.2: teardown is the final chokepoint --
+                             * catches a thread that corrupted its stack
+                             * bottom and exited before ever switching again */
     if (t->kstack) {                            /* NULL only for the boot thread */
         uint32_t base = (uint32_t)t->kstack;
         for (int i = 0; i < KSTACK_PAGES; i++) {

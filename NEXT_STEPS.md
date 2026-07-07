@@ -219,12 +219,18 @@ protocol" -- it's raising the quality of the whole platform. Priority order
   Directly motivated by a real bug this project already hit once
   (`fs/fat32.c`'s `fat_write_impl`/`fat_update_dirent` double-buffer
   overflow, fixed at the time with no protection added).
-- [ ] **19.2 — Stack canaries.** `-fstack-protector` (currently
-  `-fno-stack-protector` in both `CFLAGS` and user `UCFLAGS`) plus a
-  `__stack_chk_fail` handler; smaller and lower-risk than 19.1, catches
-  overflows that corrupt a return address without ever touching a guard
-  page (a local buffer overflowing into other locals/saved registers on
-  the SAME stack, not off the end of it).
+- [x] **19.2 — Stack canaries.** DONE, three layers (see docs/SECURITY.md
+  "Step 19.2"): `-fstack-protector-strong` kernel- and userspace-wide with
+  a freestanding runtime (arch/i386/stack_protector.c, user/libc/ssp.c);
+  a PER-THREAD canary value (hash of boot-TSC seed/tid/stack base, no
+  rand()) that do_switch() swaps into `__stack_chk_guard` at every context
+  switch, Linux-!SMP-style; and a stack-END canary word directly above
+  19.1's guard page, checked at context switch / syscall exit /
+  thread_free. Plus a `kstack_max_used` high-water-mark counter in
+  kernel_prof (profstat), sampled at switch points. Acceptance:
+  tools/canary_qemu.py (userspace smash -> child exits 134, OS survives;
+  kernel smash -> "KERNEL STACK SMASHING DETECTED" halt, provably the
+  canary and not the guard page).
 - [ ] **19.3 — Shared-memory surfaces + Clipboard.** The single biggest
   desktop-experience win available: replace the window server's per-frame
   IPC-then-copy-into-VRAM path with an app-owned shared framebuffer +
@@ -282,7 +288,9 @@ Superseded by Phase 19 above (the desktop track's remaining items --
 Clipboard, shared-memory surfaces -- are now 19.3, sequenced after the
 kernel-hardening work that directly follows a bug this project already
 hit): networking (8B) and HTTP/1.1+HTTP/2+TLS 1.3 are long since DONE, far
-past what this section used to describe, and 19.1 (guard pages) just
-landed. **Next: 19.2 — stack canaries** (small, low-risk, a natural pair
-with 19.1), then 19.3 (shared-memory surfaces + Clipboard) as the next
-big user-visible push.
+past what this section used to describe, and 19.1 (guard pages) + 19.2
+(stack canaries) have both landed -- the kernel-stack memory-safety model
+is now: guard page (past-the-end), task-gate #DF (ESP-invalid), compiler
+canary (in-frame), stack-end canary (bottom word), watermark counter
+(depth trend). **Next: 19.3 — shared-memory surfaces + Clipboard**, the
+big user-visible desktop push.

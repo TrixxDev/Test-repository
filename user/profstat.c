@@ -38,5 +38,6 @@ int main(void)
            ns.rx_irqs, ns.rx_packets, ns.rx_bytes, ns.rx_dropped, ns.rx_errors);
     printf("tx_packets=%u tx_bytes=%u\n", ns.tx_packets, ns.tx_bytes);
     printf("wnd_zero_events=%u wnd_closed_us=%u\n", p.wnd_zero_events, p.wnd_closed_us);
+    printf("kstack_max_used=%u\n", p.kstack_max_used);
     return 0;
 }

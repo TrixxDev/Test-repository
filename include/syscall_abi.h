@@ -192,6 +192,16 @@ struct kernel_prof {
      * anything else (RTT, its own pacing, ...). */
     unsigned wnd_zero_events;
     unsigned wnd_closed_us;
+
+    /* Phase 19.2: kernel-stack high-water mark (bytes), sampled at every
+     * context switch (top-of-stack minus live esp at the moment do_switch()
+     * runs). Switch points are where stacks are deepest in practice -- every
+     * blocking path ends in one -- but a deep call chain that never blocks
+     * or gets preempted between its deepest frame and its return is NOT
+     * sampled, so treat this as a lower bound on true peak usage, not an
+     * exact figure. Against KSTACK_PAGES*4096 it answers "how much headroom
+     * do the 8 KiB stacks actually have" with data instead of folklore. */
+    unsigned kstack_max_used;
 };
 
 /* ---- directory enumeration (SYS_READDIR) ---- */
@@ -251,7 +261,17 @@ struct dirent {
                          * kernel/scheduler.c and tools/guard_page_qemu.py).
                          * Not reachable from anything but this explicit call. */
 
-#define SYS_MAX    49   /* one past the last valid syscall number    */
+#define SYS_DEBUG_STACK_SMASH 49
+                        /* debug_stack_smash() -> never returns (Phase 19.2):
+                         * the canary-layer counterpart of SYS_DEBUG_KSTACK_
+                         * OVERFLOW -- overruns a small kernel-frame buffer by
+                         * 64 bytes, far enough to clobber the compiler-
+                         * inserted stack canary but nowhere near the guard
+                         * page, verifying -fstack-protector-strong halts with
+                         * "KERNEL STACK SMASHING DETECTED" on its own (see
+                         * arch/i386/stack_protector.c, tools/canary_qemu.py). */
+
+#define SYS_MAX    50   /* one past the last valid syscall number    */
 
 /* ---- socket layer ---- */
 #define AF_LOOPBACK  1  /* in-machine sockets brokered by netd       */
