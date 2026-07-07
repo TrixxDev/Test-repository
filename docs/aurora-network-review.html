@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuroraOS — Network Stack Review (L2–L4: VirtIO-Net → DNS)</title>
+<style>
+  :root{
+    --bg0:#0e1330; --bg1:#241a4a; --bg2:#3a2168;
+    --card:#161a38cc; --card2:#1c2142;
+    --ink:#e9ecf7; --mut:#a6abc8; --dim:#7d83a6;
+    --line:#2c3360;
+    --blue:#5b86ff; --green:#34d058; --amber:#f5b945; --pink:#c46cff; --red:#ff5d5d;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink);
+    background:
+      radial-gradient(1200px 700px at 15% -10%, #2b3a86 0%, transparent 55%),
+      radial-gradient(1100px 800px at 100% 0%, #4a2d7a 0%, transparent 50%),
+      linear-gradient(160deg, var(--bg0), var(--bg1) 55%, var(--bg2));
+    background-attachment:fixed;
+    -webkit-font-smoothing:antialiased;
+    padding:0 0 80px;
+  }
+  .wrap{max-width:980px;margin:0 auto;padding:0 22px}
+  .menubar{
+    display:flex;align-items:center;gap:22px;height:30px;padding:0 18px;
+    background:#f4f5fadd;color:#1b1d28;font-size:13px;font-weight:600;
+    backdrop-filter:blur(6px);position:sticky;top:0;z-index:5;
+  }
+  .menubar .dot{width:13px;height:13px;border-radius:50%;
+    background:radial-gradient(circle at 35% 30%,#7aa0ff,#3366ff)}
+  .menubar .sp{flex:1}
+  .menubar .mut{color:#5b6072;font-weight:500}
+
+  header.hero{padding:54px 0 26px;text-align:center}
+  .badge{display:inline-block;font:600 12px/1 var(--mono);letter-spacing:.12em;
+    text-transform:uppercase;color:#cfe0ff;background:#3366ff22;border:1px solid #3366ff55;
+    padding:7px 12px;border-radius:999px}
+  h1{font-size:40px;margin:18px 0 6px;letter-spacing:-.5px}
+  h1 .x{background:linear-gradient(90deg,#7aa0ff,#c46cff);-webkit-background-clip:text;
+    background-clip:text;color:transparent}
+  .sub{color:var(--mut);font-size:16px;margin:0 auto;max-width:660px}
+  .meta{margin-top:18px;color:var(--dim);font:12px/1.5 var(--mono)}
+  .meta code{color:#cfe0ff}
+
+  .verdict{
+    margin:30px 0 8px;padding:20px 22px;border-radius:16px;
+    background:linear-gradient(120deg,#34d05818,#5b86ff14);
+    border:1px solid #34d05840;display:flex;gap:16px;align-items:flex-start}
+  .verdict .k{font-size:26px;line-height:1}
+  .verdict b{color:#bff0c8}
+
+  h2{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);
+    margin:46px 0 16px;font-weight:700}
+
+  .stack{display:flex;flex-direction:column;gap:8px}
+  .layer{display:flex;align-items:center;gap:14px;padding:13px 18px;border-radius:12px;
+    border:1px solid var(--line);background:var(--card)}
+  .layer .nm{font-weight:600;min-width:120px}
+  .layer .ds{color:var(--mut);font-size:13.5px;flex:1}
+  .layer .st{font:600 11px/1 var(--mono);padding:5px 9px;border-radius:7px;white-space:nowrap}
+  .st.done{background:#34d05822;color:#9fe9af;border:1px solid #34d05855}
+  .st.next{background:#5b86ff22;color:#bcd0ff;border:1px solid #5b86ff55}
+  .st.wait{background:#f5b94518;color:#f4d79a;border:1px solid #f5b94544}
+  .layer.done{border-color:#34d05840}
+  .layer.hw{background:linear-gradient(120deg,#5b86ff12,#c46cff10)}
+  .arrowcol{text-align:center;color:var(--dim);font:12px/1 var(--mono);margin:-3px 0}
+
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+  @media(max-width:720px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px;
+    backdrop-filter:blur(8px)}
+  .card h3{margin:0 0 12px;font-size:15px;display:flex;align-items:center;gap:9px}
+  .card h3 .ic{width:9px;height:9px;border-radius:3px}
+  .card ul{margin:0;padding:0;list-style:none}
+  .card li{padding:5px 0 5px 22px;position:relative;color:var(--mut);font-size:14px;
+    border-top:1px solid #ffffff0a}
+  .card li:first-child{border-top:0}
+  .card li::before{content:"";position:absolute;left:2px;top:12px;width:7px;height:7px;border-radius:50%;
+    background:var(--green);box-shadow:0 0 0 3px #34d0581f}
+  .card li span{color:var(--dim);font:12px/1.4 var(--mono)}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;
+    background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  th,td{text-align:left;padding:11px 14px;border-top:1px solid var(--line);vertical-align:top}
+  th{background:#ffffff08;color:var(--mut);font-size:12px;letter-spacing:.05em;text-transform:uppercase}
+  tr td:first-child code{color:#cfe0ff}
+  td code{font:12px/1.5 var(--mono);color:var(--blue)}
+  .ok{color:var(--green);font-weight:600;white-space:nowrap}
+
+  pre.term{background:#0a0d22;border:1px solid var(--line);border-radius:12px;padding:16px 18px;
+    overflow:auto;font:12.5px/1.7 var(--mono);color:#cfe0ff;margin:0}
+  pre.term .g{color:#9fe9af}
+  pre.term .d{color:var(--dim)}
+  pre.term .b{color:#bcd0ff}
+  pre.term .y{color:#f4d79a}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:720px){.two{grid-template-columns:1fr}}
+
+  .score{display:grid;grid-template-columns:1fr 1fr;gap:10px 26px}
+  @media(max-width:720px){.score{grid-template-columns:1fr}}
+  .row{display:flex;align-items:center;gap:12px}
+  .row .lbl{width:170px;color:var(--mut);font-size:14px}
+  .bar{flex:1;height:8px;border-radius:6px;background:#ffffff12;overflow:hidden}
+  .bar i{display:block;height:100%;border-radius:6px;
+    background:linear-gradient(90deg,#5b86ff,#34d058)}
+  .row .v{width:42px;text-align:right;font:600 12px/1 var(--mono);color:#cfe0ff}
+  .row.low .bar i{background:linear-gradient(90deg,#f5b945,#ff5d5d)}
+  .row.zero .bar i{background:#ffffff14}
+  .row.zero .v{color:var(--dim)}
+
+  .flow{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-top:6px}
+  .flow .n{font:12px/1 var(--mono);padding:7px 10px;border-radius:7px;background:#ffffff0d;
+    border:1px solid var(--line);color:var(--mut)}
+  .flow .n.done{color:#bff0c8;border-color:#34d05855;background:#34d05814}
+  .flow .n.next{color:#bcd0ff;border-color:#5b86ff55;background:#5b86ff12}
+  .flow .a{color:var(--dim)}
+
+  .next{background:var(--card2);border:1px solid var(--line);border-left:3px solid var(--blue);
+    border-radius:12px;padding:18px 20px;margin-top:8px}
+  .next ol{margin:8px 0 0;padding-left:20px;color:var(--mut)}
+  .next code{font:12px/1.5 var(--mono);color:#cfe0ff;background:#ffffff0d;padding:1px 6px;border-radius:5px}
+  .note{margin-top:16px;padding:14px 16px;border-radius:10px;background:#5b86ff12;border:1px solid #5b86ff38}
+  .note b{color:#bcd0ff}
+  .note p{margin:6px 0 0;color:var(--mut);font-size:13.5px}
+
+  footer{margin-top:48px;text-align:center;color:var(--dim);font-size:12.5px}
+  footer .mono{font-family:var(--mono)}
+  a{color:#9fb8ff;text-decoration:none}
+</style>
+</head>
+<body>
+
+<div class="menubar">
+  <span class="dot"></span><b>Aurora</b>
+  <span class="mut">File</span><span class="mut">Edit</span><span class="mut">View</span>
+  <span class="mut">Network</span><span class="mut">Help</span>
+  <span class="sp"></span><span class="mut">Network Review · L2–L4</span>
+</div>
+
+<div class="wrap">
+
+  <header class="hero">
+    <span class="badge">L2–L4 + TCP handshake · data next</span>
+    <h1>AuroraOS <span class="x">Network Stack</span></h1>
+    <p class="sub">From a bare PCI device to resolving a real domain name and
+       opening a TCP connection: VirtIO-Net, Ethernet, ARP, IPv4, ICMP, UDP, DNS
+       and the TCP three-way handshake — each built as a small, individually
+       verified increment in QEMU.</p>
+    <div class="meta">
+      device <code>virtio-net-pci</code> · runtime <code>qemu-system-i386</code> ·
+      net <code>10.0.2.15</code> · gw <code>10.0.2.2</code> · dns <code>10.0.2.3</code>
+    </div>
+  </header>
+
+  <div class="verdict">
+    <div class="k">🌐</div>
+    <div>AuroraOS now <b>pings the gateway, exchanges UDP datagrams with the host,
+      resolves a real domain name from the internet</b> (<code>example.com →
+      104.20.23.154</code>), and <b>opens a TCP connection to ESTABLISHED</b>
+      (SYN → SYN-ACK → ACK). The whole L2–L4 stack plus the TCP handshake is live
+      and verified. What remains is TCP <b>data transfer + teardown</b> — then a
+      real <code>GET /</code>. The transport was hardened <i>before</i> any protocol
+      logic, so each layer sits on a proven base with no DMA risk.</div>
+  </div>
+
+  <h2>The stack — as built</h2>
+  <div class="stack">
+    <div class="layer done"><span class="nm">TCP</span>
+      <span class="ds">full TCB + RFC state enum · <b>handshake → ESTABLISHED</b> · data/teardown next</span>
+      <span class="st done">8.1 ✓</span></div>
+    <div class="arrowcol">▲ ▼</div>
+    <div class="layer done"><span class="nm">DNS</span>
+      <span class="ds">typed <code>dns_query(name, type)</code> → <b>real A record</b> via 10.0.2.3</span>
+      <span class="st done">7.5 ✓</span></div>
+    <div class="arrowcol">▲ ▼</div>
+    <div class="layer done"><span class="nm">UDP</span>
+      <span class="ds"><code>udp_send</code> / <code>udp_bind</code> · port demux · NAT round-trip with the host</span>
+      <span class="st done">Phase 7 ✓</span></div>
+    <div class="arrowcol">▲ ▼</div>
+    <div class="layer done"><span class="nm">ICMP</span>
+      <span class="ds">echo request + reply · <b>ping 10.0.2.2 → 4/4</b></span>
+      <span class="st done">Phase 6 ✓</span></div>
+    <div class="arrowcol">▲ ▼</div>
+    <div class="layer done"><span class="nm">IPv4</span>
+      <span class="ds">RX validate (v4/IHL/non-frag/checksum/dst) · TX header+checksum · ARP routing</span>
+      <span class="st done">Phase 6 ✓</span></div>
+    <div class="arrowcol">▲ ▼</div>
+    <div class="layer done"><span class="nm">ARP</span>
+      <span class="ds">32-entry cache · EMPTY/PENDING/RESOLVED · 60 s TTL · replies to who-has</span>
+      <span class="st done">Phase 5 ✓</span></div>
+    <div class="arrowcol">▲ ▼</div>
+    <div class="layer done"><span class="nm">Ethernet</span>
+      <span class="ds"><code>eth_send</code>/<code>eth_input</code> · EtherType dispatch · runt padding</span>
+      <span class="st done">Phase 4 ✓</span></div>
+    <div class="arrowcol">▲ ▼ &nbsp;<span class="d">net_send_frame / net_recv_frame</span></div>
+    <div class="layer done hw"><span class="nm">VirtIO-Net</span>
+      <span class="ds">virtqueues in identity-mapped DMA · IRQ ack · bounds-checked · counters</span>
+      <span class="st done">hardened ✓</span></div>
+    <div class="arrowcol">▲ ▼</div>
+    <div class="layer done hw"><span class="nm">PCI</span>
+      <span class="ds">config space · BAR0 · bus-master · device discovery</span>
+      <span class="st done">✓</span></div>
+  </div>
+
+  <h2>Proof — live on QEMU user-net</h2>
+  <div class="two">
+    <pre class="term"><span class="b">[icmp]</span> PING 10.0.2.2 : 4 packets
+<span class="b">[icmp]</span> reply seq=1 time=909 us
+<span class="b">[icmp]</span> reply seq=2 time=124 us
+<span class="b">[icmp]</span> reply seq=3 time=111 us
+<span class="b">[icmp]</span> reply seq=4 time=126 us
+<span class="b">[icmp]</span> 4/4 replies -- <span class="g">PING OK</span>
+
+<span class="b">[dns]</span> example.com -> <span class="g">104.20.23.154</span>
+<span class="d"># a real A record, resolved by Aurora itself</span>
+
+<span class="b">[tcp]</span> connect 10.0.2.2:80
+<span class="b">[tcp]</span> state=ESTABLISHED -- <span class="g">HANDSHAKE OK</span>
+<span class="d"># pcap: SYN -> SYN|ACK -> ACK</span></pre>
+    <pre class="term"><span class="d"># tools/udptest.py  (host nc -u :9999)</span>
+[host] &lt;- guest: <span class="g">b'hello from aurora\n'</span>
+[host] -&gt; guest: reply from host
+<span class="b">[udp]</span> rx 16 bytes from 10.0.2.2:9999:
+       "reply from host"
+<span class="b">[udp]</span> 1 datagram -- <span class="g">UDP RX OK</span>
+<span class="d"># pcap: UDP 9999-&gt;9999 out, in, echo
+# both directions over one NAT mapping</span></pre>
+  </div>
+
+  <h2>What each layer added</h2>
+  <div class="grid">
+    <div class="card">
+      <h3><span class="ic" style="background:#5b86ff"></span>Transport &amp; framing</h3>
+      <ul>
+        <li>PCI discovery + VirtIO-Net bring-up to DRIVER_OK</li>
+        <li>Hardened RX/TX <span>untrusted device fields bounded; drain-loop; IRQ only acks</span></li>
+        <li>DMA without an allocator <span>identity-mapped static buffers (phys==virt)</span></li>
+        <li>Ethernet seam <span>EtherType dispatch; IPv6 later = one case</span></li>
+        <li>Per-interface counters in Settings → System</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3><span class="ic" style="background:#c46cff"></span>ARP — a real service</h3>
+      <ul>
+        <li>32-entry cache, EMPTY/PENDING/RESOLVED</li>
+        <li><code>arp_resolve()</code> hides state from callers <span>the API IPv4/UDP/TCP use</span></li>
+        <li>Learns every sender; answers who-has</li>
+        <li>60 s TTL, lazy expiry; re-ask after 1 s</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3><span class="ic" style="background:#34d058"></span>IPv4 + ICMP</h3>
+      <ul>
+        <li>RX accepts only v4 / IHL≥5 / non-fragment / valid checksum / our IP</li>
+        <li>TX: header + payload + checksum, no options/frag/mcast</li>
+        <li>On-link vs gateway routing via ARP</li>
+        <li>ICMP echo both halves <span>we ping out, host can ping us</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3><span class="ic" style="background:#f5b945"></span>UDP + DNS</h3>
+      <ul>
+        <li><code>udp_send</code> / <code>udp_bind</code> + port demux (no sockets yet)</li>
+        <li>Bidirectional through SLIRP NAT, no hostfwd</li>
+        <li>Typed <code>dns_query(name, type)</code> <span>A today; AAAA/CNAME won't break the API</span></li>
+        <li>Name-compression-aware answer parser</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>This arc — what landed &amp; how it was verified</h2>
+  <table>
+    <tr><th>Commit</th><th>Layer</th><th>Verified</th></tr>
+    <tr><td><code>3271666</code>–<code>1ed6035</code></td><td>PCI + VirtIO-Net TX/RX</td><td class="ok">frames in pcap</td></tr>
+    <tr><td><code>e2ffa5d</code></td><td>Transport hardening + stats (the audit)</td><td class="ok">stats + regressions</td></tr>
+    <tr><td><code>a99e1d9</code></td><td>Ethernet + ARP cache / state machine</td><td class="ok">3 scenarios PASS</td></tr>
+    <tr><td><code>5a62c4f</code></td><td>IPv4 + ICMP echo</td><td class="ok">ping 4/4</td></tr>
+    <tr><td><code>d5898cb</code></td><td>UDP datagrams + round-trip test</td><td class="ok">TX+RX OK</td></tr>
+    <tr><td><code>b69d6a9</code></td><td>DNS resolver (typed) + hostname ping</td><td class="ok">A record resolved</td></tr>
+    <tr><td><code>30945b5</code></td><td>TCP three-way handshake (connect only)</td><td class="ok">ESTABLISHED</td></tr>
+  </table>
+
+  <h2>Maturity — subsystem scorecard</h2>
+  <div class="score">
+    <div class="row"><div class="lbl">Kernel</div><div class="bar"><i style="width:85%"></i></div><div class="v">8.5</div></div>
+    <div class="row"><div class="lbl">Window Server / GUI</div><div class="bar"><i style="width:90%"></i></div><div class="v">9.0</div></div>
+    <div class="row"><div class="lbl">Desktop</div><div class="bar"><i style="width:88%"></i></div><div class="v">8.8</div></div>
+    <div class="row"><div class="lbl">Storage (VFS/FAT32)</div><div class="bar"><i style="width:80%"></i></div><div class="v">8.0</div></div>
+    <div class="row"><div class="lbl">VirtIO-Net + Ethernet</div><div class="bar"><i style="width:80%"></i></div><div class="v">8.0</div></div>
+    <div class="row"><div class="lbl">ARP</div><div class="bar"><i style="width:80%"></i></div><div class="v">8.0</div></div>
+    <div class="row"><div class="lbl">IPv4 / ICMP</div><div class="bar"><i style="width:75%"></i></div><div class="v">7.5</div></div>
+    <div class="row"><div class="lbl">UDP / DNS</div><div class="bar"><i style="width:70%"></i></div><div class="v">7.0</div></div>
+    <div class="row low"><div class="lbl">TCP (handshake)</div><div class="bar"><i style="width:30%"></i></div><div class="v">3.0</div></div>
+    <div class="row zero"><div class="lbl">HTTP / TLS</div><div class="bar"><i style="width:0%"></i></div><div class="v">0</div></div>
+  </div>
+  <p style="color:var(--mut);font-size:13.5px;margin-top:14px">
+    For the first time in the project, the weak spot is neither the kernel nor the
+    graphics — it is the network <i>above</i> the transport layer, and that gap is
+    now down to a single (large) piece. After UDP and DNS, the layers that build on
+    them — NTP, syslog, discovery — come cheaply; TCP is the last major
+    infrastructure project before AuroraOS can talk to real internet services.</p>
+
+  <h2>Roadmap</h2>
+  <div class="flow">
+    <span class="n done">PCI</span><span class="a">→</span>
+    <span class="n done">VirtIO-Net</span><span class="a">→</span>
+    <span class="n done">Ethernet</span><span class="a">→</span>
+    <span class="n done">ARP</span><span class="a">→</span>
+    <span class="n done">IPv4</span><span class="a">→</span>
+    <span class="n done">ICMP</span><span class="a">→</span>
+    <span class="n done">UDP</span><span class="a">→</span>
+    <span class="n done">DNS</span><span class="a">→</span>
+    <span class="n done">TCP·SYN</span><span class="a">→</span>
+    <span class="n next">TCP·data</span><span class="a">→</span>
+    <span class="n">HTTP</span>
+  </div>
+
+  <div class="next">
+    <b style="color:#cfe0ff">Next step — Phase 8.2: TCP data transfer</b>
+    <ol>
+      <li><b>Done (8.1):</b> three-way handshake → ESTABLISHED, on a full TCB +
+          complete RFC state enum (only CLOSED/SYN_SENT/ESTABLISHED active).</li>
+      <li><b>Next (8.2):</b> <code>send()</code> / <code>recv()</code> over the open
+          connection — sequence/ack bookkeeping and a receive window — proved by a
+          <code>GET / HTTP/1.0</code> returning bytes.</li>
+      <li><b>Then (8.3):</b> teardown — FIN / CLOSE / TIME_WAIT.</li>
+    </ol>
+    <div class="note">
+      <b>Architecture note.</b>
+      <p>The stack lives in the kernel for bring-up. As TCP and user-facing
+        networking arrive, resolution and transport move behind the existing
+        <code>netd</code> boundary so TCP is not hard-wired into the kernel — and an
+        <code>x86_64</code> research branch is worth keeping in mind for when HTTP/TLS
+        and larger workloads start pressing on the i686 ABI. Neither is a migration;
+        both are direction.</p>
+    </div>
+  </div>
+
+  <footer>
+    AuroraOS · Network Stack Review — L2–L4 (VirtIO-Net → Ethernet → ARP → IPv4 → ICMP → UDP → DNS)<br>
+    <span class="mono">verified live in qemu-system-i386 · no-NIC boot graceful · GUI regressions green</span>
+  </footer>
+
+</div>
+</body>
+</html>

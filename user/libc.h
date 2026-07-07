@@ -1,0 +1,129 @@
+/* AuroraOS mini libc — a small, stable userspace API.
+ *
+ * Programs define `int main(int argc, char **argv)`; crt0 calls it and exits
+ * with the return value. System calls follow include/syscall_abi.h. */
+#pragma once
+#include "syscall_abi.h"
+#include <stddef.h>
+#include <stdarg.h>
+
+/* ---- raw system call wrappers ---- */
+static inline int _syscall(int n, int a, int b, int c)
+{
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "b"(a), "c"(b), "d"(c) : "memory");
+    return ret;
+}
+
+static inline int   write(int fd, const void *b, int n) { return _syscall(SYS_WRITE, fd, (int)b, n); }
+static inline int   read(int fd, void *b, int n)        { return _syscall(SYS_READ, fd, (int)b, n); }
+static inline int   open(const char *p, int f)          { return _syscall(SYS_OPEN, (int)p, f, 0); }
+static inline int   close(int fd)                       { return _syscall(SYS_CLOSE, fd, 0, 0); }
+static inline int   fcntl(int fd, int cmd, int arg)     { return _syscall(SYS_FCNTL, fd, cmd, arg); }
+static inline int   fork(void)                          { return _syscall(SYS_FORK, 0, 0, 0); }
+static inline int   execv(const char *p, char **argv)   { return _syscall(SYS_EXEC, (int)p, (int)argv, 0); }
+static inline int   wait(int *status)                   { return _syscall(SYS_WAIT, (int)status, 0, 0); }
+static inline int   wait_nohang(int *status)            { return _syscall(SYS_WAIT, (int)status, WNOHANG, 0); }
+static inline int   kill(int pid)                       { return _syscall(SYS_KILL, pid, 0, 0); }
+static inline int   getpid(void)                        { return _syscall(SYS_GETPID, 0, 0, 0); }
+static inline void  _exit(int c)                        { _syscall(SYS_EXIT, c, 0, 0); }
+static inline int   pipe(int fd[2])                     { return _syscall(SYS_PIPE, (int)fd, 0, 0); }
+static inline int   dup2(int o, int n)                  { return _syscall(SYS_DUP2, o, n, 0); }
+static inline void *sbrk(int incr)                      { return (void *)_syscall(SYS_SBRK, incr, 0, 0); }
+
+/* message-passing IPC + named services */
+static inline int msgsend(int pid, const void *b, int n) { return _syscall(SYS_MSGSEND, pid, (int)b, n); }
+static inline int msgrecv(void *b, int n, int *from)     { return _syscall(SYS_MSGRECV, (int)b, n, (int)from); }
+/* Non-blocking receive: returns n (>=0) if a message was dequeued, or -1 if the
+ * mailbox was empty (would block). Lets an event loop drain a burst of events. */
+static inline int msgrecv_nb(void *b, int n, int *from)  { return _syscall(SYS_MSGRECV, (int)b, n | MSG_NOWAIT, (int)from); }
+/* svc_register defaults to a world-discoverable service (0644); use
+ * svc_register_mode for a private one (e.g. 0600 = root-only lookup). */
+static inline int svc_register_mode(const char *name, int mode) { return _syscall(SYS_REGISTER, (int)name, mode, 0); }
+static inline int svc_register(const char *name)         { return _syscall(SYS_REGISTER, (int)name, 0644, 0); }
+static inline int svc_lookup(const char *name)           { return _syscall(SYS_LOOKUP, (int)name, 0, 0); }
+
+/* sockets (loopback) + poll + uid */
+static inline int socket(int domain, int type)           { return _syscall(SYS_SOCKET, domain, type, 0); }
+static inline int sock_link(int handle_a, int handle_b)  { return _syscall(SYS_SOCK_LINK, handle_a, handle_b, 0); }
+static inline int poll(struct pollfd *fds, int nfds, int timeout) { return _syscall(SYS_POLL, (int)fds, nfds, timeout); }
+/* Phase 18.3: like poll(), but covers every fd role (console, pipe, either
+ * socket type) and honors `timeout_ms` as a real bound: negative waits
+ * forever, 0 never blocks, >0 is milliseconds. */
+static inline int wait_events(struct pollfd *fds, int nfds, int timeout_ms) { return _syscall(SYS_WAIT_EVENTS, (int)fds, nfds, timeout_ms); }
+static inline int getuid(void)                           { return _syscall(SYS_GETUID, 0, 0, 0); }
+static inline int setuid(int uid)                        { return _syscall(SYS_SETUID, uid, 0, 0); }
+static inline int uid_of(int pid)                        { return _syscall(SYS_UIDOF, pid, 0, 0); }
+/* Map the framebuffer into this process; fills info[0..2] = {w,h,pitch}. */
+static inline void *fb_map(unsigned *info)               { return (void *)_syscall(SYS_FBMAP, (int)info, 0, 0); }
+static inline int   fb_active(void)                      { return _syscall(SYS_FBACTIVE, 0, 0, 0); }
+/* Change the display resolution at runtime (root/window server; Bochs-VBE path). */
+static inline int   fb_set_mode(int w, int h)           { return _syscall(SYS_FBMODE, w, h, 0); }
+/* Shared-memory surfaces: create/grant/destroy (server), map/unmap (server+client).
+ * `flags` may be SHM_PUBLIC (anyone may map, e.g. the clipboard). shm_grant lets a
+ * creator authorize one client pid to map a private surface. */
+static inline int   shm_create(int size, int flags)     { return _syscall(SYS_SHMGET, size, flags, 0); }
+static inline void *shm_map(int id)                     { return (void *)_syscall(SYS_SHMMAP, id, 0, 0); }
+static inline int   shm_unmap(int id)                   { return _syscall(SYS_SHMUNMAP, id, 0, 0); }
+static inline int   shm_grant(int id, int pid)          { return _syscall(SYS_SHMGRANT, id, pid, 0); }
+static inline int   shm_destroy(int id)                 { return _syscall(SYS_SHMDEL, id, 0, 0); }
+/* Block for one pointer event; fills info[0..2] = {dx, dy, buttons}. */
+static inline int   mouse_read(int *info)                { return _syscall(SYS_MOUSE, (int)info, 0, 0); }
+/* Read directory `path` entry `index` into *out: 1 = filled, 0 = past end, -1 err. */
+static inline int   readdir(const char *path, int index, struct dirent *out) { return _syscall(SYS_READDIR, (int)path, index, (int)out); }
+/* Power off the machine (root only; no return on success). */
+static inline int   halt(void)                          { return _syscall(SYS_HALT, 0, 0, 0); }
+/* Fill *out with RAM/process/uptime stats. Returns 0/-1. */
+static inline int   sysinfo(struct sysinfo *out)        { return _syscall(SYS_SYSINFO, (int)out, 0, 0); }
+/* Fill *out with network interface counters (up/mac/rx/tx/drops). Returns 0/-1. */
+static inline int   netstat(struct net_stats *out)      { return _syscall(SYS_NETSTAT, (int)out, 0, 0); }
+/* Fill *out with TCP counters (connects/established/resets/fins/drops). 0/-1. */
+static inline int   tcpstat(struct tcp_stats *out)      { return _syscall(SYS_TCPSTAT, (int)out, 0, 0); }
+/* Fill *out with Phase 18.5.2 kernel profiling counters (scheduler/TCP/FAT/memcpy). 0/-1. */
+static inline int   profstat(struct kernel_prof *out)   { return _syscall(SYS_PROFSTAT, (int)out, 0, 0); }
+static inline int   debug_kstack_overflow(void)         { return _syscall(SYS_DEBUG_KSTACK_OVERFLOW, 0, 0, 0); }
+static inline int   debug_stack_smash(void)             { return _syscall(SYS_DEBUG_STACK_SMASH, 0, 0, 0); }
+/* AF_INET stream sockets over the TCP stack. socket -> connect -> send/recv
+ * (= write/read) -> close. inet_connect resolves the host (DNS) and opens the
+ * connection; returns 0, -2 (DNS), -3 (connect). */
+static inline int   inet_socket(void)                     { return _syscall(SYS_SOCKET, AF_INET, SOCK_STREAM, 0); }
+static inline int   inet_connect(int fd, const char *host, int port) { return _syscall(SYS_INET_CONNECT, fd, (int)host, port); }
+/* Block this thread for ~ms milliseconds (10 ms granularity; the PIT is 100 Hz). */
+static inline int   msleep(int ms)                      { return _syscall(SYS_SLEEP, ms, 0, 0); }
+/* High-resolution monotonic clock: microseconds since boot (low 32 bits, wraps
+ * ~every 71 min — fine for frame/compose/blit deltas via unsigned subtraction). */
+static inline unsigned perf_us(void)                    { return (unsigned)_syscall(SYS_PERFUS, 0, 0, 0); }
+/* UI scale (percent, 100..200). ui_scale() reads the current value so an app can
+ * lay out its content to match the scaled chrome; ui_scale_set() publishes it and
+ * works only from root (the window server). */
+static inline int   ui_scale(void)                      { return _syscall(SYS_UISCALE, 0, 0, 0); }
+static inline int   ui_scale_set(int pct)               { return _syscall(SYS_UISCALE, pct, 0, 0); }
+
+/* send/recv are just write/read on a connected socket fd. */
+static inline int send(int fd, const void *b, int n)     { return write(fd, b, n); }
+static inline int recv(int fd, void *b, int n)           { return read(fd, b, n); }
+
+/* netd-brokered connection setup (user/libc/net.c). */
+int bind(int fd, int port);
+int listen(int fd);
+int connect(int fd, int port);
+int accept(int port);
+
+/* ---- string.c ---- */
+size_t strlen(const char *s);
+int    strcmp(const char *a, const char *b);
+int    strncmp(const char *a, const char *b, size_t n);
+char  *strcpy(char *dst, const char *src);
+void  *memcpy(void *dst, const void *src, size_t n);
+void  *memset(void *dst, int c, size_t n);
+void  *memmove(void *dst, const void *src, size_t n);
+
+/* ---- stdio.c (printf.c) ---- */
+int    printf(const char *fmt, ...);
+int    fprintf(int fd, const char *fmt, ...);
+int    puts(const char *s);
+int    putchar(int c);
+
+/* ---- malloc.c ---- */
+void  *malloc(size_t size);
+void   free(void *ptr);

@@ -1,0 +1,31 @@
+01  AuroraOS - a from-scratch 32-bit operating system.
+02  This file is shown by the Aurora Viewer (Phase 9.8).
+03
+04  The Viewer reads a file through the VFS with plain
+05  open/read/close syscalls - the same path the shell
+06  and the Finder use, with no special privileges.
+07
+08  What works so far:
+09    - Multiboot kernel, GDT/IDT, paging, heap
+10    - Preemptive scheduler and ring-3 processes
+11    - fork / exec / wait, pipes and message IPC
+12    - VFS with tmpfs and read/write FAT32
+13    - ELF loader and an interactive shell
+14    - Loopback sockets brokered by netd
+15    - A uid + rwx permission model
+16
+17  The desktop layer:
+18    - Linear framebuffer and a 2D library
+19    - An 8x16 bitmap font
+20    - A userspace window server / compositor
+21    - Damage-driven repaint (no full redraws)
+22    - PS/2 mouse, cursor and click-to-focus
+23    - Window dragging and a close button
+24    - A Dock running as its own process
+25    - The Finder browsing the filesystem
+26    - This Viewer rendering text files
+27
+28  Scroll with the arrow keys, PgUp/PgDn, or j/k.
+29  Press the red button in the title bar to close.
+30
+31  -- End of about.txt --

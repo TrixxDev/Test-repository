@@ -1,0 +1,46 @@
+# Build artifacts
+*.o
+*.d
+*.elf
+*.bin
+*.iso
+*.img
+
+# Generated sources
+kernel/embedded_user.c
+
+# GRUB ISO staging
+isodir/
+
+# Local previews / screenshots
+.preview_*.png
+*.ppm
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Debug and log files
+*.log
+*.gdb
+qemu_*.log
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup files
+*.bak
+*.backup
+
+# Throwaway TLS test private keys (local s_server only; never commit a key)
+test/tls/key.pem
+test/tls/ec_key.pem
+# Host-test-only ECDSA key (cert DER + private scalar are embedded in tools/tls_test.c)
+test/ec_test_key.pem
