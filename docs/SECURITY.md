@@ -4032,8 +4032,15 @@ distinct); full host suite (all 24 targets: crypto/tls/tls-trace/crc32/
 inflate/gzip/h2/h2-san/h2-fuzz-san/x509/rsa/p256/p384/ecdsa/ecdsa384/url/
 cookiejar/base64/ca-roots/dns-cache/dhcp/rxring/tcp-reassembly/tcp-window)
 ALL PASS; QEMU regression under real scheduler load — prof_qemu,
-tcp_sendwin_qemu, keepalive_qemu, securehttps_qemu, h2_reuse_qemu,
-h2_large_qemu (1/5/20 MB transfers, thousands of context switches with
-the per-thread guard swap active) — ALL PASS. The per-thread swap
-survived every fork/exec/block/IRQ-preemption path in the suite with
-zero false positives.
+tcp_sendwin_qemu, keepalive_qemu, securehttps_qemu, h2_reuse_qemu, and
+h2_large_qemu's 1 MB scenario (2 fetches over one TLS1.3/h2 connection,
+≥3 connection-level flow-control cycles, a 40-minute guest run — all 18
+checks PASS) — no failures anywhere. Scope note, stated honestly:
+h2_large's 5/20 MB scenarios were NOT re-run for this step. That test
+predates the 18.0 serial command channel and sleeps its full fixed
+budget per scenario (2400/4800/19000 s — sized for pre-18.5 transfer
+speeds, ~7.3 hours total even though the transfers themselves now finish
+in the first minutes); modernizing it to the serial harness with an
+early exit is logged in NEXT_STEPS. The per-thread guard swap survived
+every fork/exec/block/IRQ-preemption path exercised, tens of thousands
+of context switches, with zero false positives.

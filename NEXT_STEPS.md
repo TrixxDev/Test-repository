@@ -245,6 +245,16 @@ protocol" -- it's raising the quality of the whole platform. Priority order
 - [ ] **19.5 — Developer tools.** `perf top`/`record`/`stat` (the counters
   already exist, from 18.5.2/18.5.3/this phase); a minimal debugger
   (`ps`/`attach`/`bt`/`regs`/`memory`); `trace` (`open`/`tcp`/`sched`, ...).
+  - [ ] Small test-infra debt found during 19.2: `tools/h2_large_qemu.py`
+    predates the 18.0 serial command channel — it types via QEMU-monitor
+    sendkeys and then `time.sleep()`s its FULL per-scenario budget
+    (2400/4800/19000 s ≈ 7.3 h total), budgets sized for pre-18.5
+    transfer speeds even though the transfers now finish in the first
+    minutes (observed: the 1 MB scenario passes all 18 checks, then
+    idles out the rest of its 40 min). Port it to
+    tools/qemu_serial.py with an early exit on the final "200 OK" line,
+    and give its start_server() a longer bind-retry window (the 4 s one
+    loses a race against the previous scenario's teardown).
 - [ ] **19.6 — FS maturity.** Long file names; `mmap()`; a page cache (once
   in, `cat`/the browser/the editor all get faster for free).
 - [ ] **19.7 — Network infrastructure** (only after the above, and no more
