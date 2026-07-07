@@ -351,12 +351,19 @@ static void do_switch(thread_t *prev, thread_t *next)
     /* Phase 19.2: kernel-stack high-water mark. We are still on prev's
      * stack right here, so live ESP (not the stale prev->esp, which
      * switch_task() only updates as it leaves) measures prev's true
-     * current depth, scheduler frames included. */
-    uint32_t esp_now;
-    __asm__ volatile("mov %%esp, %0" : "=r"(esp_now));
-    uint32_t used = prev->kstack_top - esp_now;
-    if (used > g_kprof.kstack_max_used)
-        g_kprof.kstack_max_used = used;
+     * current depth, scheduler frames included. Guard-paged threads only:
+     * the boot thread EXECUTES on boot.S's own 16 KiB stack while its
+     * kstack_top points at main_kstack[] (a different address entirely,
+     * kept for the TSS.esp0 slot), so kstack_top - esp for it is
+     * meaningless and underflows -- caught empirically the very first
+     * time this counter was read back (~4.29e9 "bytes used"). */
+    if (prev->kstack) {
+        uint32_t esp_now;
+        __asm__ volatile("mov %%esp, %0" : "=r"(esp_now));
+        uint32_t used = prev->kstack_top - esp_now;
+        if (used > g_kprof.kstack_max_used)
+            g_kprof.kstack_max_used = used;
+    }
     /* Phase 19.2: make the compiler canary per-thread -- every frame next
      * has ever pushed stored ITS value of the guard, and no frame of next's
      * runs checks except while next is executing, so swapping here keeps

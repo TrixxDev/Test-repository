@@ -4006,6 +4006,26 @@ across both.
 | write reaching the stack's last word, not crossing | stack-end canary (19.2), at switch/syscall-exit/free |
 | creeping depth growth (no corruption yet)          | kstack_max_used watermark (19.2), observable in profstat |
 
+**The watermark's first read-back found a real bug in itself** — worth
+recording as method, not just result. The first `profstat` after the
+feature landed reported `kstack_max_used=4293662012` (~4.29 GB "used" of
+an 8 KiB stack): `kstack_top - esp` had underflowed, because the BOOT
+thread executes on boot.S's own 16 KiB `stack_top` stack while its
+`thread_t.kstack_top` points at the separate (and for execution purposes
+unused) `main_kstack[]` array — an address mismatch that had sat harmless
+in the code since the scheduler was written, exposed the moment something
+actually did arithmetic with it. Fix: the watermark samples guard-paged
+threads only (`prev->kstack != NULL`), same singleton boot-thread carve-
+out as the guard page and the end canary. Measured after the fix: an
+idle boot peaks at 156 bytes at switch points; a fork/exec + FAT
+read/write workload (`cat` + `save` + `profstat`) peaks at 280 bytes.
+Blocking paths, in other words, sit nowhere near the 8 KiB limit — the
+historical overflow (fs/fat32.c) came from a deep NON-blocking chain,
+which is exactly the kind this counter's lower-bound caveat says it
+cannot see, so the small number is reassuring about steady-state depth
+while proving nothing about worst-case call chains. Both layers of
+canaries exist precisely for what the counter can't see.
+
 Verified: tools/canary_qemu.py ALL PASS (both phases, correct halt text);
 tools/guard_page_qemu.py still ALL PASS (the two debug halts stay
 distinct); full host suite (all 24 targets: crypto/tls/tls-trace/crc32/
